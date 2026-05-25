@@ -34,7 +34,8 @@ import {
   maskApiKey,
   modelTaskTypes,
   providerTypes,
-  qualityLevels
+  qualityLevels,
+  requestFormatTypes
 } from "./model-config.js";
 import {
   exportAnalysisMarkdown,
@@ -718,6 +719,7 @@ function saveProvider(providerId) {
             ...provider,
             name: readProviderField("name"),
             providerType: readProviderField("providerType"),
+            requestFormat: readProviderField("requestFormat"),
             baseUrl: readProviderField("baseUrl"),
             apiKey: readProviderField("apiKey") || provider.apiKey,
             enabled: document.querySelector('[data-provider-field="enabled"]')?.checked || false,
@@ -743,7 +745,7 @@ async function testProvider(providerId) {
       const response = await fetch("/api/test-provider", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ provider, modelName: model?.modelName })
+        body: JSON.stringify({ provider, model })
       });
       result = await response.json();
     } catch (error) {
@@ -755,6 +757,7 @@ async function testProvider(providerId) {
       providerId,
       success: Boolean(result.ok),
       message: result.message || result.error || "测试完成。",
+      requestFormat: result.requestFormat || provider.requestFormat || "auto",
       createdAt: new Date().toISOString()
     };
     return state;
@@ -1449,11 +1452,11 @@ function renderProviderSettings(config) {
     <section class="settings-split">
       <div class="panel">
         <div class="panel-title"><h2>API Provider</h2><button class="small-button" data-action="add-provider">新增</button></div>
-        ${config.providers.map((provider) => `<button class="list-row ${selected?.id === provider.id ? "active" : ""}" data-action="select-provider" data-id="${provider.id}"><strong>${escapeHtml(provider.name)}</strong><span>${provider.providerType}｜${provider.enabled ? "启用" : "停用"}｜Key ${maskApiKey(provider.apiKey)}</span></button>`).join("")}
+        ${config.providers.map((provider) => `<button class="list-row ${selected?.id === provider.id ? "active" : ""}" data-action="select-provider" data-id="${provider.id}"><strong>${escapeHtml(provider.name)}</strong><span>${provider.providerType}｜${provider.requestFormat || "auto"}｜${provider.enabled ? "启用" : "停用"}｜Key ${maskApiKey(provider.apiKey)}</span></button>`).join("")}
       </div>
       <div class="panel">
         ${selected ? renderProviderForm(selected) : emptyState("暂无 Provider", "新增 Provider 后可配置 Base URL 与 API Key。")}
-        ${config.lastTestResult ? `<div class="suggestion-box"><h3>最近测试</h3>${keyValueGrid([["结果", config.lastTestResult.success ? "成功" : "失败"], ["说明", config.lastTestResult.message], ["时间", formatDate(config.lastTestResult.createdAt)]])}</div>` : ""}
+        ${config.lastTestResult ? `<div class="suggestion-box"><h3>最近测试</h3>${keyValueGrid([["结果", config.lastTestResult.success ? "成功" : "失败"], ["请求格式", config.lastTestResult.requestFormat || "auto"], ["说明", config.lastTestResult.message], ["时间", formatDate(config.lastTestResult.createdAt)]])}</div>` : ""}
       </div>
     </section>
   `;
@@ -1467,6 +1470,9 @@ function renderProviderForm(provider) {
       <label>Provider 类型
         <select data-provider-field="providerType">${providerTypes.map((type) => `<option value="${type}" ${provider.providerType === type ? "selected" : ""}>${type}</option>`).join("")}</select>
       </label>
+      <label>请求格式
+        <select data-provider-field="requestFormat">${requestFormatTypes.map((type) => `<option value="${type}" ${(provider.requestFormat || "auto") === type ? "selected" : ""}>${type}</option>`).join("")}</select>
+      </label>
       <label>Base URL<input data-provider-field="baseUrl" value="${escapeAttr(provider.baseUrl)}" /></label>
       <label>API Key<input data-provider-field="apiKey" type="password" placeholder="${escapeAttr(maskApiKey(provider.apiKey))}" /></label>
       <label>是否启用<input data-provider-field="enabled" type="checkbox" ${provider.enabled ? "checked" : ""} /></label>
@@ -1475,6 +1481,7 @@ function renderProviderForm(provider) {
       <label>限流备注<input data-provider-field="rateLimit" value="${escapeAttr(provider.rateLimit || "")}" /></label>
     </div>
     <label class="block-label">备注<textarea data-provider-field="notes" class="medium-textarea">${escapeHtml(provider.notes || "")}</textarea></label>
+    <p class="muted">请求格式选 auto 时，Gemini 模型名会自动尝试 Gemini native generateContent；如果你的网关明确兼容 /chat/completions，请选 openai_chat。</p>
     <div class="panel-actions">
       <button class="primary-button" data-action="save-provider" data-id="${provider.id}">保存 Provider</button>
       <button class="secondary-button" data-action="test-provider" data-id="${provider.id}">测试连接</button>
@@ -1569,7 +1576,7 @@ function renderModelLogs(state) {
       <h2>模型调用日志</h2>
       <div class="log-table">
         ${(state.modelLogs || [])
-          .map((log) => `<div class="${log.warnings?.length ? "has-warning" : ""}"><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.warnings?.join("；") || log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`)
+          .map((log) => `<div class="${log.warnings?.length ? "has-warning" : ""}"><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${escapeHtml(log.requestFormat || log.mode || "未知格式")}</span><span>${log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.warnings?.join("；") || log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`)
           .join("") || "<p class='muted'>暂无调用记录。</p>"}
       </div>
     </section>

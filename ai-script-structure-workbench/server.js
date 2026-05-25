@@ -2,6 +2,8 @@ import http from "node:http";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { callGemini, shouldUseGeminiNative } from "./src/provider-adapters/gemini.js";
+import { callOpenAICompatible } from "./src/provider-adapters/openai-compatible.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = __dirname;
@@ -118,7 +120,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/test-provider" && req.method === "POST") {
     const body = await readBody(req);
     const provider = body.provider || {};
-    const modelName = body.modelName || body.model?.modelName || "test";
+    const model = body.model || { modelName: body.modelName || "test", maxOutputTokens: 8, supportsJsonMode: false };
     if (provider.providerType === "local") {
       sendJson(res, 200, { ok: true, message: "本地 Demo Provider 可用。", mode: "demo" });
       return true;
@@ -127,36 +129,29 @@ async function handleApi(req, res, url) {
       sendJson(res, 400, { ok: false, error: "缺少 Base URL 或 API Key。" });
       return true;
     }
-    const endpoint = buildChatCompletionsUrl(provider.baseUrl);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Number(provider.timeoutMs) || 30000);
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${provider.apiKey}`,
-          ...(provider.defaultHeaders || {})
-        },
-        body: JSON.stringify({
-          model: modelName,
-          messages: [{ role: "user", content: "ping" }],
-          max_tokens: 8,
-          temperature: 0
-        }),
-        signal: controller.signal
-      });
-      const text = await response.text();
-      sendJson(res, response.ok ? 200 : 502, {
-        ok: response.ok,
-        status: response.status,
-        message: response.ok ? "真实 API 连接测试通过。" : "真实 API 返回错误。",
-        preview: text.slice(0, 300)
+      const adapterResult = shouldUseGeminiNative({ provider, model })
+        ? await callGemini({
+            provider,
+            model,
+            messages: [{ role: "user", content: "ping" }],
+            options: { maxOutputTokens: 8, temperature: 0, timeoutMs: Number(provider.timeoutMs) || 30000 }
+          })
+        : await callOpenAICompatible({
+            provider,
+            model,
+            messages: [{ role: "user", content: "ping" }],
+            options: { maxOutputTokens: 8, temperature: 0, timeoutMs: Number(provider.timeoutMs) || 30000 }
+          });
+      sendJson(res, 200, {
+        ok: true,
+        status: 200,
+        message: "真实 API 连接测试通过。",
+        requestFormat: shouldUseGeminiNative({ provider, model }) ? "gemini_native" : "openai_chat",
+        preview: adapterResult.outputText.slice(0, 300)
       });
     } catch (error) {
       sendJson(res, 502, { ok: false, error: error.message });
-    } finally {
-      clearTimeout(timer);
     }
     return true;
   }
@@ -177,12 +172,6 @@ async function handleApi(req, res, url) {
   }
 
   return false;
-}
-
-function buildChatCompletionsUrl(baseUrl = "") {
-  const clean = String(baseUrl).trim().replace(/\/+$/, "");
-  if (/\/chat\/completions$/i.test(clean)) return clean;
-  return `${clean}/chat/completions`;
 }
 
 function redactSecrets(value) {

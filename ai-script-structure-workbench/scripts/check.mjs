@@ -30,6 +30,7 @@ import { sanitizeStateForSnapshot } from "../src/redaction.js";
 import { schemaValidationMessage, validateTaskOutput } from "../src/schema-validator.js";
 import { extractDocxTextFromArrayBuffer, parseScriptFile } from "../src/file-parser.js";
 import { hasUsefulRuntimeSettings, mergeRuntimeApiConfig } from "../src/storage.js";
+import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, shouldUseGeminiNative } from "../src/provider-adapters/gemini.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -131,8 +132,28 @@ const providerDraft = createProviderDraft();
 const modelDraft = createModelDraft(providerDraft.id);
 const routeDraft = createRouteDraft(modelDraft.id);
 assert.ok(providerDraft.providerType);
+assert.equal(providerDraft.requestFormat, "auto");
 assert.ok(modelDraft.modelType.length);
 assert.ok(routeDraft.taskType);
+
+const geminiProvider = { ...providerDraft, providerType: "openai_compatible", requestFormat: "auto", baseUrl: "https://generativelanguage.googleapis.com/v1beta" };
+const geminiModel = { ...modelDraft, modelName: "gemini-3.1-flash-lite-preview", displayName: "Gemini 3.1 Flash Lite", supportsJsonMode: true };
+assert.equal(shouldUseGeminiNative({ provider: geminiProvider, model: geminiModel }), true);
+assert.equal(shouldUseGeminiNative({ provider: { ...geminiProvider, requestFormat: "openai_chat" }, model: geminiModel }), false);
+assert.equal(
+  buildGeminiGenerateContentUrl("https://generativelanguage.googleapis.com/v1beta", "gemini-test", "key-123"),
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent?key=key-123"
+);
+const geminiBody = messagesToGeminiRequestBody(
+  [
+    { role: "system", content: "系统原则" },
+    { role: "user", content: "请返回 JSON" }
+  ],
+  { jsonModeRequired: true, maxOutputTokens: 256, temperature: 0.1 }
+);
+assert.equal(geminiBody.systemInstruction.parts[0].text, "系统原则");
+assert.equal(geminiBody.contents[0].parts[0].text, "请返回 JSON");
+assert.equal(geminiBody.generationConfig.responseMimeType, "application/json");
 
 const demoSelection = selectModelRoute({
   state,
@@ -174,6 +195,7 @@ const modelResult = await callModel({
 });
 assert.equal(modelResult.success, true);
 assert.equal(modelResult.mode, "demo");
+assert.equal(modelResult.requestFormat, "demo");
 assert.ok(modelResult.providerId);
 assert.ok(modelResult.modelId);
 assert.ok(Array.isArray(modelResult.matchedSkillIds));
@@ -230,6 +252,7 @@ const failingResult = await callModel({
 });
 assert.equal(failingResult.success, false);
 assert.equal(failingResult.mode, "api");
+assert.equal(failingResult.requestFormat, "gemini_native");
 assert.equal(failingResult.usedFallback, true);
 assert.ok(failingResult.error.includes("主模型失败"));
 assert.ok(failingResult.error.includes("备用模型失败"));

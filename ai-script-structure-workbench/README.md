@@ -105,6 +105,7 @@ npm run check
 mode            应为 api
 provider        应为你配置的真实 Provider
 model           应为真实模型，而不是 DemoRuleEngine-v1
+requestFormat   应匹配端点：openai_chat 或 gemini_native
 usedFallback    如果为 fallback，说明主模型失败后切到了备用模型
 warning/error   不应出现“真实 API Mode ... Demo 模型”
 ```
@@ -141,12 +142,31 @@ warning/error   不应出现“真实 API Mode ... Demo 模型”
 
 ```text
 Provider 类型：openai_compatible
+请求格式：auto 或 openai_chat
 Base URL：https://your-provider.example/v1
 API Key：本地填写，不要提交
 是否启用：勾选
 ```
 
 Base URL 既可以填到 `/v1`，也可以直接填完整 `/chat/completions`；适配器会避免重复拼接。
+
+如果你使用的是 Gemini native 接口，或看到类似下面的错误：
+
+```text
+Invalid JSON payload received. Unknown name "messages": Cannot find field.
+```
+
+说明当前端点不接受 OpenAI chat/completions 的 `messages` 请求体。请这样配置：
+
+```text
+Provider 类型：gemini
+请求格式：gemini_native
+Base URL：https://generativelanguage.googleapis.com/v1beta
+API Key：本地填写
+真实模型名：gemini-3.1-flash-lite-preview 或你的服务商模型名
+```
+
+如果第三方网关虽然模型名包含 `gemini`，但它明确兼容 `/chat/completions`，则把请求格式改为 `openai_chat`。
 
 然后进入：
 

@@ -28,6 +28,8 @@ export const modelTypes = [
 
 export const qualityLevels = ["fast", "balanced", "high_quality", "best"];
 
+export const requestFormatTypes = ["auto", "openai_chat", "gemini_native"];
+
 export const featureAreas = [
   "剧本分析中心",
   "模式资产中心",
@@ -80,6 +82,7 @@ export function createSeedApiConfig() {
         id: "provider-demo-local",
         name: "Demo Rule Engine",
         providerType: "local",
+        requestFormat: "auto",
         baseUrl: "",
         apiKey: "",
         enabled: true,
@@ -95,6 +98,7 @@ export function createSeedApiConfig() {
         id: "provider-openai-compatible-template",
         name: "OpenAI-compatible API 模板",
         providerType: "openai_compatible",
+        requestFormat: "auto",
         baseUrl: "https://api.example.com/v1",
         apiKey: "",
         enabled: false,
@@ -260,6 +264,7 @@ export function normalizeProvider(provider = {}) {
     id: provider.id || createId("provider"),
     name: provider.name || "未命名 Provider",
     providerType: providerTypes.includes(provider.providerType) ? provider.providerType : "openai_compatible",
+    requestFormat: requestFormatTypes.includes(provider.requestFormat) ? provider.requestFormat : "auto",
     baseUrl: provider.baseUrl || "",
     apiKey: provider.apiKey || "",
     enabled: Boolean(provider.enabled),
@@ -328,6 +333,7 @@ export function createProviderDraft() {
     id: createId("provider"),
     name: "新的 OpenAI-compatible Provider",
     providerType: "openai_compatible",
+    requestFormat: "auto",
     baseUrl: "https://api.example.com/v1",
     enabled: false,
     priority: 50,

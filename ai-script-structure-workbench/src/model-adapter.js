@@ -20,6 +20,7 @@ import { selectFallbackModel, selectModelRoute } from "./model-router.js";
 import { buildPrompt } from "./prompt-builder.js";
 import { parseJsonWithRepair, extractObjectBody } from "./json-repair.js";
 import { callOpenAICompatible } from "./provider-adapters/openai-compatible.js";
+import { callGemini, shouldUseGeminiNative } from "./provider-adapters/gemini.js";
 import { schemaValidationMessage, validateTaskOutput } from "./schema-validator.js";
 
 export async function callModel({
@@ -148,10 +149,12 @@ export async function callModel({
   }
 
   const latencyMs = Math.round(performance.now() - startedAt);
+  const requestFormat = mode === "api" ? (shouldUseGeminiNative({ provider, model }) ? "gemini_native" : "openai_chat") : "demo";
   const result = {
     success: !error,
     mode,
     requestedMode,
+    requestFormat,
     taskType,
     providerId: provider?.id || null,
     modelId: model?.id || null,
@@ -176,6 +179,7 @@ export async function callModel({
     requestedMode,
     providerId: result.providerId,
     providerName: provider?.name || "未选择",
+    requestFormat,
     modelId: result.modelId,
     modelName: model?.displayName || model?.modelName || "未选择",
     skillVersion: matchedSkills.map((skill) => `${skill.name} ${skill.version}`).join("；") || "未匹配",
@@ -313,10 +317,13 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
 }
 
 async function callProvider({ provider, model, messages, options }) {
+  if (shouldUseGeminiNative({ provider, model })) {
+    return callGemini({ provider, model, messages, options });
+  }
   if (["openai_compatible", "openai", "openrouter", "deepseek", "qwen", "zhipu", "moonshot", "doubao", "custom"].includes(provider.providerType)) {
     return callOpenAICompatible({ provider, model, messages, options });
   }
-  throw new Error(`Provider 类型 ${provider.providerType} 已预留，V1 仅实现 OpenAI-compatible 调用。`);
+  throw new Error(`Provider 类型 ${provider.providerType} 已预留，V1 已实现 OpenAI-compatible 与 Gemini native 调用。`);
 }
 
 function featureAreaForTask(taskType) {

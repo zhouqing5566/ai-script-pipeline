@@ -240,6 +240,7 @@ ApiProviderConfig = {
   id,
   name,
   providerType,
+  requestFormat,
   baseUrl,
   apiKey,
   enabled,
@@ -253,19 +254,28 @@ ApiProviderConfig = {
 }
 ```
 
+`requestFormat` 支持：
+
+```text
+auto / openai_chat / gemini_native
+```
+
 预留 Provider 类型：
 
 ```text
 openai / anthropic / gemini / deepseek / qwen / zhipu / moonshot / doubao / openrouter / openai_compatible / local / custom
 ```
 
-V1.1 先实现 OpenAI-compatible：
+V1.1 已实现 OpenAI-compatible 和 Gemini native：
 
 ```text
 POST {baseUrl}/chat/completions
+POST {baseUrl}/models/{modelName}:generateContent
 ```
 
 如果 `baseUrl` 已包含 `/chat/completions`，不会重复拼接。
+
+当 Provider 类型为 `gemini`，或 `requestFormat = gemini_native` 时，系统使用 Gemini `contents / generationConfig` 请求体。`requestFormat = auto` 时，若模型名包含 Gemini 且 Base URL 不是 `/chat/completions`，会自动尝试 Gemini native，避免把 `messages / max_tokens` 发给不兼容的 generateContent 端点。
 
 ## ModelConfig
 
