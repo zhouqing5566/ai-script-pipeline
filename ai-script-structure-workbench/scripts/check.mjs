@@ -29,6 +29,7 @@ import { callModel } from "../src/model-adapter.js";
 import { sanitizeStateForSnapshot } from "../src/redaction.js";
 import { schemaValidationMessage, validateTaskOutput } from "../src/schema-validator.js";
 import { extractDocxTextFromArrayBuffer, parseScriptFile } from "../src/file-parser.js";
+import { hasUsefulRuntimeSettings, mergeRuntimeApiConfig } from "../src/storage.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -248,6 +249,26 @@ assert.ok(exportedProject.includes("[已脱敏]"));
 const snapshot = JSON.stringify(sanitizeStateForSnapshot(secretState));
 assert.ok(!snapshot.includes("sk-real-secret"));
 assert.ok(snapshot.includes("[已脱敏]"));
+
+const localApiConfig = structuredClone(state.apiConfig);
+localApiConfig.providers[1].apiKey = "sk-local-browser";
+const runtimeApiConfig = structuredClone(state.apiConfig);
+runtimeApiConfig.mode = "api";
+runtimeApiConfig.providers[1] = {
+  ...runtimeApiConfig.providers[1],
+  enabled: true,
+  baseUrl: "https://api.example.com/v1",
+  apiKey: "sk-runtime-settings"
+};
+runtimeApiConfig.models[1] = { ...runtimeApiConfig.models[1], enabled: true };
+const mergedRuntime = mergeRuntimeApiConfig(localApiConfig, runtimeApiConfig);
+assert.equal(mergedRuntime.mode, "api");
+assert.equal(mergedRuntime.providers[1].apiKey, "sk-runtime-settings");
+const runtimeWithoutKey = structuredClone(runtimeApiConfig);
+runtimeWithoutKey.providers[1].apiKey = "";
+const mergedRuntimeWithoutKey = mergeRuntimeApiConfig(localApiConfig, runtimeWithoutKey);
+assert.equal(mergedRuntimeWithoutKey.providers[1].apiKey, "sk-local-browser");
+assert.equal(hasUsefulRuntimeSettings(createSeedState().apiConfig), false);
 
 const docxBuffer = createStoredZip(
   "word/document.xml",

@@ -15,14 +15,18 @@ export function loadLocalState() {
   }
 }
 
-export function saveLocalState(state) {
+export function saveLocalState(state, options = {}) {
   localStorage.setItem(storageKey, JSON.stringify(state));
   void persistSnapshot(state);
-  if (state.apiConfig) void persistRuntimeSettings(state.apiConfig);
+  if (state.apiConfig && options.persistSettings !== false) void persistRuntimeSettings(state.apiConfig);
 }
 
-export function resetLocalState() {
+export function resetLocalState(preservedApiConfig = null) {
   const next = createSeedState();
+  if (preservedApiConfig) {
+    next.apiConfig = normalizeApiConfig(preservedApiConfig);
+    next.mode = next.apiConfig.mode;
+  }
   saveLocalState(next);
   return next;
 }
@@ -75,6 +79,40 @@ export async function persistRuntimeSettings(apiConfig) {
   } catch {
     // Settings remain in localStorage when the local service is unavailable.
   }
+}
+
+export async function loadRuntimeSettings() {
+  try {
+    const response = await fetch("/api/settings", { cache: "no-store" });
+    if (!response.ok) return null;
+    const config = await response.json();
+    return config ? normalizeApiConfig(config) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function mergeRuntimeApiConfig(localConfig, runtimeConfig) {
+  if (!runtimeConfig || !hasUsefulRuntimeSettings(runtimeConfig)) return normalizeApiConfig(localConfig || {});
+  const local = normalizeApiConfig(localConfig || {});
+  const runtime = normalizeApiConfig(runtimeConfig);
+  const localProviders = new Map((local.providers || []).map((provider) => [provider.id, provider]));
+  return {
+    ...runtime,
+    providers: (runtime.providers || []).map((provider) => ({
+      ...provider,
+      apiKey: provider.apiKey || localProviders.get(provider.id)?.apiKey || ""
+    }))
+  };
+}
+
+export function hasUsefulRuntimeSettings(apiConfig) {
+  const config = normalizeApiConfig(apiConfig || {});
+  return (
+    config.mode === "api" ||
+    (config.providers || []).some((provider) => provider.providerType !== "local" && (provider.enabled || provider.apiKey)) ||
+    (config.models || []).some((model) => model.providerId !== "provider-demo-local" && model.enabled)
+  );
 }
 
 function mergeDefaults(value, defaults) {

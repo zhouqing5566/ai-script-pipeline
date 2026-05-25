@@ -2,7 +2,7 @@ import { createStore } from "./state.js";
 import { runModelTask } from "./model-adapter.js";
 import { repairEpisode } from "./repair.js";
 import { auditDraft } from "./audit.js";
-import { resetLocalState, writeExport } from "./storage.js";
+import { loadRuntimeSettings, mergeRuntimeApiConfig, resetLocalState, writeExport } from "./storage.js";
 import { parseScriptFile } from "./file-parser.js";
 import {
   navItems,
@@ -52,6 +52,7 @@ let toast = "";
 const store = createStore(() => render());
 
 render();
+void hydrateRuntimeSettings();
 
 root.addEventListener("click", (event) => {
   const target = event.target.closest("[data-action], [data-view]");
@@ -100,8 +101,8 @@ async function handleAction(target) {
   try {
     switch (action) {
       case "reset":
-        store.setState(resetLocalState(), "重置 Demo 数据", { version: false });
-        showToast("已重置为初始 Demo 数据");
+        store.setState(resetLocalState(store.getState().apiConfig), "重置 Demo 数据", { version: false });
+        showToast("已重置为初始 Demo 数据，API/模型配置已保留");
         break;
       case "analyze-script":
         await executeTask("analyzeScript", (state) => state.scriptInput, (state, output, log) => {
@@ -370,6 +371,20 @@ async function handleAction(target) {
     }
     showToast(error.message || "操作失败");
   }
+}
+
+async function hydrateRuntimeSettings() {
+  const runtimeConfig = await loadRuntimeSettings();
+  if (!runtimeConfig) return;
+  const current = store.getState();
+  const merged = mergeRuntimeApiConfig(current.apiConfig, runtimeConfig);
+  if (JSON.stringify(merged) === JSON.stringify(current.apiConfig)) return;
+  store.setState((state) => {
+    state.apiConfig = merged;
+    state.mode = merged.mode;
+    return state;
+  }, "恢复本地 API 与模型配置", { version: false });
+  showToast("已从本地服务恢复 API 与模型配置");
 }
 
 async function executeTask(taskType, inputFactory, applyOutput, summary, options = {}) {

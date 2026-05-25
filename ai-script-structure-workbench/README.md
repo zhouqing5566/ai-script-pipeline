@@ -214,6 +214,8 @@ Fallback 策略：补充人工说明
 - 不要把真实 API Key 写入 `seed-data.js`、README 示例或任何提交文件。
 - 前端输入框使用 password，不长期明文展示完整 API Key。
 - 本地保存仅用于本机运行，可能进入 `localStorage` 和 `data/settings/`。
+- 启动时会自动从 `data/settings/model-settings.json` 恢复有用的 API/模型配置，换端口后也能带回服务端保存的配置。
+- “重置 Demo 数据”只重置项目 Demo 状态，会保留 API Provider、模型和路由配置。
 - `data/projects/current-snapshot.json` 和完整项目导出会脱敏 `apiKey`，真实 Key 只保留在本机 localStorage / `data/settings/`。
 - `.gitignore` 已排除 `.env`、`config.local.json`、`data/settings/*.json`、`data/api-config*.json`、`data/model-config*.json`。
 
