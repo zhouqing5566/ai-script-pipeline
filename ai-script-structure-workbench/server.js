@@ -83,7 +83,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/snapshot" && req.method === "POST") {
     const body = await readBody(req);
     const filePath = path.join(rootDir, "data/projects/current-snapshot.json");
-    await fs.writeFile(filePath, JSON.stringify(body, null, 2), "utf8");
+    await fs.writeFile(filePath, JSON.stringify(redactSecrets(body), null, 2), "utf8");
     sendJson(res, 200, { ok: true, path: filePath });
     return true;
   }
@@ -183,6 +183,17 @@ function buildChatCompletionsUrl(baseUrl = "") {
   const clean = String(baseUrl).trim().replace(/\/+$/, "");
   if (/\/chat\/completions$/i.test(clean)) return clean;
   return `${clean}/chat/completions`;
+}
+
+function redactSecrets(value) {
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => {
+      if (key.toLowerCase() === "apikey") return [key, item ? "[已脱敏]" : ""];
+      return [key, redactSecrets(item)];
+    })
+  );
 }
 
 async function serveStatic(req, res, url) {

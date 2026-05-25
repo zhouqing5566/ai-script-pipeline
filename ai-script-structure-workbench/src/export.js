@@ -1,4 +1,5 @@
 import { labelForKey } from "./schemas.js";
+import { redactApiConfig, sanitizeForExport } from "./redaction.js";
 
 function line(value, fallback = "未填写") {
   if (Array.isArray(value)) return value.length ? value.join("、") : fallback;
@@ -16,16 +17,18 @@ function bulletList(items = []) {
 }
 
 export function exportProjectJson(state) {
+  const safeState = sanitizeForExport(state);
   return JSON.stringify(
     {
       exportedAt: new Date().toISOString(),
       product: "AI 剧本结构学习与细纲生产系统",
-      mode: state.mode,
-      currentProject: state.currentProject,
-      cases: state.cases,
-      assets: state.assets,
-      skills: state.skills,
-      modelLogs: state.modelLogs
+      mode: safeState.mode,
+      currentProject: safeState.currentProject,
+      cases: safeState.cases,
+      assets: safeState.assets,
+      skills: safeState.skills,
+      apiConfig: redactApiConfig(safeState.apiConfig),
+      modelLogs: safeState.modelLogs
     },
     null,
     2

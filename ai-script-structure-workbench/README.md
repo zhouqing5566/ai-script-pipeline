@@ -71,6 +71,10 @@ npm run check
 - callModel 返回统一 ModelCallResult
 - Demo Mode 仍然可用
 - .gitignore 排除本地 API Key 与模型配置
+- API Mode 误走 Demo 会在 UI / 日志 / ModelCallResult 中警告
+- 主模型失败、备用模型失败、JSON 修复失败都会返回完整结果并写日志
+- 完整项目导出和快照不会泄漏 API Key
+- 真实 API JSON 返回会按 taskType 做结构校验
 
 ## 模式说明
 
@@ -83,7 +87,46 @@ npm run check
 - 系统会通过 `model-router` 按项目覆盖、任务路由、Skill 模型偏好、功能区默认、全局默认模型选择模型。
 - 真实 API 调用失败时不会静默切回 Demo。
 - 只有路由中配置了可用备用真实模型时才会 fallback，并在调用日志中记录 `usedFallback`。
-- 如果没有可用真实模型，系统会明确返回 `mode: "demo"` 的 DemoRuleEngine 结果。
+- 如果某个任务实际选择了 DemoRuleEngine，系统会在 UI、调用日志和 `ModelCallResult.warnings` 中提示：当前为真实 API Mode，但该任务路由仍指向 Demo 模型。
+- 如果没有可用真实模型，系统会明确返回 `mode: "demo"` 的 DemoRuleEngine 结果，并附带 warning。
+
+## 确认某次任务是否使用了真实 API
+
+进入：
+
+```text
+系统设置 → 调用日志
+```
+
+检查最近一条任务日志：
+
+```text
+mode            应为 api
+provider        应为你配置的真实 Provider
+model           应为真实模型，而不是 DemoRuleEngine-v1
+usedFallback    如果为 fallback，说明主模型失败后切到了备用模型
+warning/error   不应出现“真实 API Mode ... Demo 模型”
+```
+
+也可以查看任务执行返回的 `ModelCallResult`：
+
+```js
+{
+  mode: "api",
+  providerId: "你的 Provider ID",
+  modelId: "你的模型 ID",
+  usedFallback: false,
+  warnings: []
+}
+```
+
+如果看到：
+
+```text
+当前为真实 API Mode，但该任务路由仍指向 Demo 模型。
+```
+
+说明这次任务没有走真实 API，需要到 `系统设置 → 路由配置` 把对应 `taskType` 的主模型改成真实模型。
 
 ## 配置 OpenAI-compatible API
 
@@ -170,6 +213,7 @@ Fallback 策略：补充人工说明
 - 不要把真实 API Key 写入 `seed-data.js`、README 示例或任何提交文件。
 - 前端输入框使用 password，不长期明文展示完整 API Key。
 - 本地保存仅用于本机运行，可能进入 `localStorage` 和 `data/settings/`。
+- `data/projects/current-snapshot.json` 和完整项目导出会脱敏 `apiKey`，真实 Key 只保留在本机 localStorage / `data/settings/`。
 - `.gitignore` 已排除 `.env`、`config.local.json`、`data/settings/*.json`、`data/api-config*.json`、`data/model-config*.json`。
 
 ## 目录结构

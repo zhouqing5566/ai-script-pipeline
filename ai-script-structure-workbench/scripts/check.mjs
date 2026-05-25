@@ -15,7 +15,7 @@ import {
 } from "../src/generators.js";
 import { auditOutline } from "../src/audit.js";
 import { repairEpisode } from "../src/repair.js";
-import { exportOutlineMarkdown } from "../src/export.js";
+import { exportOutlineMarkdown, exportProjectJson } from "../src/export.js";
 import {
   createNewSkill,
   duplicateSkill,
@@ -26,6 +26,8 @@ import {
 import { createModelDraft, createProviderDraft, createRouteDraft } from "../src/model-config.js";
 import { selectModelRoute } from "../src/model-router.js";
 import { callModel } from "../src/model-adapter.js";
+import { sanitizeStateForSnapshot } from "../src/redaction.js";
+import { schemaValidationMessage, validateTaskOutput } from "../src/schema-validator.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -177,6 +179,75 @@ assert.equal(modelResult.usedFallback, false);
 assert.equal(modelResult.error, null);
 assert.ok(modelResult.latencyMs >= 0);
 
+const apiDemoState = structuredClone(state);
+apiDemoState.apiConfig.mode = "api";
+apiDemoState.apiConfig.globalDefaultModelId = "model-demo-rule-engine";
+const apiDemoResult = await callModel({
+  taskType: "evaluateIdea",
+  featureArea: "创作决策中心",
+  inputMeta: { project: apiDemoState.currentProject },
+  state: apiDemoState
+});
+assert.equal(apiDemoResult.success, true);
+assert.equal(apiDemoResult.mode, "demo");
+assert.ok(apiDemoResult.warnings.some((warning) => warning.includes("真实 API Mode")));
+assert.ok(apiDemoResult.log.warnings.some((warning) => warning.includes("Demo 模型")));
+
+const failingApiState = structuredClone(apiState);
+failingApiState.apiConfig.providers = [
+  { id: "provider-fail-a", name: "Unsupported A", providerType: "anthropic", enabled: true, timeoutMs: 1000 },
+  { id: "provider-fail-b", name: "Unsupported B", providerType: "gemini", enabled: true, timeoutMs: 1000 }
+];
+failingApiState.apiConfig.models = [
+  { id: "model-fail-a", providerId: "provider-fail-a", displayName: "Fail A", modelName: "fail-a", enabled: true, modelType: ["text"], supportsJsonMode: true, maxOutputTokens: 1000 },
+  { id: "model-fail-b", providerId: "provider-fail-b", displayName: "Fail B", modelName: "fail-b", enabled: true, modelType: ["text"], supportsJsonMode: true, maxOutputTokens: 1000 }
+];
+failingApiState.apiConfig.routes = [
+  {
+    id: "route-failing",
+    featureArea: "剧本分析中心",
+    taskType: "analyzeScript",
+    primaryModelId: "model-fail-a",
+    fallbackModelIds: ["model-fail-b"],
+    requiredCapabilities: ["json"],
+    maxOutputTokens: 1000,
+    temperature: 0,
+    topP: 1,
+    jsonModeRequired: true,
+    allowFallback: true,
+    enabled: true,
+    timeoutMs: 1000
+  }
+];
+failingApiState.apiConfig.globalDefaultModelId = "model-fail-a";
+const failingResult = await callModel({
+  taskType: "analyzeScript",
+  featureArea: "剧本分析中心",
+  inputMeta: failingApiState.scriptInput,
+  state: failingApiState
+});
+assert.equal(failingResult.success, false);
+assert.equal(failingResult.mode, "api");
+assert.equal(failingResult.usedFallback, true);
+assert.ok(failingResult.error.includes("主模型失败"));
+assert.ok(failingResult.error.includes("备用模型失败"));
+assert.ok(failingResult.log);
+assert.equal(failingResult.log.success, false);
+assert.ok(failingResult.log.attemptErrors.length >= 2);
+
+const invalidShape = validateTaskOutput("generateDirections", { bad: true });
+assert.equal(invalidShape.ok, false);
+assert.ok(schemaValidationMessage("generateDirections", invalidShape.issues).includes("结构校验失败"));
+
+const secretState = structuredClone(state);
+secretState.apiConfig.providers[1].apiKey = "sk-real-secret";
+const exportedProject = exportProjectJson(secretState);
+assert.ok(!exportedProject.includes("sk-real-secret"));
+assert.ok(exportedProject.includes("[已脱敏]"));
+const snapshot = JSON.stringify(sanitizeStateForSnapshot(secretState));
+assert.ok(!snapshot.includes("sk-real-secret"));
+assert.ok(snapshot.includes("[已脱敏]"));
+
 const gitignore = await fs.readFile(new URL("../.gitignore", import.meta.url), "utf8");
 for (const pattern of [".env", ".env.*", "config.local.json", "data/settings/*.json", "data/api-config*.json", "data/model-config*.json"]) {
   assert.ok(gitignore.includes(pattern), `.gitignore missing ${pattern}`);
@@ -187,4 +258,4 @@ for (const file of files) {
   await fs.access(new URL(`../${file}`, import.meta.url));
 }
 
-console.log("check passed: V1 demo workflow plus editable Skill assets and model routing are coherent");
+console.log("check passed: V1.1 demo/API safety, editable Skill assets, model routing, and redaction are coherent");

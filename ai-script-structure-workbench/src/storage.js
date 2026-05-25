@@ -1,6 +1,7 @@
 import { createSeedState } from "./seed-data.js";
 import { normalizeApiConfig } from "./model-config.js";
 import { normalizeSkillList } from "./skill-manager.js";
+import { sanitizeStateForSnapshot } from "./redaction.js";
 
 const storageKey = "ai-script-structure-workbench-v1";
 
@@ -31,7 +32,7 @@ export async function persistSnapshot(state) {
     await fetch("/api/snapshot", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(state)
+      body: JSON.stringify(sanitizeStateForSnapshot(state))
     });
   } catch {
     // Browser localStorage remains the source of truth if the server is unavailable.

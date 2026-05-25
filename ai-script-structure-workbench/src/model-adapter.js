@@ -20,6 +20,7 @@ import { selectFallbackModel, selectModelRoute } from "./model-router.js";
 import { buildPrompt } from "./prompt-builder.js";
 import { parseJsonWithRepair, extractObjectBody } from "./json-repair.js";
 import { callOpenAICompatible } from "./provider-adapters/openai-compatible.js";
+import { schemaValidationMessage, validateTaskOutput } from "./schema-validator.js";
 
 export async function callModel({
   taskType,
@@ -73,6 +74,12 @@ export async function callModel({
   let provider = selection.provider;
   let model = selection.model;
   let mode = selection.mode;
+  const warnings = [];
+  const requestedMode = state?.apiConfig?.mode || "demo";
+  if (requestedMode === "api" && selection.mode === "demo") {
+    warnings.push("当前为真实 API Mode，但该任务路由仍指向 Demo 模型。请在系统设置 → 路由配置中绑定真实模型。");
+  }
+  const attemptErrors = [];
 
   try {
     if (selection.mode === "demo") {
@@ -81,32 +88,25 @@ export async function callModel({
       parsedJson = typeof output === "string" ? null : output;
       mode = "demo";
     } else {
-      const response = await callProvider({ provider, model, messages, options: selection.options });
+      const response = await executeApiAttempt({
+        taskType,
+        projectId,
+        skillIds,
+        provider,
+        model,
+        messages,
+        options: selection.options,
+        schema,
+        state,
+        project
+      });
       outputText = response.outputText;
+      parsedJson = response.parsedJson;
       tokenUsage = response.tokenUsage;
       costEstimate = estimateCost(model, tokenUsage);
-      if (schema || selection.options.jsonModeRequired) {
-        const repaired = await parseJsonWithRepair(outputText, {
-          repairFn:
-            taskType === "jsonRepair"
-              ? null
-              : async (brokenText, errors) => {
-                  const repairResult = await callModel({
-                    taskType: "jsonRepair",
-                    featureArea: "JSON 修复",
-                    projectId,
-                    skillIds,
-                    inputMeta: { project, brokenText, errors },
-                    state
-                  });
-                  return repairResult.outputText;
-                }
-        });
-        if (!repaired.ok) throw new Error(repaired.error);
-        parsedJson = repaired.value;
-      }
     }
   } catch (providerError) {
+    attemptErrors.push(`主模型失败：${providerError.message}`);
     if (selection.mode === "api") {
       const fallback = selectFallbackModel({
         config: state?.apiConfig,
@@ -118,20 +118,32 @@ export async function callModel({
         usedFallback = true;
         provider = fallback.provider;
         model = fallback.model;
-        const response = await callProvider({ provider, model, messages, options: selection.options });
-        outputText = response.outputText;
-        tokenUsage = response.tokenUsage;
-        costEstimate = estimateCost(model, tokenUsage);
-        if (schema || selection.options.jsonModeRequired) {
-          const repaired = await parseJsonWithRepair(outputText);
-          if (!repaired.ok) throw new Error(repaired.error);
-          parsedJson = repaired.value;
+        try {
+          const response = await executeApiAttempt({
+            taskType,
+            projectId,
+            skillIds,
+            provider,
+            model,
+            messages,
+            options: selection.options,
+            schema,
+            state,
+            project
+          });
+          outputText = response.outputText;
+          parsedJson = response.parsedJson;
+          tokenUsage = response.tokenUsage;
+          costEstimate = estimateCost(model, tokenUsage);
+        } catch (fallbackError) {
+          attemptErrors.push(`备用模型失败：${fallbackError.message}`);
+          error = attemptErrors.join("；");
         }
       } else {
-        error = providerError.message;
+        error = attemptErrors.join("；");
       }
     } else {
-      error = providerError.message;
+      error = attemptErrors.join("；");
     }
   }
 
@@ -139,11 +151,14 @@ export async function callModel({
   const result = {
     success: !error,
     mode,
+    requestedMode,
     taskType,
     providerId: provider?.id || null,
     modelId: model?.id || null,
     usedFallback,
     matchedSkillIds,
+    warnings,
+    attemptErrors,
     outputText,
     parsedJson,
     error,
@@ -158,6 +173,7 @@ export async function callModel({
     taskLabel: taskLabels[taskType] || taskType,
     featureArea: resolvedFeatureArea,
     mode,
+    requestedMode,
     providerId: result.providerId,
     providerName: provider?.name || "未选择",
     modelId: result.modelId,
@@ -165,8 +181,11 @@ export async function callModel({
     skillVersion: matchedSkills.map((skill) => `${skill.name} ${skill.version}`).join("；") || "未匹配",
     matchedSkillIds,
     skillConflicts: conflicts,
+    warnings,
+    apiModeDemoWarning: warnings.some((item) => item.includes("真实 API Mode")),
     routingReason: selection.routingReason,
     usedFallback,
+    attemptErrors,
     inputSummary: summarizeInput(inputMeta),
     outputSummary: outputText ? summarizeInput(outputText) : "无输出",
     success: result.success,
@@ -193,7 +212,12 @@ export async function runModelTask(taskType, input, state) {
     inputMeta: input,
     state
   });
-  if (!result.success) throw new Error(result.error || "模型调用失败");
+  if (!result.success) {
+    const error = new Error(result.error || "模型调用失败");
+    error.result = result;
+    error.log = result.log;
+    throw error;
+  }
   return {
     output: result.parsedJson ?? result.outputText,
     log: result.log,
@@ -251,6 +275,41 @@ function dispatchTask(taskType, input, state) {
     default:
       throw new Error(`暂不支持的任务：${taskType}`);
   }
+}
+
+async function executeApiAttempt({ taskType, projectId, skillIds, provider, model, messages, options, schema, state, project }) {
+  const response = await callProvider({ provider, model, messages, options });
+  let parsedJson = null;
+  if (schema || options.jsonModeRequired) {
+    const repaired = await parseJsonWithRepair(response.outputText, {
+      repairFn:
+        taskType === "jsonRepair"
+          ? null
+          : async (brokenText, errors) => {
+              const repairResult = await callModel({
+                taskType: "jsonRepair",
+                featureArea: "JSON 修复",
+                projectId,
+                skillIds,
+                inputMeta: { project, brokenText, errors },
+                state
+              });
+              if (!repairResult.success) {
+                throw new Error(repairResult.error || "JSON 修复模型调用失败");
+              }
+              return repairResult.outputText;
+            }
+    });
+    if (!repaired.ok) throw new Error(repaired.error);
+    parsedJson = repaired.value;
+    const shape = validateTaskOutput(taskType, parsedJson);
+    if (!shape.ok) throw new Error(schemaValidationMessage(taskType, shape.issues));
+  }
+  return {
+    outputText: response.outputText,
+    parsedJson,
+    tokenUsage: response.tokenUsage
+  };
 }
 
 async function callProvider({ provider, model, messages, options }) {

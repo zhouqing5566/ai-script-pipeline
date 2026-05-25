@@ -348,6 +348,13 @@ async function handleAction(target) {
         showToast("这个操作还在排队开发");
     }
   } catch (error) {
+    busyAction = null;
+    if (error.log) {
+      store.setState((state) => {
+        state.modelLogs = [error.log, ...state.modelLogs].slice(0, 80);
+        return state;
+      }, "记录失败的模型调用", { targetType: "modelLog", action: "generate", light: true });
+    }
     showToast(error.message || "操作失败");
   }
 }
@@ -356,11 +363,11 @@ async function executeTask(taskType, inputFactory, applyOutput, summary, options
   busyAction = taskLabels[taskType] || taskType;
   render();
   const current = readOpenInputs(store.getState());
-  const { output, log } = await runModelTask(taskType, inputFactory(current), current);
+  const { output, log, result } = await runModelTask(taskType, inputFactory(current), current);
   applyOutput(current, output, log);
   busyAction = null;
   store.setState(current, summary, options);
-  showToast(summary);
+  showToast(result?.warnings?.length ? `${summary}。${result.warnings[0]}` : summary);
 }
 
 function readOpenInputs(baseState) {
@@ -1356,6 +1363,7 @@ function renderSettingsTab(state, tab) {
 
 function renderApiStatus(state) {
   const config = state.apiConfig;
+  const demoWarnings = getApiModeDemoRouteWarnings(config);
   return `
     <section class="two-column">
       <div class="panel">
@@ -1398,6 +1406,11 @@ function renderApiStatus(state) {
     <section class="panel notice-panel">
       <strong>${config.mode === "api" ? "真实 API Mode" : "Demo Mode"}</strong>
       <p>${config.mode === "api" ? "真实 API 调用失败时不会静默切到 Demo；只有配置的备用模型可用时才会 fallback，并写入日志。" : "当前使用 DemoRuleEngine-v1，所有结果来自本地规则引擎演示，不冒充真实 API。"}</p>
+      ${
+        demoWarnings.length
+          ? `<div class="warning-list">${demoWarnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</div>`
+          : ""
+      }
     </section>
   `;
 }
@@ -1528,7 +1541,7 @@ function renderModelLogs(state) {
       <h2>模型调用日志</h2>
       <div class="log-table">
         ${(state.modelLogs || [])
-          .map((log) => `<div><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`)
+          .map((log) => `<div class="${log.warnings?.length ? "has-warning" : ""}"><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.warnings?.join("；") || log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`)
           .join("") || "<p class='muted'>暂无调用记录。</p>"}
       </div>
     </section>
@@ -2104,6 +2117,23 @@ function filterSkills(skills, filters = {}) {
     const statusOk = !filters.status || filters.status === "全部" || skill.status === filters.status;
     return functionOk && genreOk && audienceOk && statusOk;
   });
+}
+
+function getApiModeDemoRouteWarnings(config) {
+  if (config?.mode !== "api") return [];
+  const demoModelIds = new Set(
+    (config.models || [])
+      .filter((model) => model.id === "model-demo-rule-engine" || model.modelName === "DemoRuleEngine-v1")
+      .map((model) => model.id)
+  );
+  const warnings = [];
+  if (demoModelIds.has(config.globalDefaultModelId)) warnings.push("真实 API Mode 下，全局默认模型仍是 DemoRuleEngine。");
+  for (const route of config.routes || []) {
+    if (route.enabled && demoModelIds.has(route.primaryModelId)) {
+      warnings.push(`当前为真实 API Mode，但 ${route.taskType} 任务路由仍指向 Demo 模型。`);
+    }
+  }
+  return warnings;
 }
 
 function readSkillField(field) {
