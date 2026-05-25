@@ -13,6 +13,29 @@ import {
   labelForKey
 } from "./schemas.js";
 import {
+  audienceNeedSkillTypes,
+  createNewSkill,
+  duplicateSkill,
+  detectSkillConflicts,
+  functionalSkillTypes,
+  genreSkillTypes,
+  mergeSkillsDemo,
+  rollbackSkill,
+  setSkillStatus,
+  skillStatuses,
+  updateSkill
+} from "./skill-manager.js";
+import {
+  createModelDraft,
+  createProviderDraft,
+  createRouteDraft,
+  featureAreas,
+  maskApiKey,
+  modelTaskTypes,
+  providerTypes,
+  qualityLevels
+} from "./model-config.js";
+import {
   exportAnalysisMarkdown,
   exportAuditMarkdown,
   exportCharactersMarkdown,
@@ -245,6 +268,75 @@ async function handleAction(target) {
           return state;
         }, "选择 Skill", { version: false });
         break;
+      case "apply-skill-filters":
+        applySkillFilters();
+        break;
+      case "add-skill":
+        addSkill();
+        break;
+      case "save-skill":
+        saveSkillEdits(id);
+        break;
+      case "copy-skill":
+        copySkill(id);
+        break;
+      case "toggle-skill":
+        toggleSkill(id);
+        break;
+      case "rollback-skill":
+        rollbackSelectedSkill(id);
+        break;
+      case "merge-skill-demo":
+        mergeSelectedSkill(id);
+        break;
+      case "set-settings-tab":
+        store.setState((state) => {
+          state.apiConfig.activeSettingsTab = id;
+          return state;
+        }, "切换 API 配置标签", { version: false });
+        break;
+      case "set-api-mode":
+        saveApiMode();
+        break;
+      case "add-provider":
+        addProvider();
+        break;
+      case "save-provider":
+        saveProvider(id);
+        break;
+      case "select-provider":
+        store.setState((state) => {
+          state.apiConfig.selectedProviderId = id;
+          return state;
+        }, "选择 API Provider", { version: false });
+        break;
+      case "test-provider":
+        await testProvider(id);
+        break;
+      case "add-model":
+        addModel();
+        break;
+      case "save-model":
+        saveModel(id);
+        break;
+      case "select-model":
+        store.setState((state) => {
+          state.apiConfig.selectedModelId = id;
+          return state;
+        }, "选择模型", { version: false });
+        break;
+      case "add-route":
+        addRoute();
+        break;
+      case "save-route":
+        saveRoute(id);
+        break;
+      case "select-route":
+        store.setState((state) => {
+          state.apiConfig.selectedRouteId = id;
+          return state;
+        }, "选择路由", { version: false });
+        break;
       case "add-feedback":
         addFeedback();
         break;
@@ -472,6 +564,244 @@ function enableSkillUpdate(skillId) {
   }, "启用 Skill 新版本", { targetType: "skill", targetId: skillId, action: "edit" });
 }
 
+function applySkillFilters() {
+  store.setState((state) => {
+    state.skillFilters = {
+      function: document.querySelector("#skill-filter-function")?.value || "全部",
+      genre: document.querySelector("#skill-filter-genre")?.value || "全部",
+      audience: document.querySelector("#skill-filter-audience")?.value || "全部",
+      status: document.querySelector("#skill-filter-status")?.value || "全部"
+    };
+    return state;
+  }, "应用 Skill 筛选", { version: false });
+}
+
+function addSkill() {
+  const skill = createNewSkill();
+  store.setState((state) => {
+    state.skills = [skill, ...state.skills];
+    state.selectedSkillId = skill.id;
+    return state;
+  }, "新增 Skill", { targetType: "skill", targetId: skill.id, action: "generate" });
+}
+
+function saveSkillEdits(skillId) {
+  const modelPreference = {
+    preferredModelIds: parseCsv(document.querySelector('[data-skill-model="preferredModelIds"]')?.value),
+    forbiddenModelIds: parseCsv(document.querySelector('[data-skill-model="forbiddenModelIds"]')?.value),
+    requireCapabilities: parseCsv(document.querySelector('[data-skill-model="requireCapabilities"]')?.value),
+    allowFallback: document.querySelector('[data-skill-model="allowFallback"]')?.checked ?? true,
+    fallbackStrategy: document.querySelector('[data-skill-model="fallbackStrategy"]')?.value || "",
+    notes: document.querySelector('[data-skill-model="notes"]')?.value || ""
+  };
+  const patch = {
+    name: readSkillField("name"),
+    description: readSkillField("description"),
+    category: readSkillField("category"),
+    skillType: readSkillField("skillType"),
+    source: readSkillField("source"),
+    status: readSkillField("status"),
+    version: readSkillField("version"),
+    priority: Number(readSkillField("priority")) || 50,
+    genreScope: parseCsv(readSkillField("genreScope")),
+    audienceNeedScope: parseCsv(readSkillField("audienceNeedScope")),
+    platformScope: parseCsv(readSkillField("platformScope")),
+    taskScope: parseCsv(readSkillField("taskScope")),
+    rules: parseLines(readSkillField("rules")),
+    positiveExamples: parseLines(readSkillField("positiveExamples")),
+    negativeExamples: parseLines(readSkillField("negativeExamples")),
+    promptAdditions: parseLines(readSkillField("promptAdditions")),
+    outputSchemaRef: readSkillField("outputSchemaRef"),
+    evaluationCriteria: parseLines(readSkillField("evaluationCriteria")),
+    riskWarnings: parseLines(readSkillField("riskWarnings")),
+    modelPreference,
+    changeSummary: "保存 Skill 编辑"
+  };
+  store.setState((state) => {
+    state.skills = updateSkill(state.skills, skillId, patch);
+    return state;
+  }, "保存 Skill 编辑", { targetType: "skill", targetId: skillId, action: "edit" });
+}
+
+function copySkill(skillId) {
+  store.setState((state) => {
+    state.skills = duplicateSkill(state.skills, skillId);
+    state.selectedSkillId = state.skills[0]?.id || skillId;
+    return state;
+  }, "复制 Skill", { targetType: "skill", targetId: skillId, action: "generate" });
+}
+
+function toggleSkill(skillId) {
+  const current = store.getState().skills.find((skill) => skill.id === skillId);
+  const nextStatus = current?.status === "已启用" ? "已停用" : "已启用";
+  store.setState((state) => {
+    state.skills = setSkillStatus(state.skills, skillId, nextStatus);
+    return state;
+  }, `${nextStatus} Skill`, { targetType: "skill", targetId: skillId, action: "edit" });
+}
+
+function rollbackSelectedSkill(skillId) {
+  store.setState((state) => {
+    state.skills = rollbackSkill(state.skills, skillId);
+    return state;
+  }, "回滚 Skill", { targetType: "skill", targetId: skillId, action: "rollback" });
+}
+
+function mergeSelectedSkill(skillId) {
+  const candidate = store.getState().skills.find((skill) => skill.id !== skillId && skill.status === "已启用");
+  store.setState((state) => {
+    state.skills = mergeSkillsDemo(state.skills, [skillId, candidate?.id].filter(Boolean));
+    state.selectedSkillId = state.skills[0]?.id || skillId;
+    return state;
+  }, "Demo 合并 Skill", { targetType: "skill", targetId: skillId, action: "generate" });
+}
+
+function saveApiMode() {
+  store.setState((state) => {
+    state.apiConfig.mode = document.querySelector("#api-mode")?.value || "demo";
+    state.apiConfig.globalDefaultModelId = document.querySelector("#global-default-model")?.value || "model-demo-rule-engine";
+    state.mode = state.apiConfig.mode;
+    state.apiConfig.updatedAt = new Date().toISOString();
+    return state;
+  }, "保存 API 运行模式", { targetType: "settings", action: "edit", light: true });
+}
+
+function addProvider() {
+  const provider = createProviderDraft();
+  store.setState((state) => {
+    state.apiConfig.providers = [provider, ...state.apiConfig.providers];
+    state.apiConfig.selectedProviderId = provider.id;
+    return state;
+  }, "新增 API Provider", { targetType: "settings", action: "generate", light: true });
+}
+
+function saveProvider(providerId) {
+  store.setState((state) => {
+    state.apiConfig.providers = state.apiConfig.providers.map((provider) =>
+      provider.id === providerId
+        ? {
+            ...provider,
+            name: readProviderField("name"),
+            providerType: readProviderField("providerType"),
+            baseUrl: readProviderField("baseUrl"),
+            apiKey: readProviderField("apiKey") || provider.apiKey,
+            enabled: document.querySelector('[data-provider-field="enabled"]')?.checked || false,
+            priority: Number(readProviderField("priority")) || 50,
+            timeoutMs: Number(readProviderField("timeoutMs")) || 60000,
+            rateLimit: readProviderField("rateLimit"),
+            notes: readProviderField("notes"),
+            updatedAt: new Date().toISOString()
+          }
+        : provider
+    );
+    return state;
+  }, "保存 API Provider", { targetType: "settings", action: "edit", light: true });
+}
+
+async function testProvider(providerId) {
+  const current = store.getState();
+  const provider = current.apiConfig.providers.find((item) => item.id === providerId);
+  const model = current.apiConfig.models.find((item) => item.providerId === providerId && item.enabled) || current.apiConfig.models[0];
+  let result = { ok: false, error: "Provider 未启用，或缺少 Base URL / API Key。" };
+  if (provider?.enabled && (provider.providerType === "local" || (provider.baseUrl && provider.apiKey))) {
+    try {
+      const response = await fetch("/api/test-provider", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider, modelName: model?.modelName })
+      });
+      result = await response.json();
+    } catch (error) {
+      result = { ok: false, error: error.message };
+    }
+  }
+  store.setState((state) => {
+    state.apiConfig.lastTestResult = {
+      providerId,
+      success: Boolean(result.ok),
+      message: result.message || result.error || "测试完成。",
+      createdAt: new Date().toISOString()
+    };
+    return state;
+  }, "测试 Provider 配置", { targetType: "settings", action: "generate", light: true });
+  showToast(result.ok ? "Provider 测试通过" : `Provider 测试失败：${result.error || result.message || "未知错误"}`);
+}
+
+function addModel() {
+  const model = createModelDraft(store.getState().apiConfig.selectedProviderId);
+  store.setState((state) => {
+    state.apiConfig.models = [model, ...state.apiConfig.models];
+    state.apiConfig.selectedModelId = model.id;
+    return state;
+  }, "新增模型", { targetType: "settings", action: "generate", light: true });
+}
+
+function saveModel(modelId) {
+  store.setState((state) => {
+    state.apiConfig.models = state.apiConfig.models.map((model) =>
+      model.id === modelId
+        ? {
+            ...model,
+            displayName: readModelField("displayName"),
+            modelName: readModelField("modelName"),
+            providerId: readModelField("providerId"),
+            enabled: document.querySelector('[data-model-field="enabled"]')?.checked || false,
+            modelType: parseCsv(readModelField("modelType")),
+            contextWindow: Number(readModelField("contextWindow")) || 32000,
+            maxOutputTokens: Number(readModelField("maxOutputTokens")) || 4096,
+            supportsJsonMode: document.querySelector('[data-model-field="supportsJsonMode"]')?.checked || false,
+            supportsVision: document.querySelector('[data-model-field="supportsVision"]')?.checked || false,
+            supportsTools: document.querySelector('[data-model-field="supportsTools"]')?.checked || false,
+            supportsStreaming: document.querySelector('[data-model-field="supportsStreaming"]')?.checked || false,
+            costLevel: readModelField("costLevel"),
+            qualityLevel: readModelField("qualityLevel"),
+            recommendedTasks: parseCsv(readModelField("recommendedTasks")),
+            notes: readModelField("notes")
+          }
+        : model
+    );
+    return state;
+  }, "保存模型配置", { targetType: "settings", action: "edit", light: true });
+}
+
+function addRoute() {
+  const route = createRouteDraft(store.getState().apiConfig.selectedModelId);
+  store.setState((state) => {
+    state.apiConfig.routes = [route, ...state.apiConfig.routes];
+    state.apiConfig.selectedRouteId = route.id;
+    return state;
+  }, "新增模型路由", { targetType: "settings", action: "generate", light: true });
+}
+
+function saveRoute(routeId) {
+  store.setState((state) => {
+    state.apiConfig.routes = state.apiConfig.routes.map((route) =>
+      route.id === routeId
+        ? {
+            ...route,
+            featureArea: readRouteField("featureArea"),
+            taskType: readRouteField("taskType"),
+            primaryModelId: readRouteField("primaryModelId"),
+            fallbackModelIds: parseCsv(readRouteField("fallbackModelIds")),
+            requiredCapabilities: parseCsv(readRouteField("requiredCapabilities")),
+            maxInputTokens: Number(readRouteField("maxInputTokens")) || 24000,
+            maxOutputTokens: Number(readRouteField("maxOutputTokens")) || 4096,
+            temperature: Number(readRouteField("temperature")) || 0,
+            topP: Number(readRouteField("topP")) || 1,
+            jsonModeRequired: document.querySelector('[data-route-field="jsonModeRequired"]')?.checked || false,
+            streamingEnabled: document.querySelector('[data-route-field="streamingEnabled"]')?.checked || false,
+            allowFallback: document.querySelector('[data-route-field="allowFallback"]')?.checked || false,
+            enabled: document.querySelector('[data-route-field="enabled"]')?.checked || false,
+            retryCount: Number(readRouteField("retryCount")) || 0,
+            timeoutMs: Number(readRouteField("timeoutMs")) || 60000,
+            notes: readRouteField("notes")
+          }
+        : route
+    );
+    return state;
+  }, "保存模型路由", { targetType: "settings", action: "edit", light: true });
+}
+
 function addFeedback() {
   const comment = document.querySelector("#feedback-comment")?.value || "";
   const rating = Number(document.querySelector("#feedback-rating")?.value || 4);
@@ -520,6 +850,8 @@ function render() {
 }
 
 function renderSidebar(state) {
+  const modeLabel = state.apiConfig?.mode === "api" ? "真实 API Mode" : "Demo Mode";
+  const modeDesc = state.apiConfig?.mode === "api" ? "失败不会静默切 Demo" : "规则引擎演示，不冒充真实 API";
   return `
     <aside class="sidebar">
       <div class="brand">
@@ -543,8 +875,8 @@ function renderSidebar(state) {
       <div class="sidebar-foot">
         <span class="mode-dot"></span>
         <div>
-          <strong>Demo Mode</strong>
-          <span>规则引擎演示，不冒充真实 API</span>
+          <strong>${modeLabel}</strong>
+          <span>${modeDesc}</span>
         </div>
       </div>
     </aside>
@@ -553,6 +885,7 @@ function renderSidebar(state) {
 
 function renderTopbar(state) {
   const project = state.currentProject;
+  const model = state.apiConfig?.models?.find((item) => item.id === state.apiConfig.globalDefaultModelId);
   return `
     <header class="topbar">
       <div>
@@ -560,7 +893,8 @@ function renderTopbar(state) {
         <div class="top-meta">
           <span>${escapeHtml(project.status)}</span>
           <span>${escapeHtml(state.saveStatus)}</span>
-          <span>模型：DemoRuleEngine-v1</span>
+          <span>模式：${state.apiConfig?.mode === "api" ? "真实 API" : "Demo"}</span>
+          <span>模型：${escapeHtml(model?.displayName || "DemoRuleEngine-v1")}</span>
           <span>Skill：${escapeHtml(activeSkillSummary(state))}</span>
         </div>
       </div>
@@ -769,27 +1103,55 @@ function renderAssets(state) {
 
 function renderSkills(state) {
   const selected = state.skills.find((item) => item.id === state.selectedSkillId) || state.skills[0];
+  const filtered = filterSkills(state.skills, state.skillFilters || {});
   return `
     <section class="page-head compact">
       <div>
         <h1>Skill 进化中心</h1>
-        <p>管理分析、生成、审计和修复规则。AI 只能提出建议，人类确认后启用。</p>
+        <p>管理可编辑 Skill 资产：范围、规则、Prompt 补充、正反例、评估标准、风险、模型偏好和版本记录。</p>
       </div>
+      <button class="primary-button" data-action="add-skill">${icon("spark")}新增 Skill</button>
     </section>
     <section class="skill-layout">
       <div class="skill-list">
-        ${state.skills
+        <div class="skill-filter-box">
+          <label>功能筛选
+            <select id="skill-filter-function">
+              ${["全部", ...functionalSkillTypes].map((item) => `<option ${state.skillFilters?.function === item ? "selected" : ""}>${item}</option>`).join("")}
+            </select>
+          </label>
+          <label>题材筛选
+            <select id="skill-filter-genre">
+              ${["全部", ...genreSkillTypes].map((item) => `<option ${state.skillFilters?.genre === item ? "selected" : ""}>${item}</option>`).join("")}
+            </select>
+          </label>
+          <label>情绪筛选
+            <select id="skill-filter-audience">
+              ${["全部", ...audienceNeedSkillTypes].map((item) => `<option ${state.skillFilters?.audience === item ? "selected" : ""}>${item}</option>`).join("")}
+            </select>
+          </label>
+          <label>状态筛选
+            <select id="skill-filter-status">
+              ${["全部", ...skillStatuses].map((item) => `<option ${state.skillFilters?.status === item ? "selected" : ""}>${item}</option>`).join("")}
+            </select>
+          </label>
+          <button class="secondary-button" data-action="apply-skill-filters">应用筛选</button>
+        </div>
+        ${filtered
           .map(
             (skill) => `
           <button class="skill-row ${selected?.id === skill.id ? "active" : ""}" data-action="select-skill" data-id="${skill.id}">
             <strong>${skill.name}</strong>
-            <span>${skill.type}｜${skill.version}｜${skill.status}</span>
+            <span>${skill.skillType}｜${skill.version}｜${skill.status}｜优先级 ${skill.priority}</span>
           </button>`
           )
           .join("")}
       </div>
-      <div class="panel">
+      <div class="skill-editor">
         ${selected ? renderSkillDetail(selected, state) : emptyState("暂无 Skill", "创建或导入规则后可在这里管理。")}
+      </div>
+      <div class="skill-side">
+        ${selected ? renderSkillSidePanel(selected, state) : ""}
       </div>
     </section>
   `;
@@ -955,21 +1317,67 @@ function renderFeedback(state) {
 }
 
 function renderSettings(state) {
+  const tab = state.apiConfig?.activeSettingsTab || "status";
+  const tabs = [
+    ["status", "基础状态"],
+    ["providers", "API Provider"],
+    ["models", "模型列表"],
+    ["routes", "路由配置"],
+    ["logs", "调用日志"],
+    ["security", "安全说明"]
+  ];
   return `
     <section class="page-head compact">
       <div>
         <h1>系统设置</h1>
-        <p>查看 Demo 模式、模型调用日志、导出路径和本地数据状态。</p>
+        <p>配置 Demo Mode、真实 API Provider、模型列表、任务路由、调用日志和本地密钥安全边界。</p>
       </div>
       <button class="danger-button" data-action="reset">重置 Demo 数据</button>
     </section>
+    <section class="tabbar settings-tabs">
+      ${tabs.map(([id, label]) => `<button class="${tab === id ? "active" : ""}" data-action="set-settings-tab" data-id="${id}">${label}</button>`).join("")}
+    </section>
+    ${renderSettingsTab(state, tab)}
+  `;
+}
+
+function renderSettingsTab(state, tab) {
+  const config = state.apiConfig;
+  const views = {
+    status: () => renderApiStatus(state),
+    providers: () => renderProviderSettings(config),
+    models: () => renderModelSettings(config),
+    routes: () => renderRouteSettings(config),
+    logs: () => renderModelLogs(state),
+    security: () => renderSecurityNotes()
+  };
+  return (views[tab] || views.status)();
+}
+
+function renderApiStatus(state) {
+  const config = state.apiConfig;
+  return `
     <section class="two-column">
       <div class="panel">
-        <h2>模型状态</h2>
+        <h2>基础状态</h2>
+        <div class="form-grid two">
+          <label>运行模式
+            <select id="api-mode">
+              <option value="demo" ${config.mode === "demo" ? "selected" : ""}>Demo Mode</option>
+              <option value="api" ${config.mode === "api" ? "selected" : ""}>真实 API Mode</option>
+            </select>
+          </label>
+          <label>全局默认模型
+            <select id="global-default-model">
+              ${config.models.map((model) => `<option value="${model.id}" ${config.globalDefaultModelId === model.id ? "selected" : ""}>${model.displayName}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <div class="panel-actions"><button class="primary-button" data-action="set-api-mode">保存基础状态</button></div>
         ${keyValueGrid([
-          ["运行模式", "Demo Mode"],
-          ["说明", "规则引擎演示，不静默冒充真实 API"],
-          ["本地服务", "Node server.js"],
+          ["Provider 数量", config.providers.length],
+          ["启用模型", config.models.filter((model) => model.enabled).length],
+          ["任务路由", config.routes.length],
           ["调用记录", "data/logs/model-calls.jsonl"]
         ])}
       </div>
@@ -987,12 +1395,155 @@ function renderSettings(state) {
         }
       </div>
     </section>
+    <section class="panel notice-panel">
+      <strong>${config.mode === "api" ? "真实 API Mode" : "Demo Mode"}</strong>
+      <p>${config.mode === "api" ? "真实 API 调用失败时不会静默切到 Demo；只有配置的备用模型可用时才会 fallback，并写入日志。" : "当前使用 DemoRuleEngine-v1，所有结果来自本地规则引擎演示，不冒充真实 API。"}</p>
+    </section>
+  `;
+}
+
+function renderProviderSettings(config) {
+  const selected = config.providers.find((provider) => provider.id === config.selectedProviderId) || config.providers[0];
+  return `
+    <section class="settings-split">
+      <div class="panel">
+        <div class="panel-title"><h2>API Provider</h2><button class="small-button" data-action="add-provider">新增</button></div>
+        ${config.providers.map((provider) => `<button class="list-row ${selected?.id === provider.id ? "active" : ""}" data-action="select-provider" data-id="${provider.id}"><strong>${escapeHtml(provider.name)}</strong><span>${provider.providerType}｜${provider.enabled ? "启用" : "停用"}｜Key ${maskApiKey(provider.apiKey)}</span></button>`).join("")}
+      </div>
+      <div class="panel">
+        ${selected ? renderProviderForm(selected) : emptyState("暂无 Provider", "新增 Provider 后可配置 Base URL 与 API Key。")}
+        ${config.lastTestResult ? `<div class="suggestion-box"><h3>最近测试</h3>${keyValueGrid([["结果", config.lastTestResult.success ? "成功" : "失败"], ["说明", config.lastTestResult.message], ["时间", formatDate(config.lastTestResult.createdAt)]])}</div>` : ""}
+      </div>
+    </section>
+  `;
+}
+
+function renderProviderForm(provider) {
+  return `
+    <div class="panel-title"><h2>${escapeHtml(provider.name)}</h2><span class="status-pill">${provider.enabled ? "启用" : "停用"}</span></div>
+    <div class="form-grid two">
+      <label>名称<input data-provider-field="name" value="${escapeAttr(provider.name)}" /></label>
+      <label>Provider 类型
+        <select data-provider-field="providerType">${providerTypes.map((type) => `<option value="${type}" ${provider.providerType === type ? "selected" : ""}>${type}</option>`).join("")}</select>
+      </label>
+      <label>Base URL<input data-provider-field="baseUrl" value="${escapeAttr(provider.baseUrl)}" /></label>
+      <label>API Key<input data-provider-field="apiKey" type="password" placeholder="${escapeAttr(maskApiKey(provider.apiKey))}" /></label>
+      <label>是否启用<input data-provider-field="enabled" type="checkbox" ${provider.enabled ? "checked" : ""} /></label>
+      <label>优先级<input data-provider-field="priority" type="number" value="${provider.priority}" /></label>
+      <label>超时时间 ms<input data-provider-field="timeoutMs" type="number" value="${provider.timeoutMs}" /></label>
+      <label>限流备注<input data-provider-field="rateLimit" value="${escapeAttr(provider.rateLimit || "")}" /></label>
+    </div>
+    <label class="block-label">备注<textarea data-provider-field="notes" class="medium-textarea">${escapeHtml(provider.notes || "")}</textarea></label>
+    <div class="panel-actions">
+      <button class="primary-button" data-action="save-provider" data-id="${provider.id}">保存 Provider</button>
+      <button class="secondary-button" data-action="test-provider" data-id="${provider.id}">测试连接</button>
+    </div>
+  `;
+}
+
+function renderModelSettings(config) {
+  const selected = config.models.find((model) => model.id === config.selectedModelId) || config.models[0];
+  return `
+    <section class="settings-split">
+      <div class="panel">
+        <div class="panel-title"><h2>模型列表</h2><button class="small-button" data-action="add-model">新增</button></div>
+        ${config.models.map((model) => `<button class="list-row ${selected?.id === model.id ? "active" : ""}" data-action="select-model" data-id="${model.id}"><strong>${escapeHtml(model.displayName)}</strong><span>${model.modelName}｜${model.enabled ? "启用" : "停用"}｜${model.qualityLevel}</span></button>`).join("")}
+      </div>
+      <div class="panel">
+        ${selected ? renderModelForm(selected, config) : emptyState("暂无模型", "新增模型后可绑定 Provider 与任务能力。")}
+      </div>
+    </section>
+  `;
+}
+
+function renderModelForm(model, config) {
+  return `
+    <div class="panel-title"><h2>${escapeHtml(model.displayName)}</h2><span class="status-pill">${model.enabled ? "启用" : "停用"}</span></div>
+    <div class="form-grid three">
+      <label>显示名称<input data-model-field="displayName" value="${escapeAttr(model.displayName)}" /></label>
+      <label>真实模型名<input data-model-field="modelName" value="${escapeAttr(model.modelName)}" /></label>
+      <label>Provider
+        <select data-model-field="providerId">${config.providers.map((provider) => `<option value="${provider.id}" ${model.providerId === provider.id ? "selected" : ""}>${provider.name}</option>`).join("")}</select>
+      </label>
+      <label>是否启用<input data-model-field="enabled" type="checkbox" ${model.enabled ? "checked" : ""} /></label>
+      <label>模型能力<input data-model-field="modelType" value="${escapeAttr((model.modelType || []).join("、"))}" /></label>
+      <label>上下文长度<input data-model-field="contextWindow" type="number" value="${model.contextWindow}" /></label>
+      <label>最大输出 Tokens<input data-model-field="maxOutputTokens" type="number" value="${model.maxOutputTokens}" /></label>
+      <label>质量等级<select data-model-field="qualityLevel">${qualityLevels.map((item) => `<option ${model.qualityLevel === item ? "selected" : ""}>${item}</option>`).join("")}</select></label>
+      <label>费用等级<input data-model-field="costLevel" value="${escapeAttr(model.costLevel)}" /></label>
+      <label>支持 JSON<input data-model-field="supportsJsonMode" type="checkbox" ${model.supportsJsonMode ? "checked" : ""} /></label>
+      <label>支持视觉<input data-model-field="supportsVision" type="checkbox" ${model.supportsVision ? "checked" : ""} /></label>
+      <label>支持工具<input data-model-field="supportsTools" type="checkbox" ${model.supportsTools ? "checked" : ""} /></label>
+      <label>支持流式<input data-model-field="supportsStreaming" type="checkbox" ${model.supportsStreaming ? "checked" : ""} /></label>
+    </div>
+    <label class="block-label">推荐任务<input data-model-field="recommendedTasks" value="${escapeAttr((model.recommendedTasks || []).join("、"))}" /></label>
+    <label class="block-label">备注<textarea data-model-field="notes" class="medium-textarea">${escapeHtml(model.notes || "")}</textarea></label>
+    <div class="panel-actions"><button class="primary-button" data-action="save-model" data-id="${model.id}">保存模型</button></div>
+  `;
+}
+
+function renderRouteSettings(config) {
+  const selected = config.routes.find((route) => route.id === config.selectedRouteId) || config.routes[0];
+  return `
+    <section class="settings-split">
+      <div class="panel">
+        <div class="panel-title"><h2>任务路由</h2><button class="small-button" data-action="add-route">新增</button></div>
+        ${config.routes.map((route) => `<button class="list-row ${selected?.id === route.id ? "active" : ""}" data-action="select-route" data-id="${route.id}"><strong>${escapeHtml(route.taskType)}</strong><span>${route.featureArea}｜主模型 ${route.primaryModelId || "未设"}</span></button>`).join("")}
+      </div>
+      <div class="panel">
+        ${selected ? renderRouteForm(selected, config) : emptyState("暂无路由", "新增任务路由后可为 taskType 绑定模型。")}
+      </div>
+    </section>
+  `;
+}
+
+function renderRouteForm(route, config) {
+  return `
+    <div class="panel-title"><h2>${escapeHtml(route.taskType)}</h2><span class="status-pill">${route.enabled ? "启用" : "停用"}</span></div>
+    <div class="form-grid three">
+      <label>功能区<select data-route-field="featureArea">${featureAreas.map((area) => `<option ${route.featureArea === area ? "selected" : ""}>${area}</option>`).join("")}</select></label>
+      <label>任务类型<select data-route-field="taskType">${modelTaskTypes.map((type) => `<option ${route.taskType === type ? "selected" : ""}>${type}</option>`).join("")}</select></label>
+      <label>主模型<select data-route-field="primaryModelId">${config.models.map((model) => `<option value="${model.id}" ${route.primaryModelId === model.id ? "selected" : ""}>${model.displayName}</option>`).join("")}</select></label>
+      <label>备用模型 ID<input data-route-field="fallbackModelIds" value="${escapeAttr((route.fallbackModelIds || []).join("、"))}" /></label>
+      <label>必需能力<input data-route-field="requiredCapabilities" value="${escapeAttr((route.requiredCapabilities || []).join("、"))}" /></label>
+      <label>最大输入 Tokens<input data-route-field="maxInputTokens" type="number" value="${route.maxInputTokens}" /></label>
+      <label>最大输出 Tokens<input data-route-field="maxOutputTokens" type="number" value="${route.maxOutputTokens}" /></label>
+      <label>temperature<input data-route-field="temperature" type="number" step="0.05" value="${route.temperature}" /></label>
+      <label>topP<input data-route-field="topP" type="number" step="0.05" value="${route.topP}" /></label>
+      <label>强制 JSON<input data-route-field="jsonModeRequired" type="checkbox" ${route.jsonModeRequired ? "checked" : ""} /></label>
+      <label>允许 fallback<input data-route-field="allowFallback" type="checkbox" ${route.allowFallback ? "checked" : ""} /></label>
+      <label>启用路由<input data-route-field="enabled" type="checkbox" ${route.enabled ? "checked" : ""} /></label>
+      <label>流式<input data-route-field="streamingEnabled" type="checkbox" ${route.streamingEnabled ? "checked" : ""} /></label>
+      <label>重试次数<input data-route-field="retryCount" type="number" value="${route.retryCount}" /></label>
+      <label>超时 ms<input data-route-field="timeoutMs" type="number" value="${route.timeoutMs}" /></label>
+    </div>
+    <label class="block-label">备注<textarea data-route-field="notes" class="medium-textarea">${escapeHtml(route.notes || "")}</textarea></label>
+    <div class="panel-actions"><button class="primary-button" data-action="save-route" data-id="${route.id}">保存路由</button></div>
+  `;
+}
+
+function renderModelLogs(state) {
+  return `
     <section class="panel">
       <h2>模型调用日志</h2>
       <div class="log-table">
-        ${state.modelLogs
-          .map((log) => `<div><strong>${log.taskLabel}</strong><span>${log.modelName}</span><span>${log.latencyMs} ms</span><span>${formatDate(log.createdAt)}</span></div>`)
+        ${(state.modelLogs || [])
+          .map((log) => `<div><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`)
           .join("") || "<p class='muted'>暂无调用记录。</p>"}
+      </div>
+    </section>
+  `;
+}
+
+function renderSecurityNotes() {
+  return `
+    <section class="panel">
+      <h2>安全说明</h2>
+      <div class="notice-list">
+        <p>API Key 在输入框中以 password 方式录入，页面不会长期明文展示完整 Key。</p>
+        <p>本地保存仅用于本机运行，配置会进入 localStorage 和 data/settings，本项目的 .gitignore 已排除本地密钥配置。</p>
+        <p>不要把真实 API Key 写入 seed-data.js、README 示例或提交到 GitHub。</p>
+        <p>真实 API 调用失败时不会静默切换 Demo；只有任务路由配置的备用真实模型可 fallback，日志会记录 usedFallback。</p>
       </div>
     </section>
   `;
@@ -1156,28 +1707,104 @@ function renderAssetCard(asset) {
 }
 
 function renderSkillDetail(skill, state) {
+  const mp = skill.modelPreference || {};
   return `
-    <div class="panel-title">
-      <h2>${skill.name}</h2>
-      <span class="status-pill">${skill.status}</span>
+    <div class="panel skill-form">
+      <div class="panel-title">
+        <h2>${escapeHtml(skill.name)}</h2>
+        <span class="status-pill">${escapeHtml(skill.status)}｜${escapeHtml(skill.source)}</span>
+      </div>
+      <div class="form-grid three">
+        <label>名称<input data-skill-field="name" value="${escapeAttr(skill.name)}" /></label>
+        <label>分类
+          <select data-skill-field="category">
+            ${["按功能", "按题材", "按观众情绪需求", "全局"].map((item) => `<option ${skill.category === item ? "selected" : ""}>${item}</option>`).join("")}
+          </select>
+        </label>
+        <label>Skill 类型<input data-skill-field="skillType" value="${escapeAttr(skill.skillType)}" /></label>
+        <label>状态
+          <select data-skill-field="status">
+            ${skillStatuses.map((item) => `<option ${skill.status === item ? "selected" : ""}>${item}</option>`).join("")}
+          </select>
+        </label>
+        <label>来源
+          <select data-skill-field="source">
+            ${["system", "admin", "ai_suggestion"].map((item) => `<option ${skill.source === item ? "selected" : ""}>${item}</option>`).join("")}
+          </select>
+        </label>
+        <label>版本<input data-skill-field="version" value="${escapeAttr(skill.version)}" /></label>
+        <label>优先级<input data-skill-field="priority" type="number" value="${skill.priority}" /></label>
+        <label>输出 Schema<input data-skill-field="outputSchemaRef" value="${escapeAttr(skill.outputSchemaRef)}" /></label>
+        <label>更新时间<input value="${escapeAttr(formatDate(skill.updatedAt))}" disabled /></label>
+      </div>
+      <label class="block-label">描述<textarea data-skill-field="description" class="medium-textarea">${escapeHtml(skill.description)}</textarea></label>
+      <div class="form-grid three">
+        <label>适用题材<input data-skill-field="genreScope" value="${escapeAttr((skill.genreScope || []).join("、"))}" /></label>
+        <label>适用情绪需求<input data-skill-field="audienceNeedScope" value="${escapeAttr((skill.audienceNeedScope || []).join("、"))}" /></label>
+        <label>适用平台 / 内容形态<input data-skill-field="platformScope" value="${escapeAttr((skill.platformScope || []).join("、"))}" /></label>
+      </div>
+      <label class="block-label">适用任务类型<input data-skill-field="taskScope" value="${escapeAttr((skill.taskScope || []).join("、"))}" /></label>
+      <div class="form-grid two">
+        <label>规则 rules<textarea data-skill-field="rules" class="medium-textarea">${escapeHtml((skill.rules || []).join("\n"))}</textarea></label>
+        <label>Prompt 补充段<textarea data-skill-field="promptAdditions" class="medium-textarea">${escapeHtml((skill.promptAdditions || []).join("\n"))}</textarea></label>
+        <label>正例 positiveExamples<textarea data-skill-field="positiveExamples" class="medium-textarea">${escapeHtml((skill.positiveExamples || []).join("\n"))}</textarea></label>
+        <label>反例 negativeExamples<textarea data-skill-field="negativeExamples" class="medium-textarea">${escapeHtml((skill.negativeExamples || []).join("\n"))}</textarea></label>
+        <label>评估标准 evaluationCriteria<textarea data-skill-field="evaluationCriteria" class="medium-textarea">${escapeHtml((skill.evaluationCriteria || []).join("\n"))}</textarea></label>
+        <label>风险提示 riskWarnings<textarea data-skill-field="riskWarnings" class="medium-textarea">${escapeHtml((skill.riskWarnings || []).join("\n"))}</textarea></label>
+      </div>
+      <h3>模型偏好</h3>
+      <div class="form-grid three">
+        <label>推荐模型 ID<input data-skill-model="preferredModelIds" value="${escapeAttr((mp.preferredModelIds || []).join("、"))}" /></label>
+        <label>禁用模型 ID<input data-skill-model="forbiddenModelIds" value="${escapeAttr((mp.forbiddenModelIds || []).join("、"))}" /></label>
+        <label>必需能力<input data-skill-model="requireCapabilities" value="${escapeAttr((mp.requireCapabilities || []).join("、"))}" /></label>
+        <label>Fallback 策略<input data-skill-model="fallbackStrategy" value="${escapeAttr(mp.fallbackStrategy || "")}" /></label>
+        <label>允许 fallback<input data-skill-model="allowFallback" type="checkbox" ${mp.allowFallback === false ? "" : "checked"} /></label>
+        <label>模型备注<input data-skill-model="notes" value="${escapeAttr(mp.notes || "")}" /></label>
+      </div>
+      <div class="panel-actions">
+        <button class="primary-button" data-action="save-skill" data-id="${skill.id}">${icon("check")}保存</button>
+        <button class="secondary-button" data-action="copy-skill" data-id="${skill.id}">复制</button>
+        <button class="secondary-button" data-action="toggle-skill" data-id="${skill.id}">${skill.status === "已启用" ? "停用" : "启用"}</button>
+        <button class="secondary-button" data-action="rollback-skill" data-id="${skill.id}">回滚</button>
+        <button class="secondary-button" data-action="merge-skill-demo" data-id="${skill.id}">合并入口</button>
+      </div>
     </div>
-    ${keyValueGrid([
-      ["类型", skill.type],
-      ["版本", skill.version],
-      ["更新时间", formatDate(skill.updatedAt)],
-      ["更新原因", skill.updateReason],
-      ["预期提升", skill.expectedImprovement],
-      ["可回滚", skill.rollbackTarget || "暂无回滚目标"]
-    ])}
-    <h3>当前规则</h3>
-    <ul class="rule-list">${skill.rules.map((rule) => `<li>${rule}</li>`).join("")}</ul>
-    <div class="panel-actions">
-      <button class="secondary-button" data-action="skill-suggestion" data-id="${skill.id}">AI 生成优化建议</button>
-      <button class="secondary-button" data-action="test-skill" data-id="${skill.id}">选择评估集测试</button>
-      <button class="primary-button" data-action="enable-skill" data-id="${skill.id}">启用新版本</button>
+  `;
+}
+
+function renderSkillSidePanel(skill, state) {
+  const conflicts = detectSkillConflicts(state.skills.filter((item) => item.status === "已启用"), "当前任务");
+  const relatedConflicts = conflicts.filter((item) => item.skillA === skill.id || item.skillB === skill.id);
+  const recentLogs = (state.modelLogs || []).filter((log) => (log.matchedSkillIds || []).includes(skill.id)).slice(0, 6);
+  return `
+    <div class="panel">
+      <h2>版本记录</h2>
+      <div class="version-list">${(skill.changelog || []).slice(0, 8).map((item) => `<div><strong>${escapeHtml(item.summary)}</strong><span>${formatDate(item.at)}｜${escapeHtml(item.actor || "系统")}</span></div>`).join("")}</div>
     </div>
-    ${state.skillSuggestion?.targetSkillId === skill.id ? `<div class="suggestion-box"><h3>优化建议</h3>${keyValueGrid([["更新原因", state.skillSuggestion.updateReason], ["新增规则", state.skillSuggestion.proposedRules], ["预期提升", state.skillSuggestion.expectedImprovement], ["副作用", state.skillSuggestion.possibleSideEffects], ["建议", state.skillSuggestion.recommendation]])}</div>` : ""}
-    ${state.skillComparisonReport ? `<div class="suggestion-box"><h3>对比报告</h3>${keyValueGrid([["旧版本", state.skillComparisonReport.oldSkillVersion], ["新版本", state.skillComparisonReport.newSkillVersion], ["测试案例", state.skillComparisonReport.casesTested], ["提升", state.skillComparisonReport.improvements], ["回归", state.skillComparisonReport.regressions], ["建议", state.skillComparisonReport.recommendation]])}</div>` : ""}
+    <div class="panel">
+      <h2>AI 优化建议</h2>
+      <div class="panel-actions">
+        <button class="secondary-button" data-action="skill-suggestion" data-id="${skill.id}">生成建议</button>
+        <button class="secondary-button" data-action="test-skill" data-id="${skill.id}">回归测试</button>
+        <button class="primary-button" data-action="enable-skill" data-id="${skill.id}">启用测试版本</button>
+      </div>
+      ${state.skillSuggestion?.targetSkillId === skill.id ? `<div class="suggestion-box">${keyValueGrid([["更新原因", state.skillSuggestion.updateReason], ["新增规则", state.skillSuggestion.proposedRules], ["预期提升", state.skillSuggestion.expectedImprovement], ["副作用", state.skillSuggestion.possibleSideEffects], ["建议", state.skillSuggestion.recommendation]])}</div>` : "<p class='muted'>可基于案例库生成优化建议，启用前需人工确认。</p>"}
+      ${state.skillComparisonReport ? `<div class="suggestion-box"><h3>对比报告</h3>${keyValueGrid([["旧版本", state.skillComparisonReport.oldSkillVersion], ["新版本", state.skillComparisonReport.newSkillVersion], ["测试案例", state.skillComparisonReport.casesTested], ["提升", state.skillComparisonReport.improvements], ["回归", state.skillComparisonReport.regressions], ["建议", state.skillComparisonReport.recommendation]])}</div>` : ""}
+    </div>
+    <div class="panel">
+      <h2>冲突提示</h2>
+      ${
+        relatedConflicts.length
+          ? relatedConflicts.map((item) => `<article class="conflict-card"><strong>${escapeHtml(item.conflictDescription)}</strong><p>${escapeHtml(item.suggestedResolution)}</p><span>${escapeHtml(item.skillA)} ↔ ${escapeHtml(item.skillB)}</span></article>`).join("")
+          : "<p class='muted'>暂无明显冲突。系统不会静默忽略冲突。</p>"
+      }
+    </div>
+    <div class="panel">
+      <h2>最近使用日志</h2>
+      <div class="log-table compact">
+        ${recentLogs.map((log) => `<div><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.modelName || "未知模型")}</span><span>${log.success ? "成功" : "失败"}</span><span>${formatDate(log.createdAt)}</span></div>`).join("") || "<p class='muted'>暂无调用记录。</p>"}
+      </div>
+    </div>
   `;
 }
 
@@ -1459,6 +2086,54 @@ function emptyState(title, desc) {
 function activeSkillSummary(state) {
   const skill = state.skills.find((item) => item.status === "已启用");
   return skill ? `${skill.name} ${skill.version}` : "未启用";
+}
+
+function filterSkills(skills, filters = {}) {
+  return skills.filter((skill) => {
+    const functionOk = !filters.function || filters.function === "全部" || skill.skillType === filters.function;
+    const genreOk =
+      !filters.genre ||
+      filters.genre === "全部" ||
+      skill.skillType === filters.genre ||
+      (skill.genreScope || []).some((item) => filters.genre.includes(item) || item.includes(filters.genre.replace(" Skill", "")));
+    const audienceOk =
+      !filters.audience ||
+      filters.audience === "全部" ||
+      skill.skillType === filters.audience ||
+      (skill.audienceNeedScope || []).some((item) => filters.audience.includes(item) || item.includes(filters.audience.replace(" Skill", "")));
+    const statusOk = !filters.status || filters.status === "全部" || skill.status === filters.status;
+    return functionOk && genreOk && audienceOk && statusOk;
+  });
+}
+
+function readSkillField(field) {
+  return document.querySelector(`[data-skill-field="${field}"]`)?.value || "";
+}
+
+function readProviderField(field) {
+  return document.querySelector(`[data-provider-field="${field}"]`)?.value || "";
+}
+
+function readModelField(field) {
+  return document.querySelector(`[data-model-field="${field}"]`)?.value || "";
+}
+
+function readRouteField(field) {
+  return document.querySelector(`[data-route-field="${field}"]`)?.value || "";
+}
+
+function parseLines(value) {
+  return String(value || "")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseCsv(value) {
+  return String(value || "")
+    .split(/[,，、\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function formatValue(value) {

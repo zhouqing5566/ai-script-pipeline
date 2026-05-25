@@ -24,6 +24,7 @@ const dataDirs = [
   "data/cases",
   "data/assets",
   "data/skills",
+  "data/settings",
   "data/logs",
   "data/exports"
 ];
@@ -95,6 +96,71 @@ async function handleApi(req, res, url) {
     return true;
   }
 
+  if (url.pathname === "/api/settings" && req.method === "GET") {
+    const filePath = path.join(rootDir, "data/settings/model-settings.json");
+    try {
+      const content = await fs.readFile(filePath, "utf8");
+      sendJson(res, 200, JSON.parse(content));
+    } catch {
+      sendJson(res, 200, null);
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/settings" && req.method === "POST") {
+    const body = await readBody(req);
+    const filePath = path.join(rootDir, "data/settings/model-settings.json");
+    await fs.writeFile(filePath, JSON.stringify(body, null, 2), "utf8");
+    sendJson(res, 200, { ok: true, path: filePath });
+    return true;
+  }
+
+  if (url.pathname === "/api/test-provider" && req.method === "POST") {
+    const body = await readBody(req);
+    const provider = body.provider || {};
+    const modelName = body.modelName || body.model?.modelName || "test";
+    if (provider.providerType === "local") {
+      sendJson(res, 200, { ok: true, message: "本地 Demo Provider 可用。", mode: "demo" });
+      return true;
+    }
+    if (!provider.baseUrl || !provider.apiKey) {
+      sendJson(res, 400, { ok: false, error: "缺少 Base URL 或 API Key。" });
+      return true;
+    }
+    const endpoint = buildChatCompletionsUrl(provider.baseUrl);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Number(provider.timeoutMs) || 30000);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${provider.apiKey}`,
+          ...(provider.defaultHeaders || {})
+        },
+        body: JSON.stringify({
+          model: modelName,
+          messages: [{ role: "user", content: "ping" }],
+          max_tokens: 8,
+          temperature: 0
+        }),
+        signal: controller.signal
+      });
+      const text = await response.text();
+      sendJson(res, response.ok ? 200 : 502, {
+        ok: response.ok,
+        status: response.status,
+        message: response.ok ? "真实 API 连接测试通过。" : "真实 API 返回错误。",
+        preview: text.slice(0, 300)
+      });
+    } catch (error) {
+      sendJson(res, 502, { ok: false, error: error.message });
+    } finally {
+      clearTimeout(timer);
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/export" && req.method === "POST") {
     const body = await readBody(req);
     const ext = body.type === "json" ? "json" : "md";
@@ -111,6 +177,12 @@ async function handleApi(req, res, url) {
   }
 
   return false;
+}
+
+function buildChatCompletionsUrl(baseUrl = "") {
+  const clean = String(baseUrl).trim().replace(/\/+$/, "");
+  if (/\/chat\/completions$/i.test(clean)) return clean;
+  return `${clean}/chat/completions`;
 }
 
 async function serveStatic(req, res, url) {

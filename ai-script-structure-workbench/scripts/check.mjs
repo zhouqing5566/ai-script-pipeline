@@ -16,6 +16,16 @@ import {
 import { auditOutline } from "../src/audit.js";
 import { repairEpisode } from "../src/repair.js";
 import { exportOutlineMarkdown } from "../src/export.js";
+import {
+  createNewSkill,
+  duplicateSkill,
+  matchSkillsForTask,
+  setSkillStatus,
+  updateSkill
+} from "../src/skill-manager.js";
+import { createModelDraft, createProviderDraft, createRouteDraft } from "../src/model-config.js";
+import { selectModelRoute } from "../src/model-router.js";
+import { callModel } from "../src/model-adapter.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -72,9 +82,109 @@ assert.ok(markdown.includes("结尾悬念"));
 assert.ok(!markdown.includes("themeStatement"));
 assert.ok(!markdown.includes("characterFunction：未填写"));
 
+const requiredSkillFields = [
+  "genreScope",
+  "audienceNeedScope",
+  "taskScope",
+  "priority",
+  "positiveExamples",
+  "negativeExamples",
+  "promptAdditions",
+  "evaluationCriteria",
+  "riskWarnings",
+  "modelPreference"
+];
+for (const field of requiredSkillFields) {
+  assert.ok(Object.hasOwn(state.skills[0], field), `missing skill field: ${field}`);
+}
+
+let skills = [createNewSkill({ name: "测试 Skill", taskScope: ["generateEpisodeOutline"] }), ...state.skills];
+const testSkillId = skills[0].id;
+skills = updateSkill(skills, testSkillId, { rules: ["编辑后的规则"], genreScope: ["都市"], audienceNeedScope: ["尊严修复"] });
+assert.equal(skills[0].rules[0], "编辑后的规则");
+assert.ok(skills[0].changelog.length >= 2);
+skills = duplicateSkill(skills, testSkillId);
+assert.ok(skills[0].name.includes("副本"));
+skills = setSkillStatus(skills, testSkillId, "已停用");
+assert.equal(skills.find((skill) => skill.id === testSkillId).status, "已停用");
+
+const matched = matchSkillsForTask({
+  taskType: "generateEpisodeOutline",
+  featureArea: "细纲生产中心",
+  project: repaired.project,
+  state
+});
+assert.ok(matched.matchedSkillIds.includes("skill-outline-v1"));
+assert.ok(matched.matchedSkillIds.includes("skill-genre-rebirth-revenge-v1"));
+assert.ok(matched.matchedSkillIds.includes("skill-format-short-drama-v1"));
+assert.ok(matched.matchedSkillIds.includes("skill-need-fairness-v1"));
+assert.ok(matched.matchedSkillIds.includes("skill-global-structure-v1"));
+
+assert.ok(state.apiConfig.providers[0].id);
+assert.ok(state.apiConfig.models[0].id);
+assert.ok(state.apiConfig.routes[0].id);
+const providerDraft = createProviderDraft();
+const modelDraft = createModelDraft(providerDraft.id);
+const routeDraft = createRouteDraft(modelDraft.id);
+assert.ok(providerDraft.providerType);
+assert.ok(modelDraft.modelType.length);
+assert.ok(routeDraft.taskType);
+
+const demoSelection = selectModelRoute({
+  state,
+  project: state.currentProject,
+  taskType: "analyzeScript",
+  featureArea: "剧本分析中心",
+  matchedSkills: matched.matchedSkills
+});
+assert.equal(demoSelection.mode, "demo");
+
+const apiState = structuredClone(state);
+apiState.apiConfig.mode = "api";
+apiState.apiConfig.providers = apiState.apiConfig.providers.map((provider) =>
+  provider.id === "provider-openai-compatible-template"
+    ? { ...provider, enabled: true, baseUrl: "https://api.example.com/v1", apiKey: "test-key" }
+    : provider
+);
+apiState.apiConfig.models = apiState.apiConfig.models.map((model) =>
+  model.id === "model-openai-compatible-default" ? { ...model, enabled: true, providerId: "provider-openai-compatible-template" } : model
+);
+apiState.apiConfig.routes = apiState.apiConfig.routes.map((route) =>
+  route.taskType === "analyzeScript" ? { ...route, primaryModelId: "model-openai-compatible-default" } : route
+);
+const apiSelection = selectModelRoute({
+  state: apiState,
+  project: apiState.currentProject,
+  taskType: "analyzeScript",
+  featureArea: "剧本分析中心",
+  matchedSkills: []
+});
+assert.equal(apiSelection.mode, "api");
+assert.equal(apiSelection.model.id, "model-openai-compatible-default");
+
+const modelResult = await callModel({
+  taskType: "evaluateIdea",
+  featureArea: "创作决策中心",
+  inputMeta: { project: state.currentProject },
+  state
+});
+assert.equal(modelResult.success, true);
+assert.equal(modelResult.mode, "demo");
+assert.ok(modelResult.providerId);
+assert.ok(modelResult.modelId);
+assert.ok(Array.isArray(modelResult.matchedSkillIds));
+assert.equal(modelResult.usedFallback, false);
+assert.equal(modelResult.error, null);
+assert.ok(modelResult.latencyMs >= 0);
+
+const gitignore = await fs.readFile(new URL("../.gitignore", import.meta.url), "utf8");
+for (const pattern of [".env", ".env.*", "config.local.json", "data/settings/*.json", "data/api-config*.json", "data/model-config*.json"]) {
+  assert.ok(gitignore.includes(pattern), `.gitignore missing ${pattern}`);
+}
+
 const files = ["index.html", "server.js", "src/app.js", "src/styles.css"];
 for (const file of files) {
   await fs.access(new URL(`../${file}`, import.meta.url));
 }
 
-console.log("check passed: V1 demo workflow, audit, repair, draft, and export are coherent");
+console.log("check passed: V1 demo workflow plus editable Skill assets and model routing are coherent");

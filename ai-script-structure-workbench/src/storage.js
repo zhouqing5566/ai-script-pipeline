@@ -1,4 +1,6 @@
 import { createSeedState } from "./seed-data.js";
+import { normalizeApiConfig } from "./model-config.js";
+import { normalizeSkillList } from "./skill-manager.js";
 
 const storageKey = "ai-script-structure-workbench-v1";
 
@@ -15,6 +17,7 @@ export function loadLocalState() {
 export function saveLocalState(state) {
   localStorage.setItem(storageKey, JSON.stringify(state));
   void persistSnapshot(state);
+  if (state.apiConfig) void persistRuntimeSettings(state.apiConfig);
 }
 
 export function resetLocalState() {
@@ -61,6 +64,18 @@ export async function appendModelLog(log) {
   }
 }
 
+export async function persistRuntimeSettings(apiConfig) {
+  try {
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(apiConfig)
+    });
+  } catch {
+    // Settings remain in localStorage when the local service is unavailable.
+  }
+}
+
 function mergeDefaults(value, defaults) {
   return {
     ...defaults,
@@ -75,6 +90,9 @@ function mergeDefaults(value, defaults) {
       },
       locks: { ...defaults.currentProject.locks, ...(value.currentProject?.locks || {}) }
     },
-    assets: { ...defaults.assets, ...(value.assets || {}) }
+    assets: { ...defaults.assets, ...(value.assets || {}) },
+    skills: normalizeSkillList(value.skills?.length ? value.skills : defaults.skills),
+    skillFilters: { ...defaults.skillFilters, ...(value.skillFilters || {}) },
+    apiConfig: normalizeApiConfig({ ...defaults.apiConfig, ...(value.apiConfig || {}) })
   };
 }

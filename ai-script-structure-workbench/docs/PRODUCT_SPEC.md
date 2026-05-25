@@ -85,6 +85,342 @@
 - 成稿生成
 - Markdown / JSON 导出
 
+## V1.1 可进化底座
+
+本次升级在首版 Demo 闭环上补齐两个底层能力：
+
+1. Skill 可编辑资产系统
+2. API 与模型配置中心
+
+目标不是推倒重来，而是让后续真实 API、真实团队方法论和项目级路由可以平滑接入。
+
+## EditableSkill
+
+Skill 从展示型记录升级为可编辑资产：
+
+```js
+EditableSkill = {
+  id,
+  name,
+  description,
+  category,
+  skillType,
+  genreScope,
+  audienceNeedScope,
+  platformScope,
+  taskScope,
+  priority,
+  status,
+  source,
+  version,
+  rules,
+  positiveExamples,
+  negativeExamples,
+  promptAdditions,
+  outputSchemaRef,
+  evaluationCriteria,
+  riskWarnings,
+  modelPreference,
+  createdBy,
+  createdAt,
+  updatedAt,
+  lastTestAt,
+  changelog
+}
+```
+
+状态枚举：
+
+```text
+草稿 / 测试中 / 已启用 / 已停用 / 已归档
+```
+
+来源枚举：
+
+```text
+system / admin / ai_suggestion
+```
+
+分类支持：
+
+```text
+按功能 / 按题材 / 按观众情绪需求 / 全局
+```
+
+已实现操作：
+
+```text
+新增 Skill
+编辑 Skill
+复制 Skill
+停用 / 启用 Skill
+回滚 Skill
+Demo 合并 Skill 入口
+版本 changelog
+```
+
+## SkillModelPreference
+
+```js
+SkillModelPreference = {
+  preferredModelIds,
+  forbiddenModelIds,
+  requireCapabilities,
+  allowFallback,
+  fallbackStrategy,
+  notes
+}
+```
+
+Skill 可以推荐模型、禁用模型、要求 JSON / vision / tools / streaming 等能力，并记录 fallback 策略。
+
+## Skill 匹配
+
+系统执行任务时不再只使用一个全局 Skill，而是通过：
+
+```js
+matchSkillsForTask({ taskType, featureArea, project, state })
+```
+
+匹配顺序：
+
+```text
+项目手动指定 Skill
+→ 当前 taskType 对应 Skill
+→ 当前题材对应 Skill
+→ 当前观众情绪需求对应 Skill
+→ 当前内容形态 / 平台 Skill
+→ 全局基础 Skill
+```
+
+模型调用日志会记录：
+
+```text
+matchedSkillIds
+skillConflicts
+routingReason
+```
+
+## Skill 冲突
+
+V1.1 增加简单冲突检测：
+
+```js
+SkillConflict = {
+  skillA,
+  skillB,
+  conflictDescription,
+  affectedTask,
+  suggestedResolution,
+  requiresAdminDecision
+}
+```
+
+示例：
+
+```text
+短剧强爽 Skill 要求前期高频打脸。
+情感宿命 Skill 要求前期保留情绪压抑和关系铺垫。
+```
+
+系统不允许静默忽略冲突，优先级为：
+
+```text
+项目锁定 Skill
+→ 管理员手动指定 Skill
+→ 当前任务 Skill
+→ 题材 Skill
+→ 情绪需求 Skill
+```
+
+## API Provider
+
+```js
+ApiProviderConfig = {
+  id,
+  name,
+  providerType,
+  baseUrl,
+  apiKey,
+  enabled,
+  priority,
+  defaultHeaders,
+  timeoutMs,
+  rateLimit,
+  notes,
+  createdAt,
+  updatedAt
+}
+```
+
+预留 Provider 类型：
+
+```text
+openai / anthropic / gemini / deepseek / qwen / zhipu / moonshot / doubao / openrouter / openai_compatible / local / custom
+```
+
+V1.1 先实现 OpenAI-compatible：
+
+```text
+POST {baseUrl}/chat/completions
+```
+
+如果 `baseUrl` 已包含 `/chat/completions`，不会重复拼接。
+
+## ModelConfig
+
+```js
+ModelConfig = {
+  id,
+  providerId,
+  displayName,
+  modelName,
+  enabled,
+  modelType,
+  contextWindow,
+  maxOutputTokens,
+  supportsJsonMode,
+  supportsVision,
+  supportsTools,
+  supportsStreaming,
+  costLevel,
+  qualityLevel,
+  recommendedTasks,
+  notes
+}
+```
+
+模型类型预留：
+
+```text
+text / vision / long_context / reasoning / fast / cheap / embedding / rerank / audio / video
+```
+
+质量等级：
+
+```text
+fast / balanced / high_quality / best
+```
+
+## FeatureModelRoute
+
+```js
+FeatureModelRoute = {
+  id,
+  featureArea,
+  taskType,
+  primaryModelId,
+  fallbackModelIds,
+  requiredCapabilities,
+  maxInputTokens,
+  maxOutputTokens,
+  temperature,
+  topP,
+  jsonModeRequired,
+  streamingEnabled,
+  retryCount,
+  timeoutMs,
+  allowFallback,
+  enabled,
+  notes
+}
+```
+
+每个 `taskType` 可以配置主模型、备用模型、JSON 模式、temperature、maxOutputTokens、重试次数、超时和 fallback。
+
+## Model Router
+
+新增：
+
+```text
+src/model-router.js
+```
+
+路由优先级：
+
+```text
+项目手动指定模型
+→ 当前任务路由模型
+→ 当前 Skill 推荐模型
+→ 功能区默认模型
+→ 系统全局默认模型
+→ DemoRuleEngine
+```
+
+真实 API 失败时：
+
+```text
+不得静默切 Demo。
+如果 fallbackModelIds 有可用真实模型，可切备用模型。
+usedFallback 必须写入日志。
+```
+
+## Model Adapter
+
+`src/model-adapter.js` 升级为统一入口：
+
+```js
+callModel({
+  taskType,
+  featureArea,
+  projectId,
+  skillIds,
+  prompt,
+  schema,
+  inputMeta,
+  routeOverride
+})
+```
+
+返回：
+
+```js
+ModelCallResult = {
+  success,
+  mode,
+  taskType,
+  providerId,
+  modelId,
+  usedFallback,
+  matchedSkillIds,
+  outputText,
+  parsedJson,
+  error,
+  latencyMs,
+  tokenUsage,
+  costEstimate,
+  logId
+}
+```
+
+保留 `runModelTask` 兼容现有 UI。
+
+## JSON 修复
+
+新增：
+
+```text
+src/json-repair.js
+```
+
+解析流程：
+
+```text
+直接 JSON.parse
+→ 提取 JSON 代码块
+→ 截取第一个 { 到最后一个 }
+→ 调用 jsonRepair 任务
+→ 明确报错
+```
+
+## 安全边界
+
+- API Key 只允许本地运行时填写。
+- 前端 password 输入框不长期明文展示完整 Key。
+- 本地配置可进入 `localStorage` 与 `data/settings/`。
+- `.gitignore` 排除 `.env`、`.env.*`、`config.local.json`、`data/settings/*.json`、`data/api-config*.json`、`data/model-config*.json`。
+- `seed-data.js` 只包含 Demo Provider / Demo Model，不包含真实 Key。
+
 ## 后续扩展建议
 
 1. 接入真实模型 API，并保留 `taskType`、输入摘要、输出摘要、耗时、错误日志。

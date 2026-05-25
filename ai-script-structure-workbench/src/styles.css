@@ -387,6 +387,10 @@ svg {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.form-grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .form-grid.four {
   grid-template-columns: 1fr 1fr 110px 130px;
   align-items: end;
@@ -855,10 +859,27 @@ textarea {
 }
 
 .skill-layout {
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: 250px minmax(0, 1fr);
+  align-items: start;
 }
 
-.skill-row {
+.skill-filter-box,
+.skill-side,
+.skill-editor {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.skill-filter-box {
+  padding: 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.skill-row,
+.list-row {
   text-align: left;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -868,14 +889,67 @@ textarea {
   gap: 4px;
 }
 
-.skill-row span {
+.skill-row span,
+.list-row span {
   color: var(--muted);
   font-size: 12px;
 }
 
-.skill-row.active {
+.skill-row.active,
+.list-row.active {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+
+.skill-form .medium-textarea {
+  min-height: 110px;
+}
+
+.skill-form .form-grid.three {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.skill-side {
+  grid-column: 2;
+}
+
+.conflict-card {
+  padding: 10px;
+  border: 1px solid #f1cf91;
+  background: var(--risk-soft);
+  border-radius: var(--radius);
+  margin-top: 8px;
+}
+
+.conflict-card p,
+.conflict-card span {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-tabs {
+  margin-top: 14px;
+}
+
+.settings-split {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.list-row {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.notice-panel,
+.notice-list {
+  color: var(--muted);
+}
+
+.notice-list p {
+  margin: 0 0 10px;
 }
 
 .rule-list {
@@ -1249,8 +1323,13 @@ pre {
 
 .log-table div {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 160px 80px 110px;
+  grid-template-columns: minmax(150px, 1fr) repeat(8, minmax(80px, 120px));
   gap: 8px;
+  overflow-x: auto;
+}
+
+.log-table.compact div {
+  grid-template-columns: minmax(0, 1fr) 110px 70px 90px;
 }
 
 .log-table span {
@@ -1457,6 +1536,7 @@ pre {
   .two-column,
   .outline-grid,
   .skill-layout,
+  .settings-split,
   .asset-layout {
     grid-template-columns: 1fr;
   }

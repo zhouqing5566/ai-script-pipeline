@@ -34,7 +34,10 @@ export const taskLabels = {
   auditOutline: "细纲审计",
   repairSection: "局部修复",
   generateDraft: "成稿生成",
-  auditDraft: "成稿审计"
+  auditDraft: "成稿审计",
+  jsonRepair: "JSON 修复",
+  summarizeLongText: "长文本总结",
+  classifyTags: "分类与标签"
 };
 
 export const statusLabels = {
@@ -188,7 +191,21 @@ export const fieldLabels = {
   before: "修改前",
   after: "修改后",
   changeSummary: "修改摘要",
-  impactScope: "影响范围"
+  impactScope: "影响范围",
+  source: "来源",
+  category: "分类",
+  skillType: "Skill 类型",
+  genreScope: "适用题材",
+  audienceNeedScope: "适用观众情绪",
+  platformScope: "适用平台/形态",
+  taskScope: "适用任务",
+  priority: "优先级",
+  promptAdditions: "Prompt 补充",
+  positiveExamples: "正例",
+  negativeExamples: "反例",
+  evaluationCriteria: "评估标准",
+  riskWarnings: "风险提示",
+  modelPreference: "模型偏好"
 };
 
 export function labelForKey(key) {

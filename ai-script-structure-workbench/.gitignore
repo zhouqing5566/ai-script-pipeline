@@ -1,5 +1,11 @@
 node_modules/
+.env
+.env.*
+config.local.json
 data/logs/*.jsonl
 data/exports/*
 data/projects/*.json
+data/settings/*.json
+data/api-config*.json
+data/model-config*.json
 .DS_Store

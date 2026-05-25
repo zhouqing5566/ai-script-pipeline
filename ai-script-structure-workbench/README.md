@@ -30,6 +30,8 @@
 - 成稿中心：基于已生成分集细纲输出单集剧本文本
 - 反馈回流：记录人工修改、主编评价、成稿反馈和上线数据
 - 导出：完整项目 JSON、剧本分析 Markdown、分集细纲 Markdown、人物小传 Markdown、审计报告 Markdown、成稿 Markdown
+- Skill 可编辑资产系统：新增、编辑、复制、停用、启用、回滚、Demo 合并入口、版本记录、适用范围、规则、Prompt 补充、正反例、评估标准、风险提示、模型偏好
+- API 与模型配置中心：多 Provider、多模型、任务路由、功能区路由、Skill 模型偏好、项目级覆盖预留、备用模型、调用日志、安全说明
 
 ## 运行方式
 
@@ -64,12 +66,111 @@ npm run check
 - 局部修复能补人物、主题和关系变化
 - 成稿与 Markdown 导出可用
 - 导出内容不泄漏机器字段名
+- EditableSkill 关键字段、Skill 编辑状态逻辑和 matchSkillsForTask
+- ApiProviderConfig / ModelConfig / FeatureModelRoute 与 model-router
+- callModel 返回统一 ModelCallResult
+- Demo Mode 仍然可用
+- .gitignore 排除本地 API Key 与模型配置
 
 ## 模式说明
 
-当前版本是 `Demo Mode`，使用本地规则引擎演示产品闭环。
+当前默认是 `Demo Mode`，使用本地规则引擎演示产品闭环。
 
-它不会静默调用真实模型，也不会把 Demo 结果冒充真实 API 输出。后续接真实模型时，可从 `src/model-adapter.js` 扩展任务分发，并保留当前调用日志结构。
+它不会静默调用真实模型，也不会把 Demo 结果冒充真实 API 输出。
+
+切到 `真实 API Mode` 后：
+
+- 系统会通过 `model-router` 按项目覆盖、任务路由、Skill 模型偏好、功能区默认、全局默认模型选择模型。
+- 真实 API 调用失败时不会静默切回 Demo。
+- 只有路由中配置了可用备用真实模型时才会 fallback，并在调用日志中记录 `usedFallback`。
+- 如果没有可用真实模型，系统会明确返回 `mode: "demo"` 的 DemoRuleEngine 结果。
+
+## 配置 OpenAI-compatible API
+
+在页面进入：
+
+```text
+系统设置 → API Provider
+```
+
+新增或编辑 Provider：
+
+```text
+Provider 类型：openai_compatible
+Base URL：https://your-provider.example/v1
+API Key：本地填写，不要提交
+是否启用：勾选
+```
+
+Base URL 既可以填到 `/v1`，也可以直接填完整 `/chat/completions`；适配器会避免重复拼接。
+
+然后进入：
+
+```text
+系统设置 → 模型列表
+```
+
+新增或编辑模型：
+
+```text
+Provider：选择上一步 Provider
+真实模型名：服务商要求的 model 名称
+支持 JSON：按模型能力勾选
+是否启用：勾选
+```
+
+最后进入：
+
+```text
+系统设置 → 路由配置
+```
+
+给任务绑定模型，例如：
+
+```text
+功能区：细纲生产中心
+任务类型：generateEpisodeOutline
+主模型：你的真实模型
+备用模型：可填其他模型 ID，逗号或顿号分隔
+强制 JSON：勾选
+允许 fallback：勾选
+```
+
+## Skill 绑定模型偏好
+
+进入：
+
+```text
+Skill 进化 → 选择 Skill → 模型偏好
+```
+
+可填写：
+
+```text
+推荐模型 ID：model-openai-compatible-default
+禁用模型 ID：不希望该 Skill 使用的模型
+必需能力：json、vision、tools、streaming 或模型类型
+允许 fallback：勾选或取消
+Fallback 策略：补充人工说明
+```
+
+模型路由优先级：
+
+```text
+项目手动指定模型
+→ 当前任务路由模型
+→ 当前 Skill 推荐模型
+→ 功能区默认模型
+→ 系统全局默认模型
+→ DemoRuleEngine
+```
+
+## 安全提示
+
+- 不要把真实 API Key 写入 `seed-data.js`、README 示例或任何提交文件。
+- 前端输入框使用 password，不长期明文展示完整 API Key。
+- 本地保存仅用于本机运行，可能进入 `localStorage` 和 `data/settings/`。
+- `.gitignore` 已排除 `.env`、`config.local.json`、`data/settings/*.json`、`data/api-config*.json`、`data/model-config*.json`。
 
 ## 目录结构
 
@@ -81,9 +182,15 @@ src/generators.js         Demo 结构分析、决策和细纲生成
 src/audit.js              独立审计逻辑
 src/repair.js             局部修复逻辑
 src/export.js             Markdown / JSON 导出
-src/model-adapter.js      模型任务适配层与调用日志
+src/model-adapter.js      统一 callModel 入口、Demo / API 调用与日志
+src/model-router.js       任务路由、Skill 模型偏好和 fallback 选择
+src/model-config.js       Provider / Model / Route 数据结构与种子配置
+src/skill-manager.js      EditableSkill、编辑状态、匹配、冲突检测
+src/prompt-builder.js     通用系统原则、锁定锚点和 Skill 规则拼装
+src/json-repair.js        JSON 解析与修复流程
+src/provider-adapters/    Provider Adapter，V1 实现 OpenAI-compatible
 src/schemas.js            导航、枚举、中文字段标签
-src/seed-data.js          Demo 项目、案例、模式资产、Skill
+src/seed-data.js          Demo 项目、案例、模式资产、Skill、Demo 模型配置
 src/storage.js            localStorage 与本地快照持久化
 src/styles.css            工作台样式系统
 scripts/check.mjs         无依赖 smoke check
@@ -95,6 +202,7 @@ scripts/check.mjs         无依赖 smoke check
 
 ```text
 data/projects/
+data/settings/
 data/logs/
 data/exports/
 ```

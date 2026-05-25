@@ -1,4 +1,6 @@
 import { audienceNeedTypes, hookTypes } from "./schemas.js";
+import { createSeedApiConfig } from "./model-config.js";
+import { normalizeSkillList } from "./skill-manager.js";
 
 export function uid(prefix = "id") {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -14,6 +16,12 @@ export function createSeedState() {
     activeAssetCategory: "audienceNeeds",
     selectedEpisodeNo: 1,
     selectedSkillId: "skill-analysis-v1",
+    skillFilters: {
+      function: "全部",
+      genre: "全部",
+      audience: "全部",
+      status: "全部"
+    },
     saveStatus: "本地已保存",
     lastExport: null,
     scriptInput: {
@@ -106,7 +114,8 @@ export function createSeedState() {
       }
     ],
     assets: createSeedAssets(),
-    skills: createSeedSkills(),
+    skills: normalizeSkillList(createSeedSkills()),
+    apiConfig: createSeedApiConfig(),
     modelLogs: []
   };
 }
@@ -247,19 +256,76 @@ function createSeedAssets() {
 function createSeedSkills() {
   return [
     {
+      id: "skill-global-structure-v1",
+      name: "全局基础剧本结构 Skill",
+      description: "所有分析、生成、审计任务都会兜底调用的基础结构规则。",
+      category: "全局",
+      skillType: "剧本分析 Skill",
+      genreScope: [],
+      audienceNeedScope: [],
+      platformScope: ["短剧", "漫剧", "网文改编"],
+      taskScope: ["analyzeScript", "generateMacroOutline", "generateEpisodeOutline", "auditOutline", "generateDraft"],
+      priority: 20,
+      status: "已启用",
+      source: "system",
+      version: "1.0.0",
+      rules: [
+        "任何输出都必须回答结构功能是什么。",
+        "已锁定内容不得被后续生成擅自覆盖。",
+        "情节必须服务人物、主题、关系或情绪，否则标记为弱情节。"
+      ],
+      positiveExamples: ["第 9 集爽点释放同时迫使主角承认自己的误判，关系也发生变化。"],
+      negativeExamples: ["反派挑衅，主角打脸，众人震惊，但人物、主题、关系没有变化。"],
+      promptAdditions: ["输出前检查：主题、人物、情绪、主线大反差、结尾承诺是否互相支撑。"],
+      outputSchemaRef: "TaskSchema",
+      evaluationCriteria: ["是否减少空泛总结", "是否明确每集存在理由", "是否保留锁定锚点"],
+      riskWarnings: ["只堆爽点会造成中段疲劳。", "反转必须意外但合理。"],
+      modelPreference: {
+        preferredModelIds: ["model-demo-rule-engine"],
+        forbiddenModelIds: [],
+        requireCapabilities: ["json"],
+        allowFallback: true,
+        fallbackStrategy: "任务路由优先，失败后使用备用模型",
+        notes: "首版默认绑定 Demo 模型，真实 API 配好后可替换。"
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdBy: "系统",
+      changelog: [{ at: new Date().toISOString(), actor: "系统", summary: "创建全局基础 Skill" }]
+    },
+    {
       id: "skill-analysis-v1",
       name: "剧本结构分析 Skill",
-      type: "剧本分析 Skill",
+      category: "按功能",
+      skillType: "剧本分析 Skill",
+      genreScope: ["都市", "重生", "复仇"],
+      audienceNeedScope: ["尊严修复", "公平清算"],
+      platformScope: ["短剧", "漫剧"],
+      taskScope: ["analyzeScript", "extractPatterns", "classifyCase"],
+      priority: 90,
       version: "1.0.0",
       status: "已启用",
+      source: "system",
       description: "强制从情绪需求、主题、人物、主线大反差和分集功能拆解剧本。",
       rules: [
         "不只总结剧情，必须说明结构功能。",
         "每个风险字段必须指出可修复方向。",
         "每集必须拆人物功能、主题功能、信息增量和结尾悬念。"
       ],
-      promptTemplate: "你是专业短剧、漫剧、爽剧、网文改编方向的剧本结构顾问。",
-      schemaRef: "ScriptAnalysisRecord",
+      positiveExamples: ["开头羞辱不仅是事件，也是尊严修复情绪债和后续清算期待。"],
+      negativeExamples: ["本剧讲述女主复仇成功，过程很爽。"],
+      promptAdditions: ["拆解时优先回答：观众为什么继续看，结构为什么有效，哪些模式可复用。"],
+      outputSchemaRef: "ScriptAnalysisRecord",
+      evaluationCriteria: ["是否拆出观众情绪需求", "是否拆出主线大反差", "是否避免剧情复述"],
+      riskWarnings: ["空泛总结会污染案例库。", "标签过多但无使用建议会变成垃圾标签。"],
+      modelPreference: {
+        preferredModelIds: ["model-demo-rule-engine"],
+        forbiddenModelIds: [],
+        requireCapabilities: ["json"],
+        allowFallback: true,
+        fallbackStrategy: "允许切到任务备用模型，但不得静默切 Demo",
+        notes: "真实 API 模式建议使用长上下文、高质量 JSON 模型。"
+      },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       createdBy: "系统",
@@ -280,17 +346,36 @@ function createSeedSkills() {
     {
       id: "skill-outline-v1",
       name: "分集细纲生成 Skill",
-      type: "细纲生成 Skill",
+      category: "按功能",
+      skillType: "细纲生成 Skill",
+      genreScope: ["都市", "重生", "复仇"],
+      audienceNeedScope: ["尊严修复", "公平清算"],
+      platformScope: ["短剧", "漫剧"],
+      taskScope: ["generateMacroOutline", "generateStageOutline", "generateEpisodeOutline"],
+      priority: 95,
       version: "1.0.0",
       status: "已启用",
+      source: "system",
       description: "基于锁定锚点生成宏观结构、阶段大纲和分集细纲。",
       rules: [
         "生成必须引用已锁定主题、大反差、结局和大节点。",
         "每集必须包含人物功能、情绪功能、主题功能、关系变化。",
         "未锁定内容生成时必须标记风险。"
       ],
-      promptTemplate: "严格尊重用户已锁定的创作锚点，不得擅自覆盖。",
-      schemaRef: "EpisodeOutline",
+      positiveExamples: ["每次反击都带来信息权、关系权或选择权变化。"],
+      negativeExamples: ["连续三集只有反派挑衅和主角打脸。"],
+      promptAdditions: ["分集细纲必须解释这一集为什么存在。"],
+      outputSchemaRef: "EpisodeOutline",
+      evaluationCriteria: ["每集是否有人物功能", "是否有信息增量", "结尾是否留期待"],
+      riskWarnings: ["未锁定主题时容易写成流水账。", "连续机械打脸会导致中段疲劳。"],
+      modelPreference: {
+        preferredModelIds: ["model-demo-rule-engine"],
+        forbiddenModelIds: [],
+        requireCapabilities: ["json"],
+        allowFallback: true,
+        fallbackStrategy: "优先任务路由备用模型",
+        notes: "真实 API 模式建议使用长上下文模型。"
+      },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       createdBy: "系统",
@@ -307,6 +392,120 @@ function createSeedSkills() {
           passed: true
         }
       ]
+    },
+    {
+      id: "skill-genre-rebirth-revenge-v1",
+      name: "重生复仇 Skill",
+      description: "适用于重生、复仇、真相追索类项目，强调前世情绪债、今生证据链和终局清算。",
+      category: "按题材",
+      skillType: "重生复仇 Skill",
+      genreScope: ["重生", "复仇", "都市"],
+      audienceNeedScope: ["公平清算", "尊严修复", "复仇释放"],
+      platformScope: ["短剧", "漫剧", "网文"],
+      taskScope: ["evaluateIdea", "generateDirections", "generateMainlineReversals", "generateEpisodeOutline", "auditOutline"],
+      priority: 75,
+      status: "已启用",
+      source: "system",
+      version: "1.0.0",
+      rules: [
+        "前期必须建立前世亏欠和今生反击机会。",
+        "复仇爽点不能只靠羞辱回敬，最好推进证据链、身份权或关系权。",
+        "中段必须揭示更深真相，避免只循环清算小反派。"
+      ],
+      positiveExamples: ["女主没有立刻翻盘，而是留下漏洞引出真正操盘者。"],
+      negativeExamples: ["主角凭前世记忆每集无成本碾压所有人。"],
+      promptAdditions: ["优先规划：前世债、今生局、证据链、幕后真相、终局选择。"],
+      outputSchemaRef: "EpisodeOutline",
+      evaluationCriteria: ["复仇是否升级", "真相是否有伏笔", "主角是否被仇恨考验"],
+      riskWarnings: ["复仇释放过早会透支后续期待。"],
+      modelPreference: {
+        preferredModelIds: ["model-demo-rule-engine"],
+        forbiddenModelIds: [],
+        requireCapabilities: ["json"],
+        allowFallback: true,
+        fallbackStrategy: "题材 Skill 可让位于任务路由模型",
+        notes: ""
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdBy: "系统",
+      changelog: [{ at: new Date().toISOString(), actor: "系统", summary: "创建重生复仇题材 Skill" }]
+    },
+    {
+      id: "skill-format-short-drama-v1",
+      name: "短剧强爽 Skill",
+      description: "适用于短剧强爽节奏，强调前期高频冲突、信息清楚和集尾钩子。",
+      category: "按题材",
+      skillType: "短剧强爽 Skill",
+      genreScope: ["短剧", "都市逆袭"],
+      audienceNeedScope: ["尊严修复", "公平清算", "身份跃迁"],
+      platformScope: ["短剧"],
+      taskScope: ["generateDirections", "generateEpisodeOutline", "generateDraft"],
+      priority: 70,
+      status: "已启用",
+      source: "system",
+      version: "1.0.0",
+      rules: [
+        "前 3 集必须高频打脸或强冲突验证钩子。",
+        "每集开头 10 秒给冲突、疑问或高压选择。",
+        "每集结尾必须留危机、误会、反转或选择。"
+      ],
+      positiveExamples: ["订婚宴羞辱开局后，用证据反杀但留下幕后操盘者疑问。"],
+      negativeExamples: ["连续铺垫关系不释放冲突，前 3 集没有爽点。"],
+      promptAdditions: ["短剧表达必须信息清楚，冲突外化，钩子前置。"],
+      outputSchemaRef: "EpisodeOutline",
+      evaluationCriteria: ["开场是否够快", "每集是否有爽点", "结尾是否形成下一集期待"],
+      riskWarnings: ["高频打脸可能与情感宿命、慢热铺垫类 Skill 冲突。"],
+      modelPreference: {
+        preferredModelIds: ["model-demo-rule-engine"],
+        forbiddenModelIds: [],
+        requireCapabilities: ["json"],
+        allowFallback: true,
+        fallbackStrategy: "允许任务模型覆盖",
+        notes: ""
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdBy: "系统",
+      changelog: [{ at: new Date().toISOString(), actor: "系统", summary: "创建短剧强爽 Skill" }]
+    },
+    {
+      id: "skill-need-fairness-v1",
+      name: "公平清算 Skill",
+      description: "适用于公平清算情绪需求，重点设计证据、公开审判和秩序重建。",
+      category: "按观众情绪需求",
+      skillType: "公平清算 Skill",
+      genreScope: ["都市", "复仇", "权谋"],
+      audienceNeedScope: ["公平清算", "秩序重建", "尊严修复"],
+      platformScope: ["短剧", "漫剧", "网文"],
+      taskScope: ["analyzeScript", "generateThemeCandidates", "generateEpisodeOutline", "auditOutline"],
+      priority: 68,
+      status: "已启用",
+      source: "system",
+      version: "1.0.0",
+      rules: [
+        "爽点最好以证据链、公开承认或秩序修复完成。",
+        "反派不能只是被打脸，还要失去操控叙事的权力。",
+        "结局必须还上开头被污名化或被剥夺公平的情绪债。"
+      ],
+      positiveExamples: ["主角让对方在公开场合承认造假，同时修复被误解的人际关系。"],
+      negativeExamples: ["主角赢了比赛，但开头被冤枉的问题没有被公开清算。"],
+      promptAdditions: ["优先检查：谁欠了主角公平，如何被看见，如何被清算。"],
+      outputSchemaRef: "ThemeAudit",
+      evaluationCriteria: ["公平债是否明确", "清算是否公开", "秩序是否重建"],
+      riskWarnings: ["如果只做私下报复，公平清算情绪兑现会不足。"],
+      modelPreference: {
+        preferredModelIds: ["model-demo-rule-engine"],
+        forbiddenModelIds: [],
+        requireCapabilities: ["json"],
+        allowFallback: true,
+        fallbackStrategy: "允许任务模型覆盖",
+        notes: ""
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdBy: "系统",
+      changelog: [{ at: new Date().toISOString(), actor: "系统", summary: "创建公平清算情绪 Skill" }]
     }
   ];
 }
