@@ -1,0 +1,5 @@
+node_modules/
+data/logs/*.jsonl
+data/exports/*
+data/projects/*.json
+.DS_Store

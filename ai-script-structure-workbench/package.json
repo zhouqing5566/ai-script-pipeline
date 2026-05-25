@@ -1,0 +1,14 @@
+{
+  "name": "ai-script-structure-workbench",
+  "version": "1.0.0",
+  "description": "AI 剧本结构学习与细纲生产系统 V1 本地工作台",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "check": "node scripts/check.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}

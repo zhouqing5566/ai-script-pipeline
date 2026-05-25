@@ -1,0 +1,196 @@
+export const navItems = [
+  { id: "home", label: "首页总览", icon: "layout" },
+  { id: "analysis", label: "剧本分析", icon: "scan" },
+  { id: "cases", label: "案例库", icon: "archive" },
+  { id: "assets", label: "模式资产", icon: "layers" },
+  { id: "skills", label: "Skill 进化", icon: "spark" },
+  { id: "decision", label: "创作决策", icon: "compass" },
+  { id: "outline", label: "细纲生产", icon: "list" },
+  { id: "draft", label: "成稿中心", icon: "pen" },
+  { id: "audit", label: "审计修复", icon: "shield" },
+  { id: "feedback", label: "反馈回流", icon: "loop" },
+  { id: "settings", label: "系统设置", icon: "settings" }
+];
+
+export const taskLabels = {
+  analyzeScript: "剧本结构分析",
+  extractPatterns: "模式提取",
+  classifyCase: "案例分类",
+  generateSkillSuggestion: "Skill 优化建议",
+  testSkillVersion: "Skill 回归测试",
+  evaluateIdea: "创意评估",
+  generateDirections: "方向方案生成",
+  generateThemeCandidates: "主题与情绪生成",
+  generateMainlineReversals: "主线大反差生成",
+  generateEndingCandidates: "结局方案生成",
+  generateMajorNodes: "大节点生成",
+  generateMacroOutline: "宏观结构生成",
+  generateCharacterCore: "人物核心生成",
+  generateGoldfinger: "金手指生成",
+  generateStoryEngine: "故事发动机生成",
+  generateMaterialPools: "素材池生成",
+  generateStageOutline: "阶段大纲生成",
+  generateEpisodeOutline: "分集细纲生成",
+  auditOutline: "细纲审计",
+  repairSection: "局部修复",
+  generateDraft: "成稿生成",
+  auditDraft: "成稿审计"
+};
+
+export const statusLabels = {
+  idea: "创意阶段",
+  decision: "决策阶段",
+  outline: "细纲阶段",
+  draft: "成稿阶段",
+  audit: "审计阶段",
+  frozen: "已冻结"
+};
+
+export const analysisTabs = [
+  ["overview", "总览"],
+  ["hook", "开头"],
+  ["emotion", "情绪需求"],
+  ["theme", "主题"],
+  ["characters", "人物"],
+  ["goldfinger", "金手指"],
+  ["mainline", "主线骨架"],
+  ["reversal", "大反差"],
+  ["ending", "结局"],
+  ["episodes", "分集功能"],
+  ["patterns", "可复用模式"]
+];
+
+export const assetCategories = [
+  ["audienceNeeds", "情绪需求"],
+  ["hooks", "开头钩子"],
+  ["mainlineSkeletons", "主线骨架"],
+  ["mainlineReversals", "主线大反差"],
+  ["goldfingers", "金手指"],
+  ["relationships", "人物关系"],
+  ["rhythms", "分集节奏"],
+  ["endings", "结局兑现"]
+];
+
+export const lockItems = [
+  ["direction", "创意方向"],
+  ["theme", "主题与情绪"],
+  ["reversal", "主线大反差"],
+  ["ending", "结局"],
+  ["majorNodes", "大节点"],
+  ["characterCore", "人物核心"],
+  ["goldfinger", "金手指"],
+  ["storyEngine", "故事发动机"],
+  ["stageOutline", "阶段大纲"],
+  ["episodeOutline", "分集细纲"],
+  ["draft", "成稿"]
+];
+
+export const hookTypes = [
+  "羞辱开局",
+  "危机开局",
+  "死亡/重生开局",
+  "退婚/背叛开局",
+  "身份错位开局",
+  "强者伪装弱者开局",
+  "系统觉醒开局",
+  "金手指暴露开局",
+  "悬疑提问开局",
+  "极致反差开局",
+  "高压选择开局",
+  "关系撕裂开局",
+  "命运倒计时开局"
+];
+
+export const audienceNeedTypes = [
+  "尊严修复",
+  "公平清算",
+  "极致偏爱",
+  "身份跃迁",
+  "控制感补偿",
+  "自由幻想",
+  "被爱与被拯救",
+  "认知优越感",
+  "复仇释放",
+  "秩序重建",
+  "命运反抗",
+  "被误解后的证明",
+  "被抛弃后的反击",
+  "被压迫后的翻身"
+];
+
+export const fieldLabels = {
+  title: "标题",
+  logline: "一句话梗概",
+  themeStatement: "主题句",
+  deepTheme: "深层主题",
+  antiThemeForce: "反主题力量",
+  emotionalPromise: "情绪承诺",
+  emotionalPayoff: "情绪兑现",
+  coreConflict: "核心冲突",
+  mainAppeal: "主要看点",
+  audienceNeeds: "观众情绪需求",
+  risks: "风险",
+  rules: "规则",
+  limits: "限制",
+  costs: "代价",
+  upgradePath: "升级路径",
+  coolUses: "爽点用法",
+  misuseRisks: "误用风险",
+  recommendation: "建议",
+  openingHook: "开头钩子",
+  episodeGoal: "本集目标",
+  conflict: "核心冲突",
+  keyEvent: "关键事件",
+  goldfingerUse: "金手指使用",
+  coolMoment: "爽点",
+  emotionalBeat: "情绪节拍",
+  plotTwist: "本集反转",
+  cliffhanger: "结尾悬念",
+  characterFunction: "人物功能",
+  audienceNeedServed: "观众情绪",
+  themeFunction: "主题功能",
+  relationshipChange: "关系变化",
+  informationGain: "信息增量",
+  foreshadowingUsed: "伏笔回收",
+  foreshadowingPlanted: "伏笔埋设",
+  continuityNotes: "连续性说明",
+  riskNotes: "风险提示",
+  protagonistGoal: "主角目标",
+  antagonistGoal: "反派目标",
+  centralConflict: "中心冲突",
+  drivingQuestion: "驱动问题",
+  whyCannotStop: "为何不能停下",
+  whyGoldfingerCannotSolveEverything: "金手指为何不能解决一切",
+  escalationLogic: "升级逻辑",
+  stageGoals: "阶段目标",
+  obstacleSystem: "阻碍系统",
+  stakesEscalation: "风险升级",
+  postReversalGoalChange: "反差后的目标变化",
+  surfaceDesire: "表层欲望",
+  innerLack: "真正缺失",
+  misbelief: "最大误判",
+  fear: "恐惧",
+  wound: "伤口",
+  temptation: "诱惑",
+  mask: "面具",
+  motivation: "动机",
+  relationshipToTheme: "主题关系",
+  relationshipToReversal: "大反差关系",
+  turningPoints: "转折点",
+  finalChoice: "最终选择",
+  arcSummary: "人物弧光",
+  early: "前期伏笔",
+  middle: "中段伏笔",
+  late: "后期伏笔",
+  firstReveal: "第一次揭示",
+  midReveal: "中段揭示",
+  finalReveal: "最终揭示",
+  before: "修改前",
+  after: "修改后",
+  changeSummary: "修改摘要",
+  impactScope: "影响范围"
+};
+
+export function labelForKey(key) {
+  return fieldLabels[key] || "补充字段";
+}
