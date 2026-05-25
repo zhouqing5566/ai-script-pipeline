@@ -78,19 +78,24 @@ export async function callModel({
   let mode = selection.mode;
   const warnings = [];
   const requestedMode = state?.apiConfig?.mode || "demo";
+  const requiresRouteFix = requestedMode === "api" && selection.mode === "demo" && !state?.apiConfig?.allowDemoInApiMode;
   if (requestedMode === "api" && selection.mode === "demo") {
     warnings.push("当前为真实 API Mode，但该任务路由仍指向 Demo 模型。请在系统设置 → 路由配置中绑定真实模型。");
   }
   const attemptErrors = [];
 
   try {
-    if (selection.mode === "demo") {
+    if (requiresRouteFix) {
+      error = "当前是真实 API Mode，但该任务仍指向 Demo 模型。请点击“一键切换核心任务到当前真实模型”，或手动修改任务路由。";
+    } else if (selection.mode === "demo") {
       const output = dispatchTask(taskType, inputMeta, state);
       outputText = typeof output === "string" ? output : JSON.stringify(output, null, 2);
       parsedJson = typeof output === "string" ? null : output;
       mode = "demo";
     } else {
-      const response = await executeApiAttempt({
+      const response = await executeApiAttemptWithRetries({
+        label: "主模型",
+        attemptErrors,
         taskType,
         projectId,
         skillIds,
@@ -111,7 +116,7 @@ export async function callModel({
       costEstimate = estimateCost(model, tokenUsage);
     }
   } catch (providerError) {
-    attemptErrors.push(`主模型失败：${providerError.message}`);
+    if (!attemptErrors.length) attemptErrors.push(`主模型失败：${providerError.message}`);
     if (selection.mode === "api") {
       const fallback = selectFallbackModel({
         config: state?.apiConfig,
@@ -124,7 +129,9 @@ export async function callModel({
         provider = fallback.provider;
         model = fallback.model;
         try {
-          const response = await executeApiAttempt({
+          const response = await executeApiAttemptWithRetries({
+            label: "备用模型",
+            attemptErrors,
             taskType,
             projectId,
             skillIds,
@@ -144,7 +151,7 @@ export async function callModel({
           providerStatus = response.status;
           costEstimate = estimateCost(model, tokenUsage);
         } catch (fallbackError) {
-          attemptErrors.push(`备用模型失败：${fallbackError.message}`);
+          if (!attemptErrors.some((item) => item.includes("备用模型"))) attemptErrors.push(`备用模型失败：${fallbackError.message}`);
           error = attemptErrors.join("；");
         }
       } else {
@@ -171,6 +178,7 @@ export async function callModel({
     providerId: provider?.id || null,
     modelId: model?.id || null,
     usedFallback,
+    requiresRouteFix,
     matchedSkillIds,
     warnings,
     attemptErrors,
@@ -204,6 +212,7 @@ export async function callModel({
     skillConflicts: conflicts,
     warnings,
     apiModeDemoWarning: warnings.some((item) => item.includes("真实 API Mode")),
+    requiresRouteFix,
     routingReason: selection.routingReason,
     usedFallback,
     attemptErrors,
@@ -336,9 +345,25 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
   };
 }
 
+async function executeApiAttemptWithRetries({ label, attemptErrors, ...args }) {
+  const retryCount = Math.max(0, Math.min(5, Number(args.options?.retryCount) || 0));
+  const totalAttempts = retryCount + 1;
+  let lastError = null;
+  for (let index = 0; index < totalAttempts; index += 1) {
+    try {
+      return await executeApiAttempt(args);
+    } catch (error) {
+      lastError = error;
+      const prefix = totalAttempts === 1 ? `${label}失败` : `${label}第 ${index + 1}/${totalAttempts} 次失败`;
+      attemptErrors.push(`${prefix}：${error.message}`);
+    }
+  }
+  throw lastError || new Error(`${label}调用失败`);
+}
+
 async function callProvider({ provider, model, messages, options }) {
   const requestFormat = resolveClientRequestFormat({ provider, model });
-  const payload = { provider, model, messages, options, requestFormat };
+  const payload = { providerId: provider?.id || null, modelId: model?.id || null, messages, options, requestFormat };
   if (typeof globalThis.__MODEL_CALL_PROXY__ === "function") {
     try {
       return await globalThis.__MODEL_CALL_PROXY__(payload);
@@ -449,7 +474,7 @@ function normalizeClientProviderError(message = "") {
     return `${message}。当前接口不接受 OpenAI Chat Completions 格式。若你使用 OpenAI 代理/DeepSeek，请将 requestFormat 改为 openai_chat，并确认 Base URL 是 OpenAI-compatible 地址；若你使用官方 Gemini API，请改为 gemini_native。`;
   }
   if (/Failed to fetch/i.test(message)) {
-    return `${message}。浏览器直连外部 API 失败，可能是 CORS 或网络问题。真实任务应走本地 server proxy；若仍出现，请确认本地服务正在运行。`;
+    return `${message}。前端请求本地 /api/model-call 失败。请确认本地服务 http://127.0.0.1:4178 正在运行，server.js 未报错，且没有被浏览器/代理拦截。`;
   }
   if (/The user aborted a request|signal is aborted|AbortError|aborted/i.test(message)) {
     return `${message}。请求被中止，可能是超时、重复触发或页面状态切换。请查看 timeoutMs 和是否重复点击。`;

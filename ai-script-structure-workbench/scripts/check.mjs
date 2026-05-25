@@ -251,6 +251,10 @@ assert.equal(apiSuccessResult.requestFormat, "openai_chat");
 assert.equal(apiSuccessResult.log.serverProxy, true);
 assert.equal(proxyCalls.length, 1);
 assert.equal(proxyCalls[0].requestFormat, "openai_chat");
+assert.equal(proxyCalls[0].providerId, "provider-openai-compatible-template");
+assert.equal(proxyCalls[0].modelId, "model-openai-compatible-default");
+assert.equal(Object.hasOwn(proxyCalls[0], "provider"), false);
+assert.equal(Object.hasOwn(proxyCalls[0], "model"), false);
 delete globalThis.__MODEL_CALL_PROXY__;
 
 const modelResult = await callModel({
@@ -278,8 +282,10 @@ const apiDemoResult = await callModel({
   inputMeta: { project: apiDemoState.currentProject },
   state: apiDemoState
 });
-assert.equal(apiDemoResult.success, true);
+assert.equal(apiDemoResult.success, false);
 assert.equal(apiDemoResult.mode, "demo");
+assert.equal(apiDemoResult.requiresRouteFix, true);
+assert.ok(apiDemoResult.error.includes("仍指向 Demo 模型"));
 assert.ok(apiDemoResult.warnings.some((warning) => warning.includes("真实 API Mode")));
 assert.ok(apiDemoResult.log.warnings.some((warning) => warning.includes("Demo 模型")));
 
@@ -306,6 +312,7 @@ failingApiState.apiConfig.routes = [
     jsonModeRequired: true,
     allowFallback: true,
     enabled: true,
+    retryCount: 1,
     timeoutMs: 1000
   }
 ];
@@ -313,7 +320,7 @@ failingApiState.apiConfig.globalDefaultModelId = "model-fail-a";
 const failingProxyCalls = [];
 globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
   failingProxyCalls.push(payload);
-  if (payload.model.id === "model-fail-a") throw new Error("Failed to fetch");
+  if (payload.modelId === "model-fail-a") throw new Error("Failed to fetch");
   throw new Error('Provider 请求失败：400 {"error":{"message":"Invalid JSON payload received. Unknown name \\"messages\\": Cannot find field."}}');
 };
 const failingResult = await callModel({
@@ -326,15 +333,17 @@ assert.equal(failingResult.success, false);
 assert.equal(failingResult.mode, "api");
 assert.equal(failingResult.requestFormat, "gemini_native");
 assert.equal(failingResult.usedFallback, true);
-assert.ok(failingResult.error.includes("主模型失败"));
-assert.ok(failingResult.error.includes("备用模型失败"));
+assert.ok(failingResult.error.includes("主模型第 1/2 次失败"));
+assert.ok(failingResult.error.includes("备用模型第 1/2 次失败"));
+assert.ok(failingResult.error.includes("第 2/2 次失败"));
 assert.ok(failingResult.log);
 assert.equal(failingResult.log.success, false);
-assert.ok(failingResult.log.attemptErrors.length >= 2);
+assert.equal(failingResult.log.attemptErrors.length, 4);
 assert.equal(failingResult.endpointType, "server_proxy");
-assert.ok(failingResult.error.includes("真实任务应走本地 server proxy"));
+assert.ok(failingResult.error.includes("前端请求本地 /api/model-call 失败"));
 assert.ok(failingResult.error.includes("当前接口不接受 OpenAI Chat Completions 格式"));
-assert.equal(failingProxyCalls.length, 2);
+assert.equal(failingProxyCalls.length, 4);
+assert.ok(failingProxyCalls.every((payload) => !Object.hasOwn(payload, "provider") && !Object.hasOwn(payload, "model")));
 delete globalThis.__MODEL_CALL_PROXY__;
 
 const invalidShape = validateTaskOutput("generateDirections", { bad: true });
@@ -401,12 +410,20 @@ for (const file of files) {
 
 const serverSource = await fs.readFile(new URL("../server.js", import.meta.url), "utf8");
 assert.ok(serverSource.includes('url.pathname === "/api/model-call"'));
+assert.ok(serverSource.includes("resolveProviderModel"));
+assert.ok(serverSource.includes("providerId"));
+assert.ok(!serverSource.includes("body.provider?.id"));
+assert.ok(serverSource.includes('url.pathname === "/api/test-provider"'));
 assert.ok(serverSource.includes("performProviderCall"));
 assert.ok(serverSource.includes("endpointType: \"server_proxy\""));
 const modelAdapterSource = await fs.readFile(new URL("../src/model-adapter.js", import.meta.url), "utf8");
 assert.ok(modelAdapterSource.includes('fetch("/api/model-call"'));
+assert.ok(modelAdapterSource.includes("providerId: provider?.id"));
+assert.ok(!modelAdapterSource.includes("const payload = { provider, model"));
 assert.ok(!modelAdapterSource.includes("callOpenAICompatible"));
 assert.ok(!modelAdapterSource.includes("callGemini"));
+assert.ok(modelAdapterSource.includes("requiresRouteFix"));
+assert.ok(modelAdapterSource.includes("executeApiAttemptWithRetries"));
 
 console.log("check passed: V1.1 demo/API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");
 

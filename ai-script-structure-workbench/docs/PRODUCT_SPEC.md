@@ -291,6 +291,8 @@ POST /api/model-call
 
 `/api/test-provider` 与 `/api/model-call` 必须共用同一套 Provider Adapter，并在日志记录 `endpointType=server_proxy`、`requestFormat`、`providerName`、`modelName`、`status` 与 `errorMessage`。
 
+真实任务和 Provider 测试的浏览器请求体只允许携带 `providerId/modelId`、任务消息和路由参数；服务端必须从 `data/settings/model-settings.json` 读取真实 Provider、Model 和 API Key。刚编辑但未保存的 Provider 不允许直接测试，应提示“请先保存 Provider，再测试连接”。
+
 快捷模板：
 
 ```text
@@ -391,6 +393,7 @@ src/model-router.js
 不得静默切 Demo。
 如果 fallbackModelIds 有可用真实模型，可切备用模型。
 usedFallback 必须写入日志。
+如果 API Mode 下最终选择 DemoRuleEngine，默认返回 requiresRouteFix=true 且不生成 Demo 内容；只有用户明确开启 allowDemoInApiMode 才允许继续。
 ```
 
 ## Model Adapter

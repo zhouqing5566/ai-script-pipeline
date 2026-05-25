@@ -2,6 +2,7 @@ import http from "node:http";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeApiConfig } from "./src/model-config.js";
 import { callGemini, resolveRequestFormat } from "./src/provider-adapters/gemini.js";
 import { callOpenAICompatible } from "./src/provider-adapters/openai-compatible.js";
 
@@ -119,17 +120,20 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/test-provider" && req.method === "POST") {
     const body = await readBody(req);
-    const provider = body.provider || {};
-    const model = body.model || { modelName: body.modelName || "test", maxOutputTokens: 8, supportsJsonMode: false };
-    if (provider.providerType === "local") {
-      sendJson(res, 200, { ok: true, message: "本地 Demo Provider 可用。", mode: "demo" });
-      return true;
-    }
-    if (!provider.baseUrl || !provider.apiKey) {
-      sendJson(res, 400, { ok: false, error: "缺少 Base URL 或 API Key。" });
-      return true;
-    }
     try {
+      const { provider, model } = await resolveProviderModel(body, { requireCurrentProviderModel: true });
+      if (provider.providerType === "local") {
+        sendJson(res, 200, { ok: true, message: "本地 Demo Provider 可用。", mode: "demo" });
+        return true;
+      }
+      if (!model?.id) {
+        sendJson(res, 400, { ok: false, error: "该 Provider 下没有启用模型，请先新增或启用一个模型。" });
+        return true;
+      }
+      if (!provider.baseUrl || !provider.apiKey) {
+        sendJson(res, 400, { ok: false, error: "缺少 Base URL 或 API Key。" });
+        return true;
+      }
       const adapterResult = await performProviderCall({
         provider,
         model,
@@ -153,13 +157,17 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/model-call" && req.method === "POST") {
     const body = await readBody(req);
-    const provider = body.provider || {};
-    const model = body.model || {};
-    const requestFormat = body.requestFormat || provider.requestFormat || "auto";
     const startedAt = performance.now();
+    let provider = null;
+    let model = null;
+    let requestFormat = body.requestFormat || "auto";
     try {
+      const resolved = await resolveProviderModel(body);
+      model = resolved.model;
+      requestFormat = body.requestFormat || resolved.provider.requestFormat || "auto";
+      provider = { ...resolved.provider, requestFormat };
       const adapterResult = await performProviderCall({
-        provider: { ...provider, requestFormat },
+        provider,
         model,
         messages: body.messages || [],
         options: body.options || {},
@@ -186,11 +194,11 @@ async function handleApi(req, res, url) {
         ok: false,
         endpointType: "server_proxy",
         status: 502,
-        providerId: provider.id || null,
-        providerName: provider.name || "",
-        modelId: model.id || null,
-        modelName: model.displayName || model.modelName || "",
-        requestFormat: resolveRequestFormat({ provider: { ...provider, requestFormat }, model }),
+        providerId: provider?.id || body.providerId || null,
+        providerName: provider?.name || "",
+        modelId: model?.id || body.modelId || null,
+        modelName: model?.displayName || model?.modelName || "",
+        requestFormat: provider && model ? resolveRequestFormat({ provider: { ...provider, requestFormat }, model }) : requestFormat,
         error: normalized.message,
         errorMessage: normalized.message,
         latencyMs: Math.round(performance.now() - startedAt)
@@ -234,6 +242,36 @@ async function performProviderCall({ provider, model, messages, options, source 
   };
 }
 
+async function resolveProviderModel(body = {}, options = {}) {
+  const settings = await loadSettingsConfig();
+  const providerId = body.providerId;
+  const modelId = body.modelId;
+  let provider = settings.providers.find((item) => item.id === providerId);
+  let model = settings.models.find((item) => item.id === modelId);
+
+  if (!provider) throw new Error("未找到 Provider 配置。请先保存 Provider，再测试或调用。");
+
+  if (options.requireCurrentProviderModel) {
+    const providerModels = settings.models.filter((item) => item.providerId === provider.id && item.enabled);
+    model = providerModels.find((item) => item.id === model?.id) || providerModels[0] || null;
+  }
+
+  if (!model && options.requireCurrentProviderModel) throw new Error("该 Provider 下没有启用模型，请先新增或启用一个模型。");
+  if (!model) throw new Error("未找到模型配置。请先保存并启用模型。");
+  if (model.providerId && model.providerId !== provider.id) throw new Error("模型不属于当前 Provider，请重新选择模型。");
+  return { provider, model };
+}
+
+async function loadSettingsConfig() {
+  const filePath = path.join(rootDir, "data/settings/model-settings.json");
+  try {
+    const content = await fs.readFile(filePath, "utf8");
+    return normalizeApiConfig(JSON.parse(content));
+  } catch {
+    return normalizeApiConfig({});
+  }
+}
+
 async function appendServerProxyLog(entry) {
   const line = JSON.stringify({
     ...entry,
@@ -245,7 +283,7 @@ async function appendServerProxyLog(entry) {
 
 function normalizeProviderError(error) {
   const raw = error?.message || String(error || "未知错误");
-  if (raw.includes("当前接口不接受 OpenAI Chat Completions 格式") || raw.includes("真实任务应走本地 server proxy") || raw.includes("请求被中止")) {
+  if (raw.includes("当前接口不接受 OpenAI Chat Completions 格式") || raw.includes("请求被中止") || raw.includes("服务端请求外部 Provider 失败")) {
     return { message: raw };
   }
   if (/Unknown name "messages"|Unknown name "max_tokens"|Unknown name "temperature"|Cannot find field/i.test(raw)) {
@@ -254,9 +292,9 @@ function normalizeProviderError(error) {
         `${raw}。当前接口不接受 OpenAI Chat Completions 格式。若你使用 OpenAI 代理/DeepSeek，请将 requestFormat 改为 openai_chat，并确认 Base URL 是 OpenAI-compatible 地址；若你使用官方 Gemini API，请改为 gemini_native。`
     };
   }
-  if (/Failed to fetch/i.test(raw)) {
+  if (/Failed to fetch|fetch failed/i.test(raw)) {
     return {
-      message: `${raw}。浏览器直连外部 API 失败，可能是 CORS 或网络问题。真实任务应走本地 server proxy；若仍出现，请确认本地服务正在运行。`
+      message: `${raw}。服务端请求外部 Provider 失败，请确认 Base URL、requestFormat、网络代理和服务商状态；浏览器侧真实任务已经通过本地 server proxy 转发。`
     };
   }
   if (/The user aborted a request|signal is aborted|AbortError|aborted/i.test(raw)) {

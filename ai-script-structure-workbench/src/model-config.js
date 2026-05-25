@@ -262,6 +262,7 @@ export function normalizeApiConfig(config = {}) {
   const merged = { ...seed, ...config };
   return {
     mode: merged.mode === "api" ? "api" : "demo",
+    allowDemoInApiMode: Boolean(merged.allowDemoInApiMode),
     globalDefaultModelId: merged.globalDefaultModelId || "model-demo-rule-engine",
     providers: (merged.providers || []).map(normalizeProvider),
     models: (merged.models || []).map(normalizeModel),

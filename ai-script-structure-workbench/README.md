@@ -91,10 +91,11 @@ npm run check
 
 - 系统会通过 `model-router` 按项目覆盖、任务路由、Skill 模型偏好、功能区默认、全局默认模型选择模型。
 - 真实任务统一请求本地 `/api/model-call`，由 Node 服务端代理外部 Provider，减少 CORS / Failed to fetch 问题。
+- `/api/model-call` 与 `/api/test-provider` 的真实路径只从前端接收 `providerId/modelId`，服务端再从 `data/settings/model-settings.json` 读取真实 Key，避免把完整 Provider 和 API Key 放进任务请求体。
 - 真实 API 调用失败时不会静默切回 Demo。
 - 只有路由中配置了可用备用真实模型时才会 fallback，并在调用日志中记录 `usedFallback`。
 - 如果某个任务实际选择了 DemoRuleEngine，系统会在 UI、调用日志和 `ModelCallResult.warnings` 中提示：当前为真实 API Mode，但该任务路由仍指向 Demo 模型。
-- 如果没有可用真实模型，系统会明确返回 `mode: "demo"` 的 DemoRuleEngine 结果，并附带 warning。
+- 默认情况下，真实 API Mode 命中 Demo 路由会返回失败和 `requiresRouteFix=true`，不会继续生成 Demo 结果；只有手动开启“API Mode 允许 Demo 兜底”才会继续使用 DemoRuleEngine。
 
 ## 确认某次任务是否使用了真实 API
 
@@ -126,6 +127,7 @@ warning/error   不应出现“真实 API Mode ... Demo 模型”
   providerId: "你的 Provider ID",
   modelId: "你的模型 ID",
   usedFallback: false,
+  requiresRouteFix: false,
   warnings: []
 }
 ```
@@ -145,6 +147,8 @@ warning/error   不应出现“真实 API Mode ... Demo 模型”
 ```
 
 选择 `taskType` 后测试实际任务路由。若提示任务仍指向 Demo，点击“一键切换核心任务到当前真实模型”。
+
+Provider 测试也会走服务端 settings：如果刚修改了 Base URL、API Key、启用状态或请求格式，请先点击“保存 Provider”，再点击“测试连接”。测试连接不会退回去拿 Demo 模型冒充当前 Provider 的结果；当前 Provider 下没有启用模型时会直接报错。
 
 ## 配置 OpenAI-compatible API
 
@@ -271,6 +275,7 @@ Fallback 策略：补充人工说明
 - 不要把真实 API Key 写入 `seed-data.js`、README 示例或任何提交文件。
 - 前端输入框使用 password，不长期明文展示完整 API Key。
 - 本地保存仅用于本机运行，可能进入 `localStorage` 和 `data/settings/`。
+- 真实模型调用和 Provider 测试请求体不携带完整 Provider/API Key，只携带 `providerId/modelId`；保存设置时才会把 Key 写入本机运行时配置。
 - 启动时会自动从 `data/settings/model-settings.json` 恢复有用的 API/模型配置，换端口后也能带回服务端保存的配置。
 - “重置 Demo 数据”只重置项目 Demo 状态，会保留 API Provider、模型和路由配置。
 - `data/projects/current-snapshot.json` 和完整项目导出会脱敏 `apiKey`，真实 Key 只保留在本机 localStorage / `data/settings/`。

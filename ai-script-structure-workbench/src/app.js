@@ -717,6 +717,7 @@ function saveApiMode() {
   store.setState((state) => {
     state.apiConfig.mode = document.querySelector("#api-mode")?.value || "demo";
     state.apiConfig.globalDefaultModelId = document.querySelector("#global-default-model")?.value || "model-demo-rule-engine";
+    state.apiConfig.allowDemoInApiMode = document.querySelector("#allow-demo-in-api-mode")?.checked || false;
     state.mode = state.apiConfig.mode;
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
@@ -767,14 +768,18 @@ function saveProvider(providerId) {
 async function testProvider(providerId) {
   const current = store.getState();
   const provider = current.apiConfig.providers.find((item) => item.id === providerId);
-  const model = current.apiConfig.models.find((item) => item.providerId === providerId && item.enabled) || current.apiConfig.models[0];
+  const model = current.apiConfig.models.find((item) => item.providerId === providerId && item.enabled);
   let result = { ok: false, error: "Provider 未启用，或缺少 Base URL / API Key。" };
-  if (provider?.enabled && (provider.providerType === "local" || (provider.baseUrl && provider.apiKey))) {
+  if (current.apiConfig.selectedProviderId === providerId && hasUnsavedProviderFormChanges(provider)) {
+    result = { ok: false, error: "请先保存 Provider，再测试连接。" };
+  } else if (!model && provider?.providerType !== "local") {
+    result = { ok: false, error: "该 Provider 下没有启用模型，请先新增或启用一个模型。" };
+  } else if (provider?.enabled && (provider.providerType === "local" || (provider.baseUrl && provider.apiKey))) {
     try {
       const response = await fetch("/api/test-provider", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ provider, model })
+        body: JSON.stringify({ providerId, modelId: model?.id || null })
       });
       result = await response.json();
     } catch (error) {
@@ -792,6 +797,22 @@ async function testProvider(providerId) {
     return state;
   }, "测试 Provider 配置", { targetType: "settings", action: "generate", light: true });
   showToast(result.ok ? "Provider 测试通过" : `Provider 测试失败：${result.error || result.message || "未知错误"}`);
+}
+
+function hasUnsavedProviderFormChanges(provider) {
+  if (!provider) return false;
+  const apiKeyInput = document.querySelector('[data-provider-field="apiKey"]')?.value?.trim() || "";
+  if (apiKeyInput) return true;
+  const enabled = document.querySelector('[data-provider-field="enabled"]')?.checked || false;
+  return (
+    readProviderField("name") !== provider.name ||
+    readProviderField("providerType") !== provider.providerType ||
+    readProviderField("requestFormat") !== (provider.requestFormat || "auto") ||
+    readProviderField("baseUrl") !== provider.baseUrl ||
+    enabled !== Boolean(provider.enabled) ||
+    Number(readProviderField("priority") || 50) !== Number(provider.priority || 50) ||
+    Number(readProviderField("timeoutMs") || 60000) !== Number(provider.timeoutMs || 60000)
+  );
 }
 
 function addModel() {
@@ -817,7 +838,7 @@ function saveModel(modelId) {
             contextWindow: Number(readModelField("contextWindow")) || 32000,
             maxOutputTokens: Number(readModelField("maxOutputTokens")) || 4096,
             supportsJsonMode: document.querySelector('[data-model-field="supportsJsonMode"]')?.checked || false,
-            supportsJsonModeExplicit: true,
+            supportsJsonModeExplicit: document.querySelector('[data-model-field="supportsJsonMode"]')?.checked || false,
             supportsVision: document.querySelector('[data-model-field="supportsVision"]')?.checked || false,
             supportsTools: document.querySelector('[data-model-field="supportsTools"]')?.checked || false,
             supportsStreaming: document.querySelector('[data-model-field="supportsStreaming"]')?.checked || false,
@@ -857,6 +878,7 @@ async function testCurrentTaskRoute() {
       routingReason: result.log?.routingReason || "",
       matchedSkillIds: result.matchedSkillIds || [],
       warnings: result.warnings || [],
+      requiresRouteFix: result.requiresRouteFix || result.log?.requiresRouteFix || false,
       success: result.success,
       errorMessage: result.error || "",
       createdAt: new Date().toISOString()
@@ -1495,6 +1517,9 @@ function renderApiStatus(state) {
               ${config.models.map((model) => `<option value="${model.id}" ${config.globalDefaultModelId === model.id ? "selected" : ""}>${model.displayName}</option>`).join("")}
             </select>
           </label>
+          <label>API Mode 允许 Demo 兜底
+            <input id="allow-demo-in-api-mode" type="checkbox" ${config.allowDemoInApiMode ? "checked" : ""} />
+          </label>
         </div>
         <div class="panel-actions"><button class="primary-button" data-action="set-api-mode">保存基础状态</button></div>
         ${keyValueGrid([
@@ -1525,7 +1550,7 @@ function renderApiStatus(state) {
     </section>
     <section class="panel notice-panel">
       <strong>${config.mode === "api" ? "真实 API Mode" : "Demo Mode"}</strong>
-      <p>${config.mode === "api" ? "真实 API 调用失败时不会静默切到 Demo；只有配置的备用模型可用时才会 fallback，并写入日志。" : "当前使用 DemoRuleEngine-v1，所有结果来自本地规则引擎演示，不冒充真实 API。"}</p>
+      <p>${config.mode === "api" ? "真实 API 调用失败时不会静默切到 Demo；任务路由仍指向 Demo 时默认阻断，只有手动允许 Demo 兜底才会继续生成。" : "当前使用 DemoRuleEngine-v1，所有结果来自本地规则引擎演示，不冒充真实 API。"}</p>
       ${
         demoWarnings.length
           ? `<div class="warning-list">${demoWarnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</div>`
@@ -1551,6 +1576,7 @@ function renderRouteTestResult(result) {
         ["路由原因", result.routingReason || "未记录"],
         ["Skill", (result.matchedSkillIds || []).join("、") || "无"],
         ["警告", (result.warnings || []).join("；") || "无"],
+        ["需要修正路由", result.requiresRouteFix ? "是" : "否"],
         ["错误", result.errorMessage || "无"],
         ["时间", formatDate(result.createdAt)]
       ])}
@@ -1645,6 +1671,7 @@ function renderModelForm(model, config) {
       <label>支持工具<input data-model-field="supportsTools" type="checkbox" ${model.supportsTools ? "checked" : ""} /></label>
       <label>支持流式<input data-model-field="supportsStreaming" type="checkbox" ${model.supportsStreaming ? "checked" : ""} /></label>
     </div>
+    <p class="muted">勾选“支持 JSON”即表示该模型或代理明确支持 OpenAI response_format=json_object；不确定时请保持关闭，系统仍会通过 Prompt 要求 JSON。</p>
     <label class="block-label">推荐任务<input data-model-field="recommendedTasks" value="${escapeAttr((model.recommendedTasks || []).join("、"))}" /></label>
     <label class="block-label">备注<textarea data-model-field="notes" class="medium-textarea">${escapeHtml(model.notes || "")}</textarea></label>
     <div class="panel-actions"><button class="primary-button" data-action="save-model" data-id="${model.id}">保存模型</button></div>
