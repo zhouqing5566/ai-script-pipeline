@@ -30,6 +30,22 @@ export const qualityLevels = ["fast", "balanced", "high_quality", "best"];
 
 export const requestFormatTypes = ["auto", "openai_chat", "gemini_native"];
 
+export const coreRouteTaskTypes = [
+  "evaluateIdea",
+  "generateDirections",
+  "generateThemeCandidates",
+  "generateMainlineReversals",
+  "generateEndingCandidates",
+  "generateMajorNodes",
+  "analyzeScript",
+  "generateMacroOutline",
+  "generateStageOutline",
+  "generateEpisodeOutline",
+  "auditOutline",
+  "generateDraft",
+  "jsonRepair"
+];
+
 export const featureAreas = [
   "剧本分析中心",
   "模式资产中心",
@@ -98,7 +114,7 @@ export function createSeedApiConfig() {
         id: "provider-openai-compatible-template",
         name: "OpenAI-compatible API 模板",
         providerType: "openai_compatible",
-        requestFormat: "auto",
+        requestFormat: "openai_chat",
         baseUrl: "https://api.example.com/v1",
         apiKey: "",
         enabled: false,
@@ -139,7 +155,8 @@ export function createSeedApiConfig() {
         modelType: ["text", "long_context"],
         contextWindow: 128000,
         maxOutputTokens: 8192,
-        supportsJsonMode: true,
+        supportsJsonMode: false,
+        supportsJsonModeExplicit: false,
         supportsVision: false,
         supportsTools: false,
         supportsStreaming: false,
@@ -254,6 +271,8 @@ export function normalizeApiConfig(config = {}) {
     selectedRouteId: merged.selectedRouteId || merged.routes?.[0]?.id || "",
     activeSettingsTab: merged.activeSettingsTab || "status",
     lastTestResult: merged.lastTestResult || null,
+    routeTestTaskType: merged.routeTestTaskType || "analyzeScript",
+    lastRouteTestResult: merged.lastRouteTestResult || null,
     updatedAt: merged.updatedAt || new Date().toISOString()
   };
 }
@@ -279,6 +298,7 @@ export function normalizeProvider(provider = {}) {
 }
 
 export function normalizeModel(model = {}) {
+  const jsonModeWasExplicit = Boolean(model.supportsJsonModeExplicit);
   return {
     id: model.id || createId("model"),
     providerId: model.providerId || "",
@@ -288,7 +308,8 @@ export function normalizeModel(model = {}) {
     modelType: Array.isArray(model.modelType) ? model.modelType : [model.modelType || "text"],
     contextWindow: Number(model.contextWindow) || 32000,
     maxOutputTokens: Number(model.maxOutputTokens) || 4096,
-    supportsJsonMode: Boolean(model.supportsJsonMode),
+    supportsJsonMode: jsonModeWasExplicit || model.id === "model-demo-rule-engine" ? Boolean(model.supportsJsonMode) : false,
+    supportsJsonModeExplicit: jsonModeWasExplicit,
     supportsVision: Boolean(model.supportsVision),
     supportsTools: Boolean(model.supportsTools),
     supportsStreaming: Boolean(model.supportsStreaming),
@@ -333,7 +354,7 @@ export function createProviderDraft() {
     id: createId("provider"),
     name: "新的 OpenAI-compatible Provider",
     providerType: "openai_compatible",
-    requestFormat: "auto",
+    requestFormat: "openai_chat",
     baseUrl: "https://api.example.com/v1",
     enabled: false,
     priority: 50,
@@ -352,10 +373,167 @@ export function createModelDraft(providerId = "") {
     modelName: "your-model-name",
     enabled: false,
     modelType: ["text"],
-    supportsJsonMode: true,
+    supportsJsonMode: false,
+    supportsJsonModeExplicit: false,
     qualityLevel: "balanced",
     recommendedTasks: ["analyzeScript", "generateEpisodeOutline"]
   });
+}
+
+export function createDeepSeekTemplate() {
+  const now = new Date().toISOString();
+  const provider = normalizeProvider({
+    id: createId("provider"),
+    name: "DeepSeek 官方",
+    providerType: "deepseek",
+    requestFormat: "openai_chat",
+    baseUrl: "https://api.deepseek.com",
+    enabled: false,
+    priority: 20,
+    timeoutMs: 60000,
+    notes: "DeepSeek 官方 OpenAI-compatible 接口。填入 API Key 后启用。",
+    createdAt: now,
+    updatedAt: now
+  });
+  const modelNames = ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"];
+  const models = modelNames.map((modelName, index) =>
+    normalizeModel({
+      id: createId("model"),
+      providerId: provider.id,
+      displayName: modelName,
+      modelName,
+      enabled: true,
+      modelType: index === 3 ? ["text", "reasoning"] : ["text"],
+      contextWindow: 64000,
+      maxOutputTokens: 8192,
+      supportsJsonMode: false,
+      supportsJsonModeExplicit: false,
+      qualityLevel: index === 1 ? "fast" : "balanced",
+      recommendedTasks: coreRouteTaskTypes,
+      notes: "DeepSeek 模型默认不强制 response_format；如确认服务支持 JSON mode，可手动勾选。"
+    })
+  );
+  return { provider, models };
+}
+
+export function createOpenAIProxyTemplate() {
+  const now = new Date().toISOString();
+  const provider = normalizeProvider({
+    id: createId("provider"),
+    name: "OpenAI-compatible 代理",
+    providerType: "openai_compatible",
+    requestFormat: "openai_chat",
+    baseUrl: "https://your-proxy.example/v1",
+    enabled: false,
+    priority: 30,
+    timeoutMs: 60000,
+    notes: "适用于 OneAPI / NewAPI / OpenAI-compatible 代理站。Base URL 通常形如 https://xxx/v1。",
+    createdAt: now,
+    updatedAt: now
+  });
+  const model = normalizeModel({
+    id: createId("model"),
+    providerId: provider.id,
+    displayName: "代理聊天模型",
+    modelName: "your-model-name",
+    enabled: true,
+    modelType: ["text"],
+    contextWindow: 128000,
+    maxOutputTokens: 8192,
+    supportsJsonMode: false,
+    supportsJsonModeExplicit: false,
+    qualityLevel: "balanced",
+    recommendedTasks: coreRouteTaskTypes,
+    notes: "请填写代理站真实模型名。默认不发送 response_format，确认支持后再勾选 JSON。"
+  });
+  return { provider, models: [model] };
+}
+
+export function applyProviderTemplate(apiConfig, templateType) {
+  const config = normalizeApiConfig(apiConfig || {});
+  const template = templateType === "deepseek" ? createDeepSeekTemplate() : createOpenAIProxyTemplate();
+  return normalizeApiConfig({
+    ...config,
+    providers: [template.provider, ...config.providers],
+    models: [...template.models, ...config.models],
+    selectedProviderId: template.provider.id,
+    selectedModelId: template.models[0]?.id || config.selectedModelId,
+    updatedAt: new Date().toISOString()
+  });
+}
+
+export function switchCoreRoutesToModel(apiConfig, modelId) {
+  const config = normalizeApiConfig(apiConfig || {});
+  const byTask = new Map((config.routes || []).map((route) => [route.taskType, route]));
+  const nextRoutes = [...(config.routes || [])];
+  for (const taskType of coreRouteTaskTypes) {
+    const existing = byTask.get(taskType);
+    if (existing) {
+      const index = nextRoutes.findIndex((route) => route.id === existing.id);
+      nextRoutes[index] = normalizeRoute({
+        ...existing,
+        featureArea: existing.featureArea || featureAreaForTaskType(taskType),
+        primaryModelId: modelId,
+        enabled: true,
+        allowFallback: existing.allowFallback !== false
+      });
+    } else {
+      nextRoutes.push(
+        normalizeRoute({
+          id: createId("route"),
+          featureArea: featureAreaForTaskType(taskType),
+          taskType,
+          primaryModelId: modelId,
+          fallbackModelIds: [],
+          requiredCapabilities: ["json"],
+          jsonModeRequired: true,
+          enabled: true,
+          allowFallback: true,
+          timeoutMs: defaultTimeoutForTask(taskType),
+          maxOutputTokens: defaultMaxOutputForTask(taskType),
+          notes: "一键切换核心任务时自动创建。"
+        })
+      );
+    }
+  }
+  return normalizeApiConfig({
+    ...config,
+    mode: "api",
+    globalDefaultModelId: modelId,
+    routes: nextRoutes,
+    updatedAt: new Date().toISOString()
+  });
+}
+
+export function featureAreaForTaskType(taskType) {
+  const map = {
+    analyzeScript: "剧本分析中心",
+    extractPatterns: "模式资产中心",
+    classifyCase: "分类与标签",
+    generateSkillSuggestion: "Skill 进化中心",
+    testSkillVersion: "Skill 进化中心",
+    evaluateIdea: "创作决策中心",
+    generateDirections: "创作决策中心",
+    generateThemeCandidates: "创作决策中心",
+    generateMainlineReversals: "创作决策中心",
+    generateEndingCandidates: "创作决策中心",
+    generateMajorNodes: "创作决策中心",
+    generateMacroOutline: "细纲生产中心",
+    generateCharacterCore: "细纲生产中心",
+    generateGoldfinger: "细纲生产中心",
+    generateStoryEngine: "细纲生产中心",
+    generateMaterialPools: "细纲生产中心",
+    generateStageOutline: "细纲生产中心",
+    generateEpisodeOutline: "细纲生产中心",
+    auditOutline: "审计与修复",
+    repairSection: "审计与修复",
+    generateDraft: "成稿中心",
+    auditDraft: "成稿中心",
+    jsonRepair: "JSON 修复",
+    summarizeLongText: "长文本总结",
+    classifyTags: "分类与标签"
+  };
+  return map[taskType] || "创作决策中心";
 }
 
 export function createRouteDraft(modelId = "") {
@@ -377,6 +555,18 @@ function createEmptyConfig() {
     models: [],
     routes: []
   };
+}
+
+function defaultTimeoutForTask(taskType) {
+  if (taskType === "generateEpisodeOutline") return 90000;
+  if (taskType === "jsonRepair") return 30000;
+  return 60000;
+}
+
+function defaultMaxOutputForTask(taskType) {
+  if (taskType === "generateEpisodeOutline") return 16000;
+  if (taskType === "generateDraft") return 12000;
+  return 10000;
 }
 
 function createId(prefix) {

@@ -76,6 +76,10 @@ npm run check
 - 完整项目导出和快照不会泄漏 API Key
 - 真实 API JSON 返回会按 taskType 做结构校验
 - docx 上传会解析 Word 正文，不再按二进制文本读取造成乱码
+- 真实 API 调用经过本地 `/api/model-call` server proxy，不从浏览器直连外部 Provider
+- `requestFormat=openai_chat` 时即使模型名包含 Gemini 也走 OpenAI-compatible
+- DeepSeek 模板默认 `requestFormat=openai_chat`
+- 新建模型默认不发送 `response_format`，除非用户明确勾选 JSON 支持
 
 ## 模式说明
 
@@ -86,6 +90,7 @@ npm run check
 切到 `真实 API Mode` 后：
 
 - 系统会通过 `model-router` 按项目覆盖、任务路由、Skill 模型偏好、功能区默认、全局默认模型选择模型。
+- 真实任务统一请求本地 `/api/model-call`，由 Node 服务端代理外部 Provider，减少 CORS / Failed to fetch 问题。
 - 真实 API 调用失败时不会静默切回 Demo。
 - 只有路由中配置了可用备用真实模型时才会 fallback，并在调用日志中记录 `usedFallback`。
 - 如果某个任务实际选择了 DemoRuleEngine，系统会在 UI、调用日志和 `ModelCallResult.warnings` 中提示：当前为真实 API Mode，但该任务路由仍指向 Demo 模型。
@@ -106,6 +111,7 @@ mode            应为 api
 provider        应为你配置的真实 Provider
 model           应为真实模型，而不是 DemoRuleEngine-v1
 requestFormat   应匹配端点：openai_chat 或 gemini_native
+endpointType     应为 server_proxy
 usedFallback    如果为 fallback，说明主模型失败后切到了备用模型
 warning/error   不应出现“真实 API Mode ... Demo 模型”
 ```
@@ -115,6 +121,8 @@ warning/error   不应出现“真实 API Mode ... Demo 模型”
 ```js
 {
   mode: "api",
+  endpointType: "server_proxy",
+  requestFormat: "openai_chat",
   providerId: "你的 Provider ID",
   modelId: "你的模型 ID",
   usedFallback: false,
@@ -130,6 +138,14 @@ warning/error   不应出现“真实 API Mode ... Demo 模型”
 
 说明这次任务没有走真实 API，需要到 `系统设置 → 路由配置` 把对应 `taskType` 的主模型改成真实模型。
 
+也可以在：
+
+```text
+系统设置 → 基础状态 → 测试当前任务路由
+```
+
+选择 `taskType` 后测试实际任务路由。若提示任务仍指向 Demo，点击“一键切换核心任务到当前真实模型”。
+
 ## 配置 OpenAI-compatible API
 
 在页面进入：
@@ -142,13 +158,32 @@ warning/error   不应出现“真实 API Mode ... Demo 模型”
 
 ```text
 Provider 类型：openai_compatible
-请求格式：auto 或 openai_chat
+请求格式：openai_chat
 Base URL：https://your-provider.example/v1
 API Key：本地填写，不要提交
 是否启用：勾选
 ```
 
 Base URL 既可以填到 `/v1`，也可以直接填完整 `/chat/completions`；适配器会避免重复拼接。
+
+DeepSeek 官方可直接使用页面里的“DeepSeek 官方模板”：
+
+```text
+Provider 类型：deepseek
+请求格式：openai_chat
+Base URL：https://api.deepseek.com
+推荐模型：deepseek-v4-pro / deepseek-v4-flash / deepseek-chat / deepseek-reasoner
+```
+
+OpenAI-compatible 代理可使用“OpenAI 代理模板”：
+
+```text
+Provider 类型：openai_compatible
+请求格式：openai_chat
+Base URL：通常为 https://xxx/v1
+Model Name：按代理站要求填写
+支持 JSON：默认关闭，确认代理支持 response_format 后再打开
+```
 
 如果你使用的是 Gemini native 接口，或看到类似下面的错误：
 
@@ -182,6 +217,8 @@ Provider：选择上一步 Provider
 支持 JSON：按模型能力勾选
 是否启用：勾选
 ```
+
+注意：`强制 JSON` 路由会通过 Prompt 要求模型输出 JSON；只有模型配置里明确勾选“支持 JSON”后，OpenAI-compatible adapter 才会额外发送 `response_format: { type: "json_object" }`。
 
 最后进入：
 
@@ -255,7 +292,7 @@ src/model-config.js       Provider / Model / Route 数据结构与种子配置
 src/skill-manager.js      EditableSkill、编辑状态、匹配、冲突检测
 src/prompt-builder.js     通用系统原则、锁定锚点和 Skill 规则拼装
 src/json-repair.js        JSON 解析与修复流程
-src/provider-adapters/    Provider Adapter，V1 实现 OpenAI-compatible
+src/provider-adapters/    服务端 Provider Adapter，V1.1 实现 OpenAI-compatible 与 Gemini native
 src/file-parser.js        txt / md / docx 上传解析，避免 Word 二进制乱码
 src/schemas.js            导航、枚举、中文字段标签
 src/seed-data.js          Demo 项目、案例、模式资产、Skill、Demo 模型配置

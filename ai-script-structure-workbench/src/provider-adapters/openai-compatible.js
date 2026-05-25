@@ -15,15 +15,7 @@ export async function callOpenAICompatible({ provider, model, messages, options 
     authorization: `Bearer ${provider.apiKey}`,
     ...(provider.defaultHeaders || {})
   };
-  const body = {
-    model: model.modelName,
-    messages,
-    temperature: options.temperature ?? 0.5,
-    max_tokens: options.maxOutputTokens || model.maxOutputTokens || 4096
-  };
-  if (options.jsonModeRequired && model.supportsJsonMode) {
-    body.response_format = { type: "json_object" };
-  }
+  const body = buildOpenAIChatRequestBody({ model, messages, options });
 
   try {
     const response = await fetch(buildChatCompletionsUrl(provider.baseUrl), {
@@ -36,7 +28,7 @@ export async function callOpenAICompatible({ provider, model, messages, options 
     if (!response.ok) {
       if (looksLikeGeminiNativeError(rawText)) {
         throw new Error(
-          `Provider 请求失败：${response.status} ${rawText.slice(0, 220)}。当前端点不像 OpenAI-compatible chat/completions，可能是 Gemini native generateContent；请将 Provider 请求格式设为 gemini_native，或把 Base URL 改为真正的 /chat/completions 兼容端点。`
+          `Provider 请求失败：${response.status} ${rawText.slice(0, 220)}。当前接口不接受 OpenAI Chat Completions 格式。若你使用 OpenAI 代理/DeepSeek，请将 requestFormat 改为 openai_chat，并确认 Base URL 是 OpenAI-compatible 地址；若你使用官方 Gemini API，请改为 gemini_native。`
         );
       }
       throw new Error(`Provider 请求失败：${response.status} ${rawText.slice(0, 300)}`);
@@ -55,6 +47,19 @@ export async function callOpenAICompatible({ provider, model, messages, options 
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export function buildOpenAIChatRequestBody({ model, messages, options = {} }) {
+  const body = {
+    model: model.modelName,
+    messages,
+    temperature: options.temperature ?? 0.5,
+    max_tokens: options.maxOutputTokens || model.maxOutputTokens || 4096
+  };
+  if (options.jsonModeRequired && model.supportsJsonMode && model.supportsJsonModeExplicit) {
+    body.response_format = { type: "json_object" };
+  }
+  return body;
 }
 
 export function buildChatCompletionsUrl(baseUrl = "") {

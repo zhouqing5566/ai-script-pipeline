@@ -275,7 +275,28 @@ POST {baseUrl}/models/{modelName}:generateContent
 
 如果 `baseUrl` 已包含 `/chat/completions`，不会重复拼接。
 
-当 Provider 类型为 `gemini`，或 `requestFormat = gemini_native` 时，系统使用 Gemini `contents / generationConfig` 请求体。`requestFormat = auto` 时，若模型名包含 Gemini 且 Base URL 不是 `/chat/completions`，会自动尝试 Gemini native，避免把 `messages / max_tokens` 发给不兼容的 generateContent 端点。
+`requestFormat` 判定规则：
+
+```text
+openai_chat：永远走 OpenAI-compatible Chat Completions，即使 modelName 包含 gemini。
+gemini_native：才走 Gemini generateContent，不发送 messages / max_tokens。
+auto：只有 providerType=gemini 或 baseUrl 明确为 generativelanguage.googleapis.com 时走 gemini_native；OpenAI 代理、DeepSeek、OpenRouter、OneAPI/NewAPI 默认 openai_chat。
+```
+
+真实任务不允许浏览器直连外部 Provider，统一经本地：
+
+```text
+POST /api/model-call
+```
+
+`/api/test-provider` 与 `/api/model-call` 必须共用同一套 Provider Adapter，并在日志记录 `endpointType=server_proxy`、`requestFormat`、`providerName`、`modelName`、`status` 与 `errorMessage`。
+
+快捷模板：
+
+```text
+DeepSeek 官方：providerType=deepseek，requestFormat=openai_chat，baseUrl=https://api.deepseek.com。
+OpenAI-compatible 代理：providerType=openai_compatible，requestFormat=openai_chat，Base URL 和 Model Name 由用户填写。
+```
 
 ## ModelConfig
 
@@ -290,6 +311,7 @@ ModelConfig = {
   contextWindow,
   maxOutputTokens,
   supportsJsonMode,
+  supportsJsonModeExplicit,
   supportsVision,
   supportsTools,
   supportsStreaming,
@@ -337,6 +359,12 @@ FeatureModelRoute = {
 ```
 
 每个 `taskType` 可以配置主模型、备用模型、JSON 模式、temperature、maxOutputTokens、重试次数、超时和 fallback。
+
+`jsonModeRequired=true` 优先通过 Prompt 要求 JSON。OpenAI-compatible adapter 只有在用户明确勾选 `supportsJsonMode=true` 且记录 `supportsJsonModeExplicit=true` 时，才发送：
+
+```js
+response_format: { type: "json_object" }
+```
 
 ## Model Router
 
@@ -388,6 +416,8 @@ callModel({
 ModelCallResult = {
   success,
   mode,
+  endpointType,
+  requestFormat,
   taskType,
   providerId,
   modelId,

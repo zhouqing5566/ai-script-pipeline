@@ -2,7 +2,7 @@ import http from "node:http";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { callGemini, shouldUseGeminiNative } from "./src/provider-adapters/gemini.js";
+import { callGemini, resolveRequestFormat } from "./src/provider-adapters/gemini.js";
 import { callOpenAICompatible } from "./src/provider-adapters/openai-compatible.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -130,28 +130,73 @@ async function handleApi(req, res, url) {
       return true;
     }
     try {
-      const adapterResult = shouldUseGeminiNative({ provider, model })
-        ? await callGemini({
-            provider,
-            model,
-            messages: [{ role: "user", content: "ping" }],
-            options: { maxOutputTokens: 8, temperature: 0, timeoutMs: Number(provider.timeoutMs) || 30000 }
-          })
-        : await callOpenAICompatible({
-            provider,
-            model,
-            messages: [{ role: "user", content: "ping" }],
-            options: { maxOutputTokens: 8, temperature: 0, timeoutMs: Number(provider.timeoutMs) || 30000 }
-          });
+      const adapterResult = await performProviderCall({
+        provider,
+        model,
+        messages: [{ role: "user", content: "ping" }],
+        options: { maxOutputTokens: 8, temperature: 0, timeoutMs: Number(provider.timeoutMs) || 30000 },
+        source: "test-provider"
+      });
       sendJson(res, 200, {
         ok: true,
         status: 200,
         message: "真实 API 连接测试通过。",
-        requestFormat: shouldUseGeminiNative({ provider, model }) ? "gemini_native" : "openai_chat",
+        endpointType: "server_proxy",
+        requestFormat: adapterResult.requestFormat,
         preview: adapterResult.outputText.slice(0, 300)
       });
     } catch (error) {
-      sendJson(res, 502, { ok: false, error: error.message });
+      sendJson(res, 502, { ok: false, endpointType: "server_proxy", error: normalizeProviderError(error).message });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/model-call" && req.method === "POST") {
+    const body = await readBody(req);
+    const provider = body.provider || {};
+    const model = body.model || {};
+    const requestFormat = body.requestFormat || provider.requestFormat || "auto";
+    const startedAt = performance.now();
+    try {
+      const adapterResult = await performProviderCall({
+        provider: { ...provider, requestFormat },
+        model,
+        messages: body.messages || [],
+        options: body.options || {},
+        source: "model-call"
+      });
+      const responseBody = {
+        ok: true,
+        endpointType: "server_proxy",
+        status: 200,
+        providerId: provider.id || null,
+        providerName: provider.name || "",
+        modelId: model.id || null,
+        modelName: model.displayName || model.modelName || "",
+        requestFormat: adapterResult.requestFormat,
+        outputText: adapterResult.outputText,
+        tokenUsage: adapterResult.tokenUsage,
+        latencyMs: Math.round(performance.now() - startedAt)
+      };
+      await appendServerProxyLog({ ...responseBody, success: true });
+      sendJson(res, 200, responseBody);
+    } catch (error) {
+      const normalized = normalizeProviderError(error);
+      const responseBody = {
+        ok: false,
+        endpointType: "server_proxy",
+        status: 502,
+        providerId: provider.id || null,
+        providerName: provider.name || "",
+        modelId: model.id || null,
+        modelName: model.displayName || model.modelName || "",
+        requestFormat: resolveRequestFormat({ provider: { ...provider, requestFormat }, model }),
+        error: normalized.message,
+        errorMessage: normalized.message,
+        latencyMs: Math.round(performance.now() - startedAt)
+      };
+      await appendServerProxyLog({ ...responseBody, success: false });
+      sendJson(res, 502, responseBody);
     }
     return true;
   }
@@ -172,6 +217,54 @@ async function handleApi(req, res, url) {
   }
 
   return false;
+}
+
+async function performProviderCall({ provider, model, messages, options, source }) {
+  if (!provider?.baseUrl || !provider?.apiKey) throw new Error("缺少 Base URL 或 API Key。");
+  const requestFormat = resolveRequestFormat({ provider, model });
+  const adapterResult =
+    requestFormat === "gemini_native"
+      ? await callGemini({ provider, model, messages, options })
+      : await callOpenAICompatible({ provider, model, messages, options });
+  return {
+    ...adapterResult,
+    endpointType: "server_proxy",
+    requestFormat,
+    source
+  };
+}
+
+async function appendServerProxyLog(entry) {
+  const line = JSON.stringify({
+    ...entry,
+    outputText: entry.outputText ? String(entry.outputText).slice(0, 240) : undefined,
+    receivedAt: new Date().toISOString()
+  });
+  await fs.appendFile(path.join(rootDir, "data/logs/model-server-proxy.jsonl"), `${line}\n`, "utf8");
+}
+
+function normalizeProviderError(error) {
+  const raw = error?.message || String(error || "未知错误");
+  if (raw.includes("当前接口不接受 OpenAI Chat Completions 格式") || raw.includes("真实任务应走本地 server proxy") || raw.includes("请求被中止")) {
+    return { message: raw };
+  }
+  if (/Unknown name "messages"|Unknown name "max_tokens"|Unknown name "temperature"|Cannot find field/i.test(raw)) {
+    return {
+      message:
+        `${raw}。当前接口不接受 OpenAI Chat Completions 格式。若你使用 OpenAI 代理/DeepSeek，请将 requestFormat 改为 openai_chat，并确认 Base URL 是 OpenAI-compatible 地址；若你使用官方 Gemini API，请改为 gemini_native。`
+    };
+  }
+  if (/Failed to fetch/i.test(raw)) {
+    return {
+      message: `${raw}。浏览器直连外部 API 失败，可能是 CORS 或网络问题。真实任务应走本地 server proxy；若仍出现，请确认本地服务正在运行。`
+    };
+  }
+  if (/The user aborted a request|signal is aborted|AbortError|aborted/i.test(raw)) {
+    return {
+      message: `${raw}。请求被中止，可能是超时、重复触发或页面状态切换。请查看 timeoutMs 和是否重复点击。`
+    };
+  }
+  return { message: raw };
 }
 
 function redactSecrets(value) {

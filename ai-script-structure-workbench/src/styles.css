@@ -226,6 +226,10 @@ svg {
   gap: 8px;
 }
 
+.compact-actions {
+  margin: 8px 0 12px;
+}
+
 .main-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--inspector);
@@ -963,6 +967,12 @@ textarea {
 
 .warning-list p {
   margin: 0 0 6px;
+}
+
+.warning-text {
+  margin: 10px 0 0;
+  color: var(--risk);
+  font-weight: 700;
 }
 
 .rule-list {

@@ -50,15 +50,17 @@ export async function callGemini({ provider, model, messages, options = {} }) {
 }
 
 export function shouldUseGeminiNative({ provider, model } = {}) {
+  return resolveRequestFormat({ provider, model }) === "gemini_native";
+}
+
+export function resolveRequestFormat({ provider } = {}) {
   const requestFormat = provider?.requestFormat || "auto";
-  if (requestFormat === "gemini_native") return true;
-  if (requestFormat === "openai_chat") return false;
-  if (provider?.providerType === "gemini") return true;
-  const modelText = `${model?.modelName || ""} ${model?.displayName || ""}`.toLowerCase();
-  if (!modelText.includes("gemini")) return false;
+  if (requestFormat === "gemini_native") return "gemini_native";
+  if (requestFormat === "openai_chat") return "openai_chat";
+  if (provider?.providerType === "gemini") return "gemini_native";
   const baseUrl = String(provider?.baseUrl || "").toLowerCase();
-  if (baseUrl.includes("/chat/completions")) return false;
-  return provider?.providerType === "openai_compatible" || /googleapis|generativelanguage|gemini|yoosheen/.test(baseUrl);
+  if (baseUrl.includes("generativelanguage.googleapis.com")) return "gemini_native";
+  return "openai_chat";
 }
 
 export function messagesToGeminiRequestBody(messages = [], options = {}) {

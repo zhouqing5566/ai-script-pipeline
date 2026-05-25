@@ -1,5 +1,5 @@
 import { createStore } from "./state.js";
-import { runModelTask } from "./model-adapter.js";
+import { callModel, runModelTask } from "./model-adapter.js";
 import { repairEpisode } from "./repair.js";
 import { auditDraft } from "./audit.js";
 import { loadRuntimeSettings, mergeRuntimeApiConfig, resetLocalState, writeExport } from "./storage.js";
@@ -30,12 +30,16 @@ import {
   createModelDraft,
   createProviderDraft,
   createRouteDraft,
+  applyProviderTemplate,
+  coreRouteTaskTypes,
   featureAreas,
+  featureAreaForTaskType,
   maskApiKey,
   modelTaskTypes,
   providerTypes,
   qualityLevels,
-  requestFormatTypes
+  requestFormatTypes,
+  switchCoreRoutesToModel
 } from "./model-config.js";
 import {
   exportAnalysisMarkdown,
@@ -316,6 +320,9 @@ async function handleAction(target) {
       case "add-provider":
         addProvider();
         break;
+      case "add-provider-template":
+        addProviderTemplate(target.dataset.template || "openai_proxy");
+        break;
       case "save-provider":
         saveProvider(id);
         break;
@@ -351,6 +358,12 @@ async function handleAction(target) {
           state.apiConfig.selectedRouteId = id;
           return state;
         }, "选择路由", { version: false });
+        break;
+      case "test-task-route":
+        await testCurrentTaskRoute();
+        break;
+      case "switch-core-routes":
+        switchCoreTasksToSelectedModel();
         break;
       case "add-feedback":
         addFeedback();
@@ -397,6 +410,14 @@ async function executeTask(taskType, inputFactory, applyOutput, summary, options
   busyAction = null;
   store.setState(current, summary, options);
   showToast(result?.warnings?.length ? `${summary}。${result.warnings[0]}` : summary);
+}
+
+function inputMetaForTask(state, taskType) {
+  if (taskType === "analyzeScript") return state.scriptInput;
+  if (taskType === "generateDraft") return { project: state.currentProject, episodeNo: state.selectedEpisodeNo || 1 };
+  if (taskType === "auditDraft") return { draft: state.currentProject.draftEpisodes?.[0] || null, project: state.currentProject };
+  if (taskType === "jsonRepair") return { project: state.currentProject, brokenText: "{\"ok\":true", errors: ["测试 JSON 修复"] };
+  return { project: state.currentProject };
 }
 
 function readOpenInputs(baseState) {
@@ -711,6 +732,14 @@ function addProvider() {
   }, "新增 API Provider", { targetType: "settings", action: "generate", light: true });
 }
 
+function addProviderTemplate(templateType) {
+  store.setState((state) => {
+    state.apiConfig = applyProviderTemplate(state.apiConfig, templateType);
+    return state;
+  }, templateType === "deepseek" ? "新增 DeepSeek 官方模板" : "新增 OpenAI-compatible 代理模板", { targetType: "settings", action: "generate", light: true });
+  showToast(templateType === "deepseek" ? "已添加 DeepSeek 官方模板" : "已添加 OpenAI-compatible 代理模板");
+}
+
 function saveProvider(providerId) {
   store.setState((state) => {
     state.apiConfig.providers = state.apiConfig.providers.map((provider) =>
@@ -788,6 +817,7 @@ function saveModel(modelId) {
             contextWindow: Number(readModelField("contextWindow")) || 32000,
             maxOutputTokens: Number(readModelField("maxOutputTokens")) || 4096,
             supportsJsonMode: document.querySelector('[data-model-field="supportsJsonMode"]')?.checked || false,
+            supportsJsonModeExplicit: true,
             supportsVision: document.querySelector('[data-model-field="supportsVision"]')?.checked || false,
             supportsTools: document.querySelector('[data-model-field="supportsTools"]')?.checked || false,
             supportsStreaming: document.querySelector('[data-model-field="supportsStreaming"]')?.checked || false,
@@ -800,6 +830,59 @@ function saveModel(modelId) {
     );
     return state;
   }, "保存模型配置", { targetType: "settings", action: "edit", light: true });
+}
+
+async function testCurrentTaskRoute() {
+  const taskType = document.querySelector("#route-test-task")?.value || store.getState().apiConfig.routeTestTaskType || "analyzeScript";
+  busyAction = "测试当前任务路由";
+  render();
+  const current = readOpenInputs(store.getState());
+  const result = await callModel({
+    taskType,
+    featureArea: featureAreaForTaskType(taskType),
+    projectId: current.currentProject.id,
+    inputMeta: inputMetaForTask(current, taskType),
+    state: current
+  });
+  store.setState((state) => {
+    state.apiConfig.routeTestTaskType = taskType;
+    state.apiConfig.lastRouteTestResult = {
+      taskType,
+      routeId: result.log?.routeId || result.routeId || null,
+      actualMode: result.mode,
+      requestFormat: result.requestFormat,
+      providerName: result.log?.providerName || result.providerId || "未选择",
+      modelName: result.log?.modelName || result.modelId || "未选择",
+      endpointType: result.endpointType,
+      routingReason: result.log?.routingReason || "",
+      matchedSkillIds: result.matchedSkillIds || [],
+      warnings: result.warnings || [],
+      success: result.success,
+      errorMessage: result.error || "",
+      createdAt: new Date().toISOString()
+    };
+    if (result.log) state.modelLogs = [result.log, ...state.modelLogs].slice(0, 80);
+    return state;
+  }, "测试当前任务路由", { targetType: "settings", action: "generate", light: true });
+  busyAction = null;
+  showToast(result.success ? "当前任务路由测试完成" : `当前任务路由测试失败：${result.error || "未知错误"}`);
+}
+
+function switchCoreTasksToSelectedModel() {
+  const current = store.getState();
+  const modelId = current.apiConfig.selectedModelId || document.querySelector("#global-default-model")?.value;
+  const model = current.apiConfig.models.find((item) => item.id === modelId);
+  const provider = current.apiConfig.providers.find((item) => item.id === model?.providerId);
+  if (!model || !provider || provider.providerType === "local") {
+    showToast("请先在模型列表中选择一个真实模型");
+    return;
+  }
+  store.setState((state) => {
+    state.apiConfig = switchCoreRoutesToModel(state.apiConfig, model.id);
+    state.mode = "api";
+    return state;
+  }, "一键切换核心任务到当前真实模型", { targetType: "settings", action: "edit", light: true });
+  showToast("已将核心任务路由切换到当前真实模型");
 }
 
 function addRoute() {
@@ -1395,6 +1478,7 @@ function renderSettingsTab(state, tab) {
 function renderApiStatus(state) {
   const config = state.apiConfig;
   const demoWarnings = getApiModeDemoRouteWarnings(config);
+  const routeTestTask = config.routeTestTaskType || config.routes.find((route) => route.id === config.selectedRouteId)?.taskType || "analyzeScript";
   return `
     <section class="two-column">
       <div class="panel">
@@ -1421,17 +1505,22 @@ function renderApiStatus(state) {
         ])}
       </div>
       <div class="panel">
-        <h2>最近导出</h2>
-        ${
-          state.lastExport
-            ? keyValueGrid([
-                ["文件名", state.lastExport.fileName],
-                ["类型", state.lastExport.type],
-                ["路径", state.lastExport.path || "未落盘"],
-                ["时间", formatDate(state.lastExport.createdAt)]
-              ])
-            : "<p class='muted'>暂无导出。</p>"
-        }
+        <h2>测试当前任务路由</h2>
+        <div class="form-grid two">
+          <label>任务类型
+            <select id="route-test-task">
+              ${modelTaskTypes.map((taskType) => `<option value="${taskType}" ${routeTestTask === taskType ? "selected" : ""}>${taskType}</option>`).join("")}
+            </select>
+          </label>
+          <label>当前选中模型
+            <input readonly value="${escapeAttr(config.models.find((model) => model.id === config.selectedModelId)?.displayName || "未选择")}" />
+          </label>
+        </div>
+        <div class="panel-actions">
+          <button class="secondary-button" data-action="test-task-route">测试当前任务路由</button>
+          <button class="primary-button" data-action="switch-core-routes">一键切换核心任务到当前真实模型</button>
+        </div>
+        ${renderRouteTestResult(config.lastRouteTestResult)}
       </div>
     </section>
     <section class="panel notice-panel">
@@ -1446,12 +1535,44 @@ function renderApiStatus(state) {
   `;
 }
 
+function renderRouteTestResult(result) {
+  if (!result) return "<p class='muted'>选择任务后点击测试，可确认真实任务最终使用哪个 Provider、模型和请求格式。</p>";
+  return `
+    <div class="suggestion-box ${result.success ? "" : "has-warning"}">
+      <h3>最近路由测试</h3>
+      ${keyValueGrid([
+        ["任务", result.taskType],
+        ["Route", result.routeId || "未匹配"],
+        ["实际模式", result.actualMode],
+        ["请求格式", result.requestFormat || "未记录"],
+        ["Provider", result.providerName],
+        ["模型", result.modelName],
+        ["端点类型", result.endpointType || "未记录"],
+        ["路由原因", result.routingReason || "未记录"],
+        ["Skill", (result.matchedSkillIds || []).join("、") || "无"],
+        ["警告", (result.warnings || []).join("；") || "无"],
+        ["错误", result.errorMessage || "无"],
+        ["时间", formatDate(result.createdAt)]
+      ])}
+      ${
+        result.actualMode === "demo"
+          ? `<p class="warning-text">API 已配置，但该任务仍指向 Demo，请点击一键切换核心任务到当前真实模型。</p>`
+          : ""
+      }
+    </div>
+  `;
+}
+
 function renderProviderSettings(config) {
   const selected = config.providers.find((provider) => provider.id === config.selectedProviderId) || config.providers[0];
   return `
     <section class="settings-split">
       <div class="panel">
         <div class="panel-title"><h2>API Provider</h2><button class="small-button" data-action="add-provider">新增</button></div>
+        <div class="panel-actions compact-actions">
+          <button class="secondary-button" data-action="add-provider-template" data-template="deepseek">DeepSeek 官方模板</button>
+          <button class="secondary-button" data-action="add-provider-template" data-template="openai_proxy">OpenAI 代理模板</button>
+        </div>
         ${config.providers.map((provider) => `<button class="list-row ${selected?.id === provider.id ? "active" : ""}" data-action="select-provider" data-id="${provider.id}"><strong>${escapeHtml(provider.name)}</strong><span>${provider.providerType}｜${provider.requestFormat || "auto"}｜${provider.enabled ? "启用" : "停用"}｜Key ${maskApiKey(provider.apiKey)}</span></button>`).join("")}
       </div>
       <div class="panel">
@@ -1481,7 +1602,7 @@ function renderProviderForm(provider) {
       <label>限流备注<input data-provider-field="rateLimit" value="${escapeAttr(provider.rateLimit || "")}" /></label>
     </div>
     <label class="block-label">备注<textarea data-provider-field="notes" class="medium-textarea">${escapeHtml(provider.notes || "")}</textarea></label>
-    <p class="muted">请求格式选 auto 时，Gemini 模型名会自动尝试 Gemini native generateContent；如果你的网关明确兼容 /chat/completions，请选 openai_chat。</p>
+    <p class="muted">OpenAI 代理、DeepSeek、OpenRouter、OneAPI/NewAPI 请用 openai_chat。只有官方 Gemini API 或明确 generateContent 接口才用 gemini_native。</p>
     <div class="panel-actions">
       <button class="primary-button" data-action="save-provider" data-id="${provider.id}">保存 Provider</button>
       <button class="secondary-button" data-action="test-provider" data-id="${provider.id}">测试连接</button>
@@ -1576,7 +1697,7 @@ function renderModelLogs(state) {
       <h2>模型调用日志</h2>
       <div class="log-table">
         ${(state.modelLogs || [])
-          .map((log) => `<div class="${log.warnings?.length ? "has-warning" : ""}"><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${escapeHtml(log.requestFormat || log.mode || "未知格式")}</span><span>${log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.warnings?.join("；") || log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`)
+          .map((log) => `<div class="${log.warnings?.length ? "has-warning" : ""}"><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${escapeHtml(log.requestFormat || log.mode || "未知格式")}</span><span>${escapeHtml(log.endpointType || "未记录")}</span><span>${log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.warnings?.join("；") || log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`)
           .join("") || "<p class='muted'>暂无调用记录。</p>"}
       </div>
     </section>

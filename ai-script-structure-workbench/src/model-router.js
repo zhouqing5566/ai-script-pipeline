@@ -138,7 +138,7 @@ function pickSkillPreferredModel(config, matchedSkills) {
 
 function hasCapabilities(model, requiredCapabilities = []) {
   return requiredCapabilities.every((capability) => {
-    if (capability === "json") return model.supportsJsonMode;
+    if (capability === "json") return true;
     if (capability === "vision") return model.supportsVision;
     if (capability === "tools") return model.supportsTools;
     if (capability === "streaming") return model.supportsStreaming;

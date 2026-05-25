@@ -19,8 +19,6 @@ import { matchSkillsForTask } from "./skill-manager.js";
 import { selectFallbackModel, selectModelRoute } from "./model-router.js";
 import { buildPrompt } from "./prompt-builder.js";
 import { parseJsonWithRepair, extractObjectBody } from "./json-repair.js";
-import { callOpenAICompatible } from "./provider-adapters/openai-compatible.js";
-import { callGemini, shouldUseGeminiNative } from "./provider-adapters/gemini.js";
 import { schemaValidationMessage, validateTaskOutput } from "./schema-validator.js";
 
 export async function callModel({
@@ -71,6 +69,9 @@ export async function callModel({
   let error = null;
   let tokenUsage = null;
   let costEstimate = null;
+  let actualRequestFormat = null;
+  let endpointType = null;
+  let providerStatus = null;
   let usedFallback = false;
   let provider = selection.provider;
   let model = selection.model;
@@ -104,6 +105,9 @@ export async function callModel({
       outputText = response.outputText;
       parsedJson = response.parsedJson;
       tokenUsage = response.tokenUsage;
+      actualRequestFormat = response.requestFormat;
+      endpointType = response.endpointType;
+      providerStatus = response.status;
       costEstimate = estimateCost(model, tokenUsage);
     }
   } catch (providerError) {
@@ -135,6 +139,9 @@ export async function callModel({
           outputText = response.outputText;
           parsedJson = response.parsedJson;
           tokenUsage = response.tokenUsage;
+          actualRequestFormat = response.requestFormat;
+          endpointType = response.endpointType;
+          providerStatus = response.status;
           costEstimate = estimateCost(model, tokenUsage);
         } catch (fallbackError) {
           attemptErrors.push(`备用模型失败：${fallbackError.message}`);
@@ -149,13 +156,18 @@ export async function callModel({
   }
 
   const latencyMs = Math.round(performance.now() - startedAt);
-  const requestFormat = mode === "api" ? (shouldUseGeminiNative({ provider, model }) ? "gemini_native" : "openai_chat") : "demo";
+  const requestFormat = mode === "api" ? actualRequestFormat || resolveClientRequestFormat({ provider, model }) : "demo";
+  const resolvedEndpointType = mode === "api" ? endpointType || "server_proxy" : "local_demo";
+  const status = error ? "failed" : "success";
   const result = {
     success: !error,
     mode,
     requestedMode,
     requestFormat,
+    endpointType: resolvedEndpointType,
+    status,
     taskType,
+    routeId: selection.route?.id || null,
     providerId: provider?.id || null,
     modelId: model?.id || null,
     usedFallback,
@@ -179,7 +191,12 @@ export async function callModel({
     requestedMode,
     providerId: result.providerId,
     providerName: provider?.name || "未选择",
+    routeId: result.routeId,
     requestFormat,
+    endpointType: resolvedEndpointType,
+    serverProxy: resolvedEndpointType === "server_proxy",
+    status,
+    providerStatus,
     modelId: result.modelId,
     modelName: model?.displayName || model?.modelName || "未选择",
     skillVersion: matchedSkills.map((skill) => `${skill.name} ${skill.version}`).join("；") || "未匹配",
@@ -312,18 +329,43 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
   return {
     outputText: response.outputText,
     parsedJson,
-    tokenUsage: response.tokenUsage
+    tokenUsage: response.tokenUsage,
+    requestFormat: response.requestFormat,
+    endpointType: response.endpointType,
+    status: response.status
   };
 }
 
 async function callProvider({ provider, model, messages, options }) {
-  if (shouldUseGeminiNative({ provider, model })) {
-    return callGemini({ provider, model, messages, options });
+  const requestFormat = resolveClientRequestFormat({ provider, model });
+  const payload = { provider, model, messages, options, requestFormat };
+  if (typeof globalThis.__MODEL_CALL_PROXY__ === "function") {
+    try {
+      return await globalThis.__MODEL_CALL_PROXY__(payload);
+    } catch (error) {
+      throw new Error(normalizeClientProviderError(error.message));
+    }
   }
-  if (["openai_compatible", "openai", "openrouter", "deepseek", "qwen", "zhipu", "moonshot", "doubao", "custom"].includes(provider.providerType)) {
-    return callOpenAICompatible({ provider, model, messages, options });
+  try {
+    const response = await fetch("/api/model-call", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.errorMessage || data.error || `Provider 请求失败：${response.status}`);
+    }
+    return {
+      outputText: data.outputText || "",
+      tokenUsage: data.tokenUsage || null,
+      requestFormat: data.requestFormat || requestFormat,
+      endpointType: data.endpointType || "server_proxy",
+      status: data.status || response.status
+    };
+  } catch (error) {
+    throw new Error(normalizeClientProviderError(error.message));
   }
-  throw new Error(`Provider 类型 ${provider.providerType} 已预留，V1 已实现 OpenAI-compatible 与 Gemini native 调用。`);
 }
 
 function featureAreaForTask(taskType) {
@@ -387,6 +429,32 @@ function estimateCost(model, tokenUsage) {
     completionTokens: tokenUsage.completion_tokens || tokenUsage.completionTokens || null,
     note: `费用等级：${model?.costLevel || "unknown"}`
   };
+}
+
+function resolveClientRequestFormat({ provider } = {}) {
+  const requestFormat = provider?.requestFormat || "auto";
+  if (requestFormat === "gemini_native") return "gemini_native";
+  if (requestFormat === "openai_chat") return "openai_chat";
+  if (provider?.providerType === "gemini") return "gemini_native";
+  const baseUrl = String(provider?.baseUrl || "").toLowerCase();
+  if (baseUrl.includes("generativelanguage.googleapis.com")) return "gemini_native";
+  return "openai_chat";
+}
+
+function normalizeClientProviderError(message = "") {
+  if (message.includes("当前接口不接受 OpenAI Chat Completions 格式") || message.includes("真实任务应走本地 server proxy") || message.includes("请求被中止")) {
+    return message;
+  }
+  if (/Unknown name "messages"|Unknown name "max_tokens"|Unknown name "temperature"|Cannot find field/i.test(message)) {
+    return `${message}。当前接口不接受 OpenAI Chat Completions 格式。若你使用 OpenAI 代理/DeepSeek，请将 requestFormat 改为 openai_chat，并确认 Base URL 是 OpenAI-compatible 地址；若你使用官方 Gemini API，请改为 gemini_native。`;
+  }
+  if (/Failed to fetch/i.test(message)) {
+    return `${message}。浏览器直连外部 API 失败，可能是 CORS 或网络问题。真实任务应走本地 server proxy；若仍出现，请确认本地服务正在运行。`;
+  }
+  if (/The user aborted a request|signal is aborted|AbortError|aborted/i.test(message)) {
+    return `${message}。请求被中止，可能是超时、重复触发或页面状态切换。请查看 timeoutMs 和是否重复点击。`;
+  }
+  return message;
 }
 
 function createLogId() {

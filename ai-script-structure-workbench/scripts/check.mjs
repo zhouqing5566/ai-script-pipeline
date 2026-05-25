@@ -23,14 +23,23 @@ import {
   setSkillStatus,
   updateSkill
 } from "../src/skill-manager.js";
-import { createModelDraft, createProviderDraft, createRouteDraft } from "../src/model-config.js";
+import {
+  applyProviderTemplate,
+  coreRouteTaskTypes,
+  createDeepSeekTemplate,
+  createModelDraft,
+  createProviderDraft,
+  createRouteDraft,
+  switchCoreRoutesToModel
+} from "../src/model-config.js";
 import { selectModelRoute } from "../src/model-router.js";
 import { callModel } from "../src/model-adapter.js";
 import { sanitizeStateForSnapshot } from "../src/redaction.js";
 import { schemaValidationMessage, validateTaskOutput } from "../src/schema-validator.js";
 import { extractDocxTextFromArrayBuffer, parseScriptFile } from "../src/file-parser.js";
 import { hasUsefulRuntimeSettings, mergeRuntimeApiConfig } from "../src/storage.js";
-import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, shouldUseGeminiNative } from "../src/provider-adapters/gemini.js";
+import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, resolveRequestFormat, shouldUseGeminiNative } from "../src/provider-adapters/gemini.js";
+import { buildOpenAIChatRequestBody } from "../src/provider-adapters/openai-compatible.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -132,18 +141,33 @@ const providerDraft = createProviderDraft();
 const modelDraft = createModelDraft(providerDraft.id);
 const routeDraft = createRouteDraft(modelDraft.id);
 assert.ok(providerDraft.providerType);
-assert.equal(providerDraft.requestFormat, "auto");
+assert.equal(providerDraft.requestFormat, "openai_chat");
 assert.ok(modelDraft.modelType.length);
+assert.equal(modelDraft.supportsJsonMode, false);
 assert.ok(routeDraft.taskType);
 
 const geminiProvider = { ...providerDraft, providerType: "openai_compatible", requestFormat: "auto", baseUrl: "https://generativelanguage.googleapis.com/v1beta" };
 const geminiModel = { ...modelDraft, modelName: "gemini-3.1-flash-lite-preview", displayName: "Gemini 3.1 Flash Lite", supportsJsonMode: true };
 assert.equal(shouldUseGeminiNative({ provider: geminiProvider, model: geminiModel }), true);
 assert.equal(shouldUseGeminiNative({ provider: { ...geminiProvider, requestFormat: "openai_chat" }, model: geminiModel }), false);
+assert.equal(shouldUseGeminiNative({ provider: { ...providerDraft, requestFormat: "auto", baseUrl: "https://api.proxy.example/v1" }, model: geminiModel }), false);
+assert.equal(resolveRequestFormat({ provider: { ...providerDraft, requestFormat: "gemini_native" }, model: geminiModel }), "gemini_native");
 assert.equal(
   buildGeminiGenerateContentUrl("https://generativelanguage.googleapis.com/v1beta", "gemini-test", "key-123"),
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent?key=key-123"
 );
+const openAiBodyWithoutJsonMode = buildOpenAIChatRequestBody({
+  model: { ...modelDraft, modelName: "gemini-through-proxy", supportsJsonMode: false, supportsJsonModeExplicit: false },
+  messages: [{ role: "user", content: "JSON please" }],
+  options: { jsonModeRequired: true, maxOutputTokens: 128 }
+});
+assert.equal(Object.hasOwn(openAiBodyWithoutJsonMode, "response_format"), false);
+const openAiBodyWithExplicitJsonMode = buildOpenAIChatRequestBody({
+  model: { ...modelDraft, modelName: "json-model", supportsJsonMode: true, supportsJsonModeExplicit: true },
+  messages: [{ role: "user", content: "JSON please" }],
+  options: { jsonModeRequired: true, maxOutputTokens: 128 }
+});
+assert.deepEqual(openAiBodyWithExplicitJsonMode.response_format, { type: "json_object" });
 const geminiBody = messagesToGeminiRequestBody(
   [
     { role: "system", content: "系统原则" },
@@ -154,6 +178,20 @@ const geminiBody = messagesToGeminiRequestBody(
 assert.equal(geminiBody.systemInstruction.parts[0].text, "系统原则");
 assert.equal(geminiBody.contents[0].parts[0].text, "请返回 JSON");
 assert.equal(geminiBody.generationConfig.responseMimeType, "application/json");
+
+const deepSeekTemplate = createDeepSeekTemplate();
+assert.equal(deepSeekTemplate.provider.providerType, "deepseek");
+assert.equal(deepSeekTemplate.provider.requestFormat, "openai_chat");
+assert.ok(deepSeekTemplate.models.some((model) => model.modelName === "deepseek-chat"));
+assert.ok(deepSeekTemplate.models.every((model) => model.supportsJsonMode === false));
+const templatedConfig = applyProviderTemplate(state.apiConfig, "deepseek");
+assert.equal(templatedConfig.providers[0].providerType, "deepseek");
+
+const switchedConfig = switchCoreRoutesToModel(apiStateLike(state.apiConfig), "model-openai-compatible-default");
+assert.equal(switchedConfig.globalDefaultModelId, "model-openai-compatible-default");
+for (const taskType of coreRouteTaskTypes) {
+  assert.equal(switchedConfig.routes.find((route) => route.taskType === taskType)?.primaryModelId, "model-openai-compatible-default");
+}
 
 const demoSelection = selectModelRoute({
   state,
@@ -186,6 +224,34 @@ const apiSelection = selectModelRoute({
 });
 assert.equal(apiSelection.mode, "api");
 assert.equal(apiSelection.model.id, "model-openai-compatible-default");
+
+const proxyCalls = [];
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
+  proxyCalls.push(payload);
+  return {
+    outputText: JSON.stringify(evaluateIdea(apiState.currentProject)),
+    tokenUsage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    requestFormat: payload.requestFormat,
+    endpointType: "server_proxy",
+    status: 200
+  };
+};
+const apiSuccessState = structuredClone(apiState);
+apiSuccessState.apiConfig = switchCoreRoutesToModel(apiSuccessState.apiConfig, "model-openai-compatible-default");
+const apiSuccessResult = await callModel({
+  taskType: "evaluateIdea",
+  featureArea: "创作决策中心",
+  inputMeta: { project: apiSuccessState.currentProject },
+  state: apiSuccessState
+});
+assert.equal(apiSuccessResult.success, true);
+assert.equal(apiSuccessResult.mode, "api");
+assert.equal(apiSuccessResult.endpointType, "server_proxy");
+assert.equal(apiSuccessResult.requestFormat, "openai_chat");
+assert.equal(apiSuccessResult.log.serverProxy, true);
+assert.equal(proxyCalls.length, 1);
+assert.equal(proxyCalls[0].requestFormat, "openai_chat");
+delete globalThis.__MODEL_CALL_PROXY__;
 
 const modelResult = await callModel({
   taskType: "evaluateIdea",
@@ -244,6 +310,12 @@ failingApiState.apiConfig.routes = [
   }
 ];
 failingApiState.apiConfig.globalDefaultModelId = "model-fail-a";
+const failingProxyCalls = [];
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
+  failingProxyCalls.push(payload);
+  if (payload.model.id === "model-fail-a") throw new Error("Failed to fetch");
+  throw new Error('Provider 请求失败：400 {"error":{"message":"Invalid JSON payload received. Unknown name \\"messages\\": Cannot find field."}}');
+};
 const failingResult = await callModel({
   taskType: "analyzeScript",
   featureArea: "剧本分析中心",
@@ -259,6 +331,11 @@ assert.ok(failingResult.error.includes("备用模型失败"));
 assert.ok(failingResult.log);
 assert.equal(failingResult.log.success, false);
 assert.ok(failingResult.log.attemptErrors.length >= 2);
+assert.equal(failingResult.endpointType, "server_proxy");
+assert.ok(failingResult.error.includes("真实任务应走本地 server proxy"));
+assert.ok(failingResult.error.includes("当前接口不接受 OpenAI Chat Completions 格式"));
+assert.equal(failingProxyCalls.length, 2);
+delete globalThis.__MODEL_CALL_PROXY__;
 
 const invalidShape = validateTaskOutput("generateDirections", { bad: true });
 assert.equal(invalidShape.ok, false);
@@ -322,7 +399,29 @@ for (const file of files) {
   await fs.access(new URL(`../${file}`, import.meta.url));
 }
 
+const serverSource = await fs.readFile(new URL("../server.js", import.meta.url), "utf8");
+assert.ok(serverSource.includes('url.pathname === "/api/model-call"'));
+assert.ok(serverSource.includes("performProviderCall"));
+assert.ok(serverSource.includes("endpointType: \"server_proxy\""));
+const modelAdapterSource = await fs.readFile(new URL("../src/model-adapter.js", import.meta.url), "utf8");
+assert.ok(modelAdapterSource.includes('fetch("/api/model-call"'));
+assert.ok(!modelAdapterSource.includes("callOpenAICompatible"));
+assert.ok(!modelAdapterSource.includes("callGemini"));
+
 console.log("check passed: V1.1 demo/API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");
+
+function apiStateLike(apiConfig) {
+  const next = structuredClone(apiConfig);
+  next.providers = next.providers.map((provider) =>
+    provider.id === "provider-openai-compatible-template"
+      ? { ...provider, enabled: true, requestFormat: "openai_chat", baseUrl: "https://api.example.com/v1", apiKey: "test-key" }
+      : provider
+  );
+  next.models = next.models.map((model) =>
+    model.id === "model-openai-compatible-default" ? { ...model, enabled: true, providerId: "provider-openai-compatible-template" } : model
+  );
+  return next;
+}
 
 function createStoredZip(filePath, content) {
   const name = Buffer.from(filePath, "utf8");
