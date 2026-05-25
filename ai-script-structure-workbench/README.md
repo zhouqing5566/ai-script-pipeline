@@ -18,7 +18,7 @@
 
 ## 功能范围
 
-- 剧本粘贴 / 上传入口
+- 剧本粘贴 / 上传入口，支持 txt / md / docx 正文解析
 - 结构化剧本分析：开头钩子、观众情绪、主题、人物、金手指、阻碍、主线骨架、大反差、结局、分集功能、可复用模式
 - 案例库与模式资产中心
 - Skill 版本管理、优化建议、回归对比演示
@@ -75,6 +75,7 @@ npm run check
 - 主模型失败、备用模型失败、JSON 修复失败都会返回完整结果并写日志
 - 完整项目导出和快照不会泄漏 API Key
 - 真实 API JSON 返回会按 taskType 做结构校验
+- docx 上传会解析 Word 正文，不再按二进制文本读取造成乱码
 
 ## 模式说明
 
@@ -233,6 +234,7 @@ src/skill-manager.js      EditableSkill、编辑状态、匹配、冲突检测
 src/prompt-builder.js     通用系统原则、锁定锚点和 Skill 规则拼装
 src/json-repair.js        JSON 解析与修复流程
 src/provider-adapters/    Provider Adapter，V1 实现 OpenAI-compatible
+src/file-parser.js        txt / md / docx 上传解析，避免 Word 二进制乱码
 src/schemas.js            导航、枚举、中文字段标签
 src/seed-data.js          Demo 项目、案例、模式资产、Skill、Demo 模型配置
 src/storage.js            localStorage 与本地快照持久化

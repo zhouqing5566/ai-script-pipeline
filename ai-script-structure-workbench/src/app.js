@@ -3,6 +3,7 @@ import { runModelTask } from "./model-adapter.js";
 import { repairEpisode } from "./repair.js";
 import { auditDraft } from "./audit.js";
 import { resetLocalState, writeExport } from "./storage.js";
+import { parseScriptFile } from "./file-parser.js";
 import {
   navItems,
   analysisTabs,
@@ -67,17 +68,29 @@ root.addEventListener("click", (event) => {
 root.addEventListener("change", (event) => {
   const fileInput = event.target.closest("#script-file");
   if (!fileInput?.files?.length) return;
+  void handleScriptFileUpload(fileInput);
+});
+
+async function handleScriptFileUpload(fileInput) {
   const file = fileInput.files[0];
-  const reader = new FileReader();
-  reader.onload = () => {
+  busyAction = "解析上传文件";
+  render();
+  try {
+    const text = await parseScriptFile(file);
     const next = readOpenInputs(store.getState());
-    next.scriptInput.text = String(reader.result || "");
+    next.scriptInput.text = text;
     next.scriptInput.title = next.scriptInput.title || file.name.replace(/\.[^.]+$/, "");
     next.scriptInput.fileName = file.name;
     store.setState(next, "读取上传剧本文本", { targetType: "script", action: "edit" });
-  };
-  reader.readAsText(file);
-});
+    showToast(`已解析：${file.name}`);
+  } catch (error) {
+    showToast(error.message || "文件解析失败");
+  } finally {
+    busyAction = null;
+    fileInput.value = "";
+    render();
+  }
+}
 
 async function handleAction(target) {
   const action = target.dataset.action;
@@ -1011,8 +1024,8 @@ function renderAnalysis(state) {
         </label>
       </div>
       <div class="upload-row">
-        <label class="file-button">${icon("upload")}上传 txt / md / docx / pdf<input id="script-file" type="file" accept=".txt,.md,.docx,.pdf" /></label>
-        <span>当前 V1 对 docx/pdf 做文本读取演示，生产环境应接解析器。</span>
+        <label class="file-button">${icon("upload")}上传 txt / md / docx<input id="script-file" type="file" accept=".txt,.md,.docx,.doc,.pdf" /></label>
+        <span>已支持 .docx 正文解析；老式 .doc 和 PDF 会提示转换，避免乱码。</span>
       </div>
       <textarea id="script-text" class="large-textarea" spellcheck="false">${escapeHtml(input.text)}</textarea>
     </section>

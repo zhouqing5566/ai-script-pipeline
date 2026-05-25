@@ -28,6 +28,7 @@ import { selectModelRoute } from "../src/model-router.js";
 import { callModel } from "../src/model-adapter.js";
 import { sanitizeStateForSnapshot } from "../src/redaction.js";
 import { schemaValidationMessage, validateTaskOutput } from "../src/schema-validator.js";
+import { extractDocxTextFromArrayBuffer, parseScriptFile } from "../src/file-parser.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -248,6 +249,25 @@ const snapshot = JSON.stringify(sanitizeStateForSnapshot(secretState));
 assert.ok(!snapshot.includes("sk-real-secret"));
 assert.ok(snapshot.includes("[已脱敏]"));
 
+const docxBuffer = createStoredZip(
+  "word/document.xml",
+  `<?xml version="1.0" encoding="UTF-8"?>
+  <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+    <w:body>
+      <w:p><w:r><w:t>第1集：订婚宴开局</w:t></w:r></w:p>
+      <w:p><w:r><w:t>主角选择反击 &amp; 留下伏笔</w:t></w:r></w:p>
+    </w:body>
+  </w:document>`
+);
+const docxText = await extractDocxTextFromArrayBuffer(bufferToArrayBuffer(docxBuffer));
+assert.ok(docxText.includes("第1集：订婚宴开局"));
+assert.ok(docxText.includes("主角选择反击 & 留下伏笔"));
+assert.ok(!docxText.includes("<w:t>"));
+await assert.rejects(
+  () => parseScriptFile({ name: "old-word.doc", text: async () => "" }),
+  /另存为 \.docx/
+);
+
 const gitignore = await fs.readFile(new URL("../.gitignore", import.meta.url), "utf8");
 for (const pattern of [".env", ".env.*", "config.local.json", "data/settings/*.json", "data/api-config*.json", "data/model-config*.json"]) {
   assert.ok(gitignore.includes(pattern), `.gitignore missing ${pattern}`);
@@ -258,4 +278,48 @@ for (const file of files) {
   await fs.access(new URL(`../${file}`, import.meta.url));
 }
 
-console.log("check passed: V1.1 demo/API safety, editable Skill assets, model routing, and redaction are coherent");
+console.log("check passed: V1.1 demo/API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");
+
+function createStoredZip(filePath, content) {
+  const name = Buffer.from(filePath, "utf8");
+  const data = Buffer.from(content, "utf8");
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(0, 6);
+  local.writeUInt16LE(0, 8);
+  local.writeUInt32LE(0, 14);
+  local.writeUInt32LE(data.length, 18);
+  local.writeUInt32LE(data.length, 22);
+  local.writeUInt16LE(name.length, 26);
+  local.writeUInt16LE(0, 28);
+
+  const centralOffset = local.length + name.length + data.length;
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(0, 8);
+  central.writeUInt16LE(0, 10);
+  central.writeUInt32LE(0, 16);
+  central.writeUInt32LE(data.length, 20);
+  central.writeUInt32LE(data.length, 24);
+  central.writeUInt16LE(name.length, 28);
+  central.writeUInt16LE(0, 30);
+  central.writeUInt16LE(0, 32);
+  central.writeUInt32LE(0, 42);
+
+  const centralSize = central.length + name.length;
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(1, 8);
+  eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(centralSize, 12);
+  eocd.writeUInt32LE(centralOffset, 16);
+
+  return Buffer.concat([local, name, data, central, name, eocd]);
+}
+
+function bufferToArrayBuffer(buffer) {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
