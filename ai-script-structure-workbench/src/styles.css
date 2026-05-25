@@ -969,9 +969,20 @@ textarea {
   margin: 0 0 6px;
 }
 
+.strong-warning {
+  border-color: #e3a13b;
+  box-shadow: inset 3px 0 0 var(--risk);
+}
+
 .warning-text {
   margin: 10px 0 0;
   color: var(--risk);
+  font-weight: 700;
+}
+
+.sync-ok {
+  margin: 10px 0 0;
+  color: var(--ok);
   font-weight: 700;
 }
 

@@ -394,6 +394,15 @@ src/model-router.js
 如果 fallbackModelIds 有可用真实模型，可切备用模型。
 usedFallback 必须写入日志。
 如果 API Mode 下最终选择 DemoRuleEngine，默认返回 requiresRouteFix=true 且不生成 Demo 内容；只有用户明确开启 allowDemoInApiMode 才允许继续。
+
+V1.1 加固：
+
+- Provider、Model、Route、API Mode 和“一键切换核心任务”保存后，前端必须等待 `/api/settings` 同步完成，并显示“配置已同步到本地服务”或“本地服务设置同步失败，测试连接可能读取旧配置”。
+- `allowDemoInApiMode` 开启时需要二次确认；开启后页面顶部和调用日志必须以醒目警告标记“真实 API Mode 允许 Demo 兜底”。
+- `requestFormat` 解析统一由 `src/request-format.js` 负责。`openai_chat` 永远走 Chat Completions，`gemini_native` 才走 Gemini native，`auto` 仅在 `providerType=gemini` 或 Base URL 为 `generativelanguage.googleapis.com` 时走 native，其余默认 `openai_chat`。
+- retry 只对网络失败、超时、被中止、429、5xx、空响应等临时错误重试；结构校验失败、400 请求格式错误、缺少 Key、模型不属于 Provider 等配置或 schema 问题不做无意义重试。
+- Provider 类型为 `local` 时，测试连接结果必须标记为 Demo Provider 测试，不代表真实 API 可用。
+- `/api/model-call` 服务端日志应记录 `settingsUpdatedAt`、`providerUpdatedAt`、`modelUpdatedAt`、`routeId`、`taskType`，便于定位“配置已改但任务读到旧配置”的问题。
 ```
 
 ## Model Adapter
@@ -425,6 +434,11 @@ ModelCallResult = {
   providerId,
   modelId,
   usedFallback,
+  requiresRouteFix,
+  apiModeDemoFallback,
+  settingsUpdatedAt,
+  providerUpdatedAt,
+  modelUpdatedAt,
   matchedSkillIds,
   outputText,
   parsedJson,

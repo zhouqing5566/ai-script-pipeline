@@ -2,7 +2,7 @@ import { createStore } from "./state.js";
 import { callModel, runModelTask } from "./model-adapter.js";
 import { repairEpisode } from "./repair.js";
 import { auditDraft } from "./audit.js";
-import { loadRuntimeSettings, mergeRuntimeApiConfig, resetLocalState, writeExport } from "./storage.js";
+import { loadRuntimeSettings, mergeRuntimeApiConfig, resetLocalState, syncRuntimeSettings, writeExport } from "./storage.js";
 import { parseScriptFile } from "./file-parser.js";
 import {
   navItems,
@@ -315,7 +315,7 @@ async function handleAction(target) {
         }, "切换 API 配置标签", { version: false });
         break;
       case "set-api-mode":
-        saveApiMode();
+        await saveApiMode();
         break;
       case "add-provider":
         addProvider();
@@ -324,7 +324,7 @@ async function handleAction(target) {
         addProviderTemplate(target.dataset.template || "openai_proxy");
         break;
       case "save-provider":
-        saveProvider(id);
+        await saveProvider(id);
         break;
       case "select-provider":
         store.setState((state) => {
@@ -339,7 +339,7 @@ async function handleAction(target) {
         addModel();
         break;
       case "save-model":
-        saveModel(id);
+        await saveModel(id);
         break;
       case "select-model":
         store.setState((state) => {
@@ -351,7 +351,7 @@ async function handleAction(target) {
         addRoute();
         break;
       case "save-route":
-        saveRoute(id);
+        await saveRoute(id);
         break;
       case "select-route":
         store.setState((state) => {
@@ -363,7 +363,7 @@ async function handleAction(target) {
         await testCurrentTaskRoute();
         break;
       case "switch-core-routes":
-        switchCoreTasksToSelectedModel();
+        await switchCoreTasksToSelectedModel();
         break;
       case "add-feedback":
         addFeedback();
@@ -399,6 +399,25 @@ async function hydrateRuntimeSettings() {
     return state;
   }, "恢复本地 API 与模型配置", { version: false });
   showToast("已从本地服务恢复 API 与模型配置");
+}
+
+async function syncApiSettings(options = {}) {
+  const successMessage = options.successMessage || "配置已同步到本地服务。";
+  const failureMessage = options.failureMessage || "本地服务设置同步失败，测试连接可能读取旧配置。";
+  const result = await syncRuntimeSettings(store.getState().apiConfig);
+  store.setState((state) => {
+    state.apiConfig.lastSettingsSync = {
+      success: Boolean(result.ok),
+      message: result.ok ? successMessage : failureMessage,
+      error: result.error || null,
+      createdAt: new Date().toISOString()
+    };
+    return state;
+  }, "同步 API 设置到本地服务", { version: false, persistSettings: false });
+  if (options.show !== false) {
+    showToast(result.ok ? successMessage : `${failureMessage}${result.error ? `：${result.error}` : ""}`);
+  }
+  return result;
 }
 
 async function executeTask(taskType, inputFactory, applyOutput, summary, options = {}) {
@@ -713,15 +732,26 @@ function mergeSelectedSkill(skillId) {
   }, "Demo 合并 Skill", { targetType: "skill", targetId: skillId, action: "generate" });
 }
 
-function saveApiMode() {
+async function saveApiMode() {
+  const nextMode = document.querySelector("#api-mode")?.value || "demo";
+  const allowDemoInApiMode = document.querySelector("#allow-demo-in-api-mode")?.checked || false;
+  if (
+    nextMode === "api" &&
+    allowDemoInApiMode &&
+    !store.getState().apiConfig.allowDemoInApiMode &&
+    !window.confirm("开启后，真实 API Mode 下部分任务可能继续使用 DemoRuleEngine。请仅在调试或演示时开启。")
+  ) {
+    return;
+  }
   store.setState((state) => {
-    state.apiConfig.mode = document.querySelector("#api-mode")?.value || "demo";
+    state.apiConfig.mode = nextMode;
     state.apiConfig.globalDefaultModelId = document.querySelector("#global-default-model")?.value || "model-demo-rule-engine";
-    state.apiConfig.allowDemoInApiMode = document.querySelector("#allow-demo-in-api-mode")?.checked || false;
+    state.apiConfig.allowDemoInApiMode = allowDemoInApiMode;
     state.mode = state.apiConfig.mode;
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存 API 运行模式", { targetType: "settings", action: "edit", light: true });
+  await syncApiSettings();
 }
 
 function addProvider() {
@@ -741,7 +771,7 @@ function addProviderTemplate(templateType) {
   showToast(templateType === "deepseek" ? "已添加 DeepSeek 官方模板" : "已添加 OpenAI-compatible 代理模板");
 }
 
-function saveProvider(providerId) {
+async function saveProvider(providerId) {
   store.setState((state) => {
     state.apiConfig.providers = state.apiConfig.providers.map((provider) =>
       provider.id === providerId
@@ -761,8 +791,10 @@ function saveProvider(providerId) {
           }
         : provider
     );
+    state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存 API Provider", { targetType: "settings", action: "edit", light: true });
+  await syncApiSettings();
 }
 
 async function testProvider(providerId) {
@@ -776,6 +808,8 @@ async function testProvider(providerId) {
     result = { ok: false, error: "该 Provider 下没有启用模型，请先新增或启用一个模型。" };
   } else if (provider?.enabled && (provider.providerType === "local" || (provider.baseUrl && provider.apiKey))) {
     try {
+      const synced = await syncApiSettings({ successMessage: "测试前已同步配置到本地服务。", show: false });
+      if (!synced.ok) throw new Error("本地服务设置同步失败，测试连接可能读取旧配置。");
       const response = await fetch("/api/test-provider", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -791,12 +825,17 @@ async function testProvider(providerId) {
       providerId,
       success: Boolean(result.ok),
       message: result.message || result.error || "测试完成。",
-      requestFormat: result.requestFormat || provider.requestFormat || "auto",
+      mode: result.mode || (provider?.providerType === "local" ? "demo" : "api"),
+      endpointType: result.endpointType || (provider?.providerType === "local" ? "local_demo" : "server_proxy"),
+      requestFormat: result.requestFormat || provider?.requestFormat || "auto",
+      settingsUpdatedAt: result.settingsUpdatedAt || null,
+      providerUpdatedAt: result.providerUpdatedAt || null,
+      modelUpdatedAt: result.modelUpdatedAt || null,
       createdAt: new Date().toISOString()
     };
     return state;
   }, "测试 Provider 配置", { targetType: "settings", action: "generate", light: true });
-  showToast(result.ok ? "Provider 测试通过" : `Provider 测试失败：${result.error || result.message || "未知错误"}`);
+  showToast(result.ok ? (result.mode === "demo" ? "Demo Provider 测试完成，不代表真实 API 可用" : "Provider 测试通过") : `Provider 测试失败：${result.error || result.message || "未知错误"}`);
 }
 
 function hasUnsavedProviderFormChanges(provider) {
@@ -824,7 +863,7 @@ function addModel() {
   }, "新增模型", { targetType: "settings", action: "generate", light: true });
 }
 
-function saveModel(modelId) {
+async function saveModel(modelId) {
   store.setState((state) => {
     state.apiConfig.models = state.apiConfig.models.map((model) =>
       model.id === modelId
@@ -845,18 +884,22 @@ function saveModel(modelId) {
             costLevel: readModelField("costLevel"),
             qualityLevel: readModelField("qualityLevel"),
             recommendedTasks: parseCsv(readModelField("recommendedTasks")),
-            notes: readModelField("notes")
+            notes: readModelField("notes"),
+            updatedAt: new Date().toISOString()
           }
         : model
     );
+    state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存模型配置", { targetType: "settings", action: "edit", light: true });
+  await syncApiSettings();
 }
 
 async function testCurrentTaskRoute() {
   const taskType = document.querySelector("#route-test-task")?.value || store.getState().apiConfig.routeTestTaskType || "analyzeScript";
   busyAction = "测试当前任务路由";
   render();
+  await syncApiSettings({ successMessage: "测试前已同步配置到本地服务。", show: false });
   const current = readOpenInputs(store.getState());
   const result = await callModel({
     taskType,
@@ -890,7 +933,7 @@ async function testCurrentTaskRoute() {
   showToast(result.success ? "当前任务路由测试完成" : `当前任务路由测试失败：${result.error || "未知错误"}`);
 }
 
-function switchCoreTasksToSelectedModel() {
+async function switchCoreTasksToSelectedModel() {
   const current = store.getState();
   const modelId = current.apiConfig.selectedModelId || document.querySelector("#global-default-model")?.value;
   const model = current.apiConfig.models.find((item) => item.id === modelId);
@@ -902,9 +945,10 @@ function switchCoreTasksToSelectedModel() {
   store.setState((state) => {
     state.apiConfig = switchCoreRoutesToModel(state.apiConfig, model.id);
     state.mode = "api";
+    state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "一键切换核心任务到当前真实模型", { targetType: "settings", action: "edit", light: true });
-  showToast("已将核心任务路由切换到当前真实模型");
+  await syncApiSettings({ successMessage: "已将核心任务路由切换到当前真实模型，并同步到本地服务。" });
 }
 
 function addRoute() {
@@ -916,7 +960,7 @@ function addRoute() {
   }, "新增模型路由", { targetType: "settings", action: "generate", light: true });
 }
 
-function saveRoute(routeId) {
+async function saveRoute(routeId) {
   store.setState((state) => {
     state.apiConfig.routes = state.apiConfig.routes.map((route) =>
       route.id === routeId
@@ -937,12 +981,15 @@ function saveRoute(routeId) {
             enabled: document.querySelector('[data-route-field="enabled"]')?.checked || false,
             retryCount: Number(readRouteField("retryCount")) || 0,
             timeoutMs: Number(readRouteField("timeoutMs")) || 60000,
-            notes: readRouteField("notes")
+            notes: readRouteField("notes"),
+            updatedAt: new Date().toISOString()
           }
         : route
     );
+    state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存模型路由", { targetType: "settings", action: "edit", light: true });
+  await syncApiSettings();
 }
 
 function addFeedback() {
@@ -1552,6 +1599,16 @@ function renderApiStatus(state) {
       <strong>${config.mode === "api" ? "真实 API Mode" : "Demo Mode"}</strong>
       <p>${config.mode === "api" ? "真实 API 调用失败时不会静默切到 Demo；任务路由仍指向 Demo 时默认阻断，只有手动允许 Demo 兜底才会继续生成。" : "当前使用 DemoRuleEngine-v1，所有结果来自本地规则引擎演示，不冒充真实 API。"}</p>
       ${
+        config.mode === "api" && config.allowDemoInApiMode
+          ? `<div class="warning-list strong-warning"><p>当前真实 API Mode 允许 Demo 兜底，部分任务可能不会调用真实模型。</p></div>`
+          : ""
+      }
+      ${
+        config.lastSettingsSync
+          ? `<p class="${config.lastSettingsSync.success ? "sync-ok" : "warning-text"}">${escapeHtml(config.lastSettingsSync.message)} ${formatDate(config.lastSettingsSync.createdAt)}</p>`
+          : ""
+      }
+      ${
         demoWarnings.length
           ? `<div class="warning-list">${demoWarnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</div>`
           : ""
@@ -1603,7 +1660,7 @@ function renderProviderSettings(config) {
       </div>
       <div class="panel">
         ${selected ? renderProviderForm(selected) : emptyState("暂无 Provider", "新增 Provider 后可配置 Base URL 与 API Key。")}
-        ${config.lastTestResult ? `<div class="suggestion-box"><h3>最近测试</h3>${keyValueGrid([["结果", config.lastTestResult.success ? "成功" : "失败"], ["请求格式", config.lastTestResult.requestFormat || "auto"], ["说明", config.lastTestResult.message], ["时间", formatDate(config.lastTestResult.createdAt)]])}</div>` : ""}
+        ${config.lastTestResult ? `<div class="suggestion-box ${config.lastTestResult.mode === "demo" ? "has-warning" : ""}"><h3>最近测试</h3>${keyValueGrid([["结果", config.lastTestResult.success ? "成功" : "失败"], ["模式", config.lastTestResult.mode || "未记录"], ["端点", config.lastTestResult.endpointType || "未记录"], ["请求格式", config.lastTestResult.requestFormat || "auto"], ["说明", config.lastTestResult.message], ["设置同步时间", formatDate(config.lastTestResult.settingsUpdatedAt)], ["时间", formatDate(config.lastTestResult.createdAt)]])}${config.lastTestResult.mode === "demo" ? `<p class="warning-text">这是 Demo Provider 测试，不代表真实 API 可用。</p>` : ""}</div>` : ""}
       </div>
     </section>
   `;
@@ -1724,7 +1781,10 @@ function renderModelLogs(state) {
       <h2>模型调用日志</h2>
       <div class="log-table">
         ${(state.modelLogs || [])
-          .map((log) => `<div class="${log.warnings?.length ? "has-warning" : ""}"><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${escapeHtml(log.requestFormat || log.mode || "未知格式")}</span><span>${escapeHtml(log.endpointType || "未记录")}</span><span>${log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.warnings?.join("；") || log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`)
+          .map((log) => {
+            const demoFallback = log.apiModeDemoFallback || (log.requestedMode === "api" && log.mode === "demo" && !log.requiresRouteFix);
+            return `<div class="${log.warnings?.length || demoFallback ? "has-warning" : ""}"><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${escapeHtml(log.requestFormat || log.mode || "未知格式")}</span><span>${escapeHtml(log.endpointType || "未记录")}</span><span>${demoFallback ? "API Mode + Demo fallback" : log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.warnings?.join("；") || log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`;
+          })
           .join("") || "<p class='muted'>暂无调用记录。</p>"}
       </div>
     </section>

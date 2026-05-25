@@ -92,10 +92,12 @@ npm run check
 - 系统会通过 `model-router` 按项目覆盖、任务路由、Skill 模型偏好、功能区默认、全局默认模型选择模型。
 - 真实任务统一请求本地 `/api/model-call`，由 Node 服务端代理外部 Provider，减少 CORS / Failed to fetch 问题。
 - `/api/model-call` 与 `/api/test-provider` 的真实路径只从前端接收 `providerId/modelId`，服务端再从 `data/settings/model-settings.json` 读取真实 Key，避免把完整 Provider 和 API Key 放进任务请求体。
+- 保存 Provider、模型、路由、API Mode 或“一键切换核心任务”后，前端会等待 `/api/settings` 同步完成；看到“配置已同步到本地服务”后再测试，能避免服务端读取旧配置。
 - 真实 API 调用失败时不会静默切回 Demo。
 - 只有路由中配置了可用备用真实模型时才会 fallback，并在调用日志中记录 `usedFallback`。
 - 如果某个任务实际选择了 DemoRuleEngine，系统会在 UI、调用日志和 `ModelCallResult.warnings` 中提示：当前为真实 API Mode，但该任务路由仍指向 Demo 模型。
-- 默认情况下，真实 API Mode 命中 Demo 路由会返回失败和 `requiresRouteFix=true`，不会继续生成 Demo 结果；只有手动开启“API Mode 允许 Demo 兜底”才会继续使用 DemoRuleEngine。
+- 默认情况下，真实 API Mode 命中 Demo 路由会返回失败和 `requiresRouteFix=true`，不会继续生成 Demo 结果；只有手动二次确认开启“API Mode 允许 Demo 兜底”才会继续使用 DemoRuleEngine，页面和调用日志会标记 `API Mode + Demo fallback`。
+- Provider 类型为 `local` 时，“测试连接”只代表本地 Demo Provider 可用，页面会明确显示“这是 Demo Provider 测试，不代表真实 API 可用”。
 
 ## 确认某次任务是否使用了真实 API
 
@@ -115,6 +117,7 @@ requestFormat   应匹配端点：openai_chat 或 gemini_native
 endpointType     应为 server_proxy
 usedFallback    如果为 fallback，说明主模型失败后切到了备用模型
 warning/error   不应出现“真实 API Mode ... Demo 模型”
+settingsUpdatedAt 可辅助判断本次任务是否读到了最新同步配置
 ```
 
 也可以查看任务执行返回的 `ModelCallResult`：

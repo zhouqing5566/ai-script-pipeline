@@ -3,7 +3,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeApiConfig } from "./src/model-config.js";
-import { callGemini, resolveRequestFormat } from "./src/provider-adapters/gemini.js";
+import { resolveRequestFormat } from "./src/request-format.js";
+import { callGemini } from "./src/provider-adapters/gemini.js";
 import { callOpenAICompatible } from "./src/provider-adapters/openai-compatible.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -121,9 +122,17 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/test-provider" && req.method === "POST") {
     const body = await readBody(req);
     try {
-      const { provider, model } = await resolveProviderModel(body, { requireCurrentProviderModel: true });
+      const { provider, model, settings } = await resolveProviderModel(body, { requireCurrentProviderModel: true });
       if (provider.providerType === "local") {
-        sendJson(res, 200, { ok: true, message: "本地 Demo Provider 可用。", mode: "demo" });
+        sendJson(res, 200, {
+          ok: true,
+          message: "本地 Demo Provider 可用。这是 Demo Provider 测试，不代表真实 API 可用。",
+          mode: "demo",
+          endpointType: "local_demo",
+          settingsUpdatedAt: settings.updatedAt || null,
+          providerUpdatedAt: provider.updatedAt || null,
+          modelUpdatedAt: model?.updatedAt || null
+        });
         return true;
       }
       if (!model?.id) {
@@ -147,6 +156,9 @@ async function handleApi(req, res, url) {
         message: "真实 API 连接测试通过。",
         endpointType: "server_proxy",
         requestFormat: adapterResult.requestFormat,
+        settingsUpdatedAt: settings.updatedAt || null,
+        providerUpdatedAt: provider.updatedAt || null,
+        modelUpdatedAt: model.updatedAt || null,
         preview: adapterResult.outputText.slice(0, 300)
       });
     } catch (error) {
@@ -161,8 +173,10 @@ async function handleApi(req, res, url) {
     let provider = null;
     let model = null;
     let requestFormat = body.requestFormat || "auto";
+    let settingsUpdatedAt = null;
     try {
       const resolved = await resolveProviderModel(body);
+      settingsUpdatedAt = resolved.settings.updatedAt || null;
       model = resolved.model;
       requestFormat = body.requestFormat || resolved.provider.requestFormat || "auto";
       provider = { ...resolved.provider, requestFormat };
@@ -181,7 +195,12 @@ async function handleApi(req, res, url) {
         providerName: provider.name || "",
         modelId: model.id || null,
         modelName: model.displayName || model.modelName || "",
+        routeId: body.routeId || null,
+        taskType: body.taskType || null,
         requestFormat: adapterResult.requestFormat,
+        settingsUpdatedAt,
+        providerUpdatedAt: provider.updatedAt || null,
+        modelUpdatedAt: model.updatedAt || null,
         outputText: adapterResult.outputText,
         tokenUsage: adapterResult.tokenUsage,
         latencyMs: Math.round(performance.now() - startedAt)
@@ -198,7 +217,12 @@ async function handleApi(req, res, url) {
         providerName: provider?.name || "",
         modelId: model?.id || body.modelId || null,
         modelName: model?.displayName || model?.modelName || "",
+        routeId: body.routeId || null,
+        taskType: body.taskType || null,
         requestFormat: provider && model ? resolveRequestFormat({ provider: { ...provider, requestFormat }, model }) : requestFormat,
+        settingsUpdatedAt,
+        providerUpdatedAt: provider?.updatedAt || null,
+        modelUpdatedAt: model?.updatedAt || null,
         error: normalized.message,
         errorMessage: normalized.message,
         latencyMs: Math.round(performance.now() - startedAt)
@@ -259,7 +283,7 @@ async function resolveProviderModel(body = {}, options = {}) {
   if (!model && options.requireCurrentProviderModel) throw new Error("该 Provider 下没有启用模型，请先新增或启用一个模型。");
   if (!model) throw new Error("未找到模型配置。请先保存并启用模型。");
   if (model.providerId && model.providerId !== provider.id) throw new Error("模型不属于当前 Provider，请重新选择模型。");
-  return { provider, model };
+  return { provider, model, settings };
 }
 
 async function loadSettingsConfig() {

@@ -31,7 +31,7 @@ export function createStore(onChange) {
         ...(state.currentProject.versions || [])
       ].slice(0, 80);
     }
-    saveLocalState(state);
+    saveLocalState(state, { persistSettings: options.persistSettings });
     onChange?.(state, previous);
   }
 

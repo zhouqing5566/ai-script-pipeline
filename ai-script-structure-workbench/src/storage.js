@@ -70,14 +70,29 @@ export async function appendModelLog(log) {
 }
 
 export async function persistRuntimeSettings(apiConfig) {
+  await syncRuntimeSettings(apiConfig);
+}
+
+export async function syncRuntimeSettings(apiConfig) {
   try {
-    await fetch("/api/settings", {
+    const response = await fetch("/api/settings", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(apiConfig)
     });
+    if (!response.ok) throw new Error(`settings sync failed: ${response.status}`);
+    return { ok: true, ...(await response.json().catch(() => ({}))) };
+  } catch (error) {
+    return { ok: false, error: error.message || "settings sync failed" };
+  }
+}
+
+export async function tryPersistRuntimeSettings(apiConfig) {
+  try {
+    return await syncRuntimeSettings(apiConfig);
   } catch {
     // Settings remain in localStorage when the local service is unavailable.
+    return { ok: false, error: "settings sync failed" };
   }
 }
 

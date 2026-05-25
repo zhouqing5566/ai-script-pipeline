@@ -1,3 +1,5 @@
+import { resolveRequestFormat } from "../request-format.js";
+
 export async function callGemini({ provider, model, messages, options = {} }) {
   if (!provider?.baseUrl) throw new Error("Gemini Provider 缺少 Base URL");
   if (!provider?.apiKey) throw new Error("Gemini Provider 缺少 API Key");
@@ -53,15 +55,7 @@ export function shouldUseGeminiNative({ provider, model } = {}) {
   return resolveRequestFormat({ provider, model }) === "gemini_native";
 }
 
-export function resolveRequestFormat({ provider } = {}) {
-  const requestFormat = provider?.requestFormat || "auto";
-  if (requestFormat === "gemini_native") return "gemini_native";
-  if (requestFormat === "openai_chat") return "openai_chat";
-  if (provider?.providerType === "gemini") return "gemini_native";
-  const baseUrl = String(provider?.baseUrl || "").toLowerCase();
-  if (baseUrl.includes("generativelanguage.googleapis.com")) return "gemini_native";
-  return "openai_chat";
-}
+export { resolveRequestFormat };
 
 export function messagesToGeminiRequestBody(messages = [], options = {}) {
   const systemText = messages

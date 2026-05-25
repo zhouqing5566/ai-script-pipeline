@@ -20,6 +20,7 @@ import { selectFallbackModel, selectModelRoute } from "./model-router.js";
 import { buildPrompt } from "./prompt-builder.js";
 import { parseJsonWithRepair, extractObjectBody } from "./json-repair.js";
 import { schemaValidationMessage, validateTaskOutput } from "./schema-validator.js";
+import { resolveRequestFormat } from "./request-format.js";
 
 export async function callModel({
   taskType,
@@ -72,6 +73,9 @@ export async function callModel({
   let actualRequestFormat = null;
   let endpointType = null;
   let providerStatus = null;
+  let settingsUpdatedAt = null;
+  let providerUpdatedAt = null;
+  let modelUpdatedAt = null;
   let usedFallback = false;
   let provider = selection.provider;
   let model = selection.model;
@@ -105,7 +109,8 @@ export async function callModel({
         options: selection.options,
         schema,
         state,
-        project
+        project,
+        route: selection.route
       });
       outputText = response.outputText;
       parsedJson = response.parsedJson;
@@ -113,6 +118,9 @@ export async function callModel({
       actualRequestFormat = response.requestFormat;
       endpointType = response.endpointType;
       providerStatus = response.status;
+      settingsUpdatedAt = response.settingsUpdatedAt || null;
+      providerUpdatedAt = response.providerUpdatedAt || null;
+      modelUpdatedAt = response.modelUpdatedAt || null;
       costEstimate = estimateCost(model, tokenUsage);
     }
   } catch (providerError) {
@@ -141,7 +149,8 @@ export async function callModel({
             options: selection.options,
             schema,
             state,
-            project
+            project,
+            route: selection.route
           });
           outputText = response.outputText;
           parsedJson = response.parsedJson;
@@ -149,6 +158,9 @@ export async function callModel({
           actualRequestFormat = response.requestFormat;
           endpointType = response.endpointType;
           providerStatus = response.status;
+          settingsUpdatedAt = response.settingsUpdatedAt || null;
+          providerUpdatedAt = response.providerUpdatedAt || null;
+          modelUpdatedAt = response.modelUpdatedAt || null;
           costEstimate = estimateCost(model, tokenUsage);
         } catch (fallbackError) {
           if (!attemptErrors.some((item) => item.includes("备用模型"))) attemptErrors.push(`备用模型失败：${fallbackError.message}`);
@@ -163,9 +175,10 @@ export async function callModel({
   }
 
   const latencyMs = Math.round(performance.now() - startedAt);
-  const requestFormat = mode === "api" ? actualRequestFormat || resolveClientRequestFormat({ provider, model }) : "demo";
+  const requestFormat = mode === "api" ? actualRequestFormat || resolveRequestFormat({ provider, model }) : "demo";
   const resolvedEndpointType = mode === "api" ? endpointType || "server_proxy" : "local_demo";
   const status = error ? "failed" : "success";
+  const apiModeDemoFallback = requestedMode === "api" && mode === "demo" && !requiresRouteFix;
   const result = {
     success: !error,
     mode,
@@ -179,6 +192,10 @@ export async function callModel({
     modelId: model?.id || null,
     usedFallback,
     requiresRouteFix,
+    apiModeDemoFallback,
+    settingsUpdatedAt,
+    providerUpdatedAt,
+    modelUpdatedAt,
     matchedSkillIds,
     warnings,
     attemptErrors,
@@ -212,10 +229,14 @@ export async function callModel({
     skillConflicts: conflicts,
     warnings,
     apiModeDemoWarning: warnings.some((item) => item.includes("真实 API Mode")),
+    apiModeDemoFallback,
     requiresRouteFix,
     routingReason: selection.routingReason,
     usedFallback,
     attemptErrors,
+    settingsUpdatedAt,
+    providerUpdatedAt,
+    modelUpdatedAt,
     inputSummary: summarizeInput(inputMeta),
     outputSummary: outputText ? summarizeInput(outputText) : "无输出",
     success: result.success,
@@ -307,8 +328,8 @@ function dispatchTask(taskType, input, state) {
   }
 }
 
-async function executeApiAttempt({ taskType, projectId, skillIds, provider, model, messages, options, schema, state, project }) {
-  const response = await callProvider({ provider, model, messages, options });
+async function executeApiAttempt({ taskType, projectId, skillIds, provider, model, messages, options, schema, state, project, route }) {
+  const response = await callProvider({ provider, model, messages, options, taskType, route });
   let parsedJson = null;
   if (schema || options.jsonModeRequired) {
     const repaired = await parseJsonWithRepair(response.outputText, {
@@ -341,7 +362,10 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
     tokenUsage: response.tokenUsage,
     requestFormat: response.requestFormat,
     endpointType: response.endpointType,
-    status: response.status
+    status: response.status,
+    settingsUpdatedAt: response.settingsUpdatedAt,
+    providerUpdatedAt: response.providerUpdatedAt,
+    modelUpdatedAt: response.modelUpdatedAt
   };
 }
 
@@ -356,14 +380,23 @@ async function executeApiAttemptWithRetries({ label, attemptErrors, ...args }) {
       lastError = error;
       const prefix = totalAttempts === 1 ? `${label}失败` : `${label}第 ${index + 1}/${totalAttempts} 次失败`;
       attemptErrors.push(`${prefix}：${error.message}`);
+      if (!shouldRetryModelError(error) || index === totalAttempts - 1) break;
     }
   }
   throw lastError || new Error(`${label}调用失败`);
 }
 
-async function callProvider({ provider, model, messages, options }) {
-  const requestFormat = resolveClientRequestFormat({ provider, model });
-  const payload = { providerId: provider?.id || null, modelId: model?.id || null, messages, options, requestFormat };
+async function callProvider({ provider, model, messages, options, taskType, route }) {
+  const requestFormat = resolveRequestFormat({ provider, model });
+  const payload = {
+    providerId: provider?.id || null,
+    modelId: model?.id || null,
+    routeId: route?.id || null,
+    taskType: taskType || null,
+    messages,
+    options,
+    requestFormat
+  };
   if (typeof globalThis.__MODEL_CALL_PROXY__ === "function") {
     try {
       return await globalThis.__MODEL_CALL_PROXY__(payload);
@@ -386,7 +419,10 @@ async function callProvider({ provider, model, messages, options }) {
       tokenUsage: data.tokenUsage || null,
       requestFormat: data.requestFormat || requestFormat,
       endpointType: data.endpointType || "server_proxy",
-      status: data.status || response.status
+      status: data.status || response.status,
+      settingsUpdatedAt: data.settingsUpdatedAt || null,
+      providerUpdatedAt: data.providerUpdatedAt || null,
+      modelUpdatedAt: data.modelUpdatedAt || null
     };
   } catch (error) {
     throw new Error(normalizeClientProviderError(error.message));
@@ -456,16 +492,6 @@ function estimateCost(model, tokenUsage) {
   };
 }
 
-function resolveClientRequestFormat({ provider } = {}) {
-  const requestFormat = provider?.requestFormat || "auto";
-  if (requestFormat === "gemini_native") return "gemini_native";
-  if (requestFormat === "openai_chat") return "openai_chat";
-  if (provider?.providerType === "gemini") return "gemini_native";
-  const baseUrl = String(provider?.baseUrl || "").toLowerCase();
-  if (baseUrl.includes("generativelanguage.googleapis.com")) return "gemini_native";
-  return "openai_chat";
-}
-
 function normalizeClientProviderError(message = "") {
   if (message.includes("当前接口不接受 OpenAI Chat Completions 格式") || message.includes("真实任务应走本地 server proxy") || message.includes("请求被中止")) {
     return message;
@@ -480,6 +506,17 @@ function normalizeClientProviderError(message = "") {
     return `${message}。请求被中止，可能是超时、重复触发或页面状态切换。请查看 timeoutMs 和是否重复点击。`;
   }
   return message;
+}
+
+export function shouldRetryModelError(error) {
+  const message = error?.message || String(error || "");
+  if (/结构校验失败|当前接口不接受 OpenAI Chat Completions 格式|缺少 Base URL|缺少 API Key|模型不属于当前 Provider|未找到 Provider 配置|未找到模型配置|400\b/i.test(message)) {
+    return false;
+  }
+  if (/Failed to fetch|fetch failed|timeout|timed out|超时|aborted|AbortError|请求被中止|429\b|500\b|502\b|503\b|504\b|empty response|空响应/i.test(message)) {
+    return true;
+  }
+  return false;
 }
 
 function createLogId() {

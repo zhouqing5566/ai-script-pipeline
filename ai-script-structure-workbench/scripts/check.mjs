@@ -33,12 +33,13 @@ import {
   switchCoreRoutesToModel
 } from "../src/model-config.js";
 import { selectModelRoute } from "../src/model-router.js";
-import { callModel } from "../src/model-adapter.js";
+import { callModel, shouldRetryModelError } from "../src/model-adapter.js";
 import { sanitizeStateForSnapshot } from "../src/redaction.js";
 import { schemaValidationMessage, validateTaskOutput } from "../src/schema-validator.js";
 import { extractDocxTextFromArrayBuffer, parseScriptFile } from "../src/file-parser.js";
-import { hasUsefulRuntimeSettings, mergeRuntimeApiConfig } from "../src/storage.js";
-import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, resolveRequestFormat, shouldUseGeminiNative } from "../src/provider-adapters/gemini.js";
+import { hasUsefulRuntimeSettings, mergeRuntimeApiConfig, syncRuntimeSettings } from "../src/storage.js";
+import { resolveRequestFormat } from "../src/request-format.js";
+import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, shouldUseGeminiNative } from "../src/provider-adapters/gemini.js";
 import { buildOpenAIChatRequestBody } from "../src/provider-adapters/openai-compatible.js";
 
 const state = createSeedState();
@@ -338,12 +339,16 @@ assert.ok(failingResult.error.includes("备用模型第 1/2 次失败"));
 assert.ok(failingResult.error.includes("第 2/2 次失败"));
 assert.ok(failingResult.log);
 assert.equal(failingResult.log.success, false);
-assert.equal(failingResult.log.attemptErrors.length, 4);
+assert.equal(failingResult.log.attemptErrors.length, 3);
 assert.equal(failingResult.endpointType, "server_proxy");
 assert.ok(failingResult.error.includes("前端请求本地 /api/model-call 失败"));
 assert.ok(failingResult.error.includes("当前接口不接受 OpenAI Chat Completions 格式"));
-assert.equal(failingProxyCalls.length, 4);
+assert.equal(failingProxyCalls.length, 3);
 assert.ok(failingProxyCalls.every((payload) => !Object.hasOwn(payload, "provider") && !Object.hasOwn(payload, "model")));
+assert.ok(failingProxyCalls.every((payload) => Object.hasOwn(payload, "providerId") && Object.hasOwn(payload, "modelId")));
+assert.equal(shouldRetryModelError(new Error("Failed to fetch")), true);
+assert.equal(shouldRetryModelError(new Error("结构校验失败：缺少 directionCandidates")), false);
+assert.equal(shouldRetryModelError(new Error("Provider 请求失败：400 Unknown name \"messages\"")), false);
 delete globalThis.__MODEL_CALL_PROXY__;
 
 const invalidShape = validateTaskOutput("generateDirections", { bad: true });
@@ -416,14 +421,28 @@ assert.ok(!serverSource.includes("body.provider?.id"));
 assert.ok(serverSource.includes('url.pathname === "/api/test-provider"'));
 assert.ok(serverSource.includes("performProviderCall"));
 assert.ok(serverSource.includes("endpointType: \"server_proxy\""));
+assert.ok(serverSource.includes("settingsUpdatedAt"));
+assert.ok(serverSource.includes("providerUpdatedAt"));
+assert.ok(serverSource.includes("modelUpdatedAt"));
 const modelAdapterSource = await fs.readFile(new URL("../src/model-adapter.js", import.meta.url), "utf8");
 assert.ok(modelAdapterSource.includes('fetch("/api/model-call"'));
 assert.ok(modelAdapterSource.includes("providerId: provider?.id"));
+assert.ok(modelAdapterSource.includes("taskType: taskType || null"));
+assert.ok(modelAdapterSource.includes("shouldRetryModelError"));
 assert.ok(!modelAdapterSource.includes("const payload = { provider, model"));
 assert.ok(!modelAdapterSource.includes("callOpenAICompatible"));
 assert.ok(!modelAdapterSource.includes("callGemini"));
 assert.ok(modelAdapterSource.includes("requiresRouteFix"));
 assert.ok(modelAdapterSource.includes("executeApiAttemptWithRetries"));
+assert.ok(!modelAdapterSource.includes("function resolveClientRequestFormat"));
+const requestFormatSource = await fs.readFile(new URL("../src/request-format.js", import.meta.url), "utf8");
+assert.ok(requestFormatSource.includes("resolveRequestFormat"));
+assert.ok(requestFormatSource.includes("generativelanguage.googleapis.com"));
+const appSource = await fs.readFile(new URL("../src/app.js", import.meta.url), "utf8");
+assert.ok(appSource.includes("syncRuntimeSettings"));
+assert.ok(appSource.includes("配置已同步到本地服务"));
+assert.ok(appSource.includes("API Mode + Demo fallback"));
+assert.ok(appSource.includes("这是 Demo Provider 测试，不代表真实 API 可用"));
 
 console.log("check passed: V1.1 demo/API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");
 
