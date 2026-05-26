@@ -62,14 +62,22 @@ void hydrateRuntimeSettings();
 root.addEventListener("click", (event) => {
   const target = event.target.closest("[data-action], [data-view]");
   if (!target || busyAction) return;
-  if (target.dataset.view) {
-    const next = commitOpenInputsBeforeAction(`切换到${target.textContent.trim()}`);
-    next.view = target.dataset.view;
-    store.setState(next, `切换到${target.textContent.trim()}`, { version: false });
+  const payload = {
+    action: target.dataset.action || "",
+    view: target.dataset.view || "",
+    id: target.dataset.id || "",
+    no: Number(target.dataset.no) || 0,
+    template: target.dataset.template || "",
+    text: target.textContent.trim()
+  };
+  if (payload.view) {
+    const next = commitOpenInputsBeforeAction(`切换到${payload.text}`);
+    next.view = payload.view;
+    store.setState(next, `切换到${payload.text}`, { version: false });
     return;
   }
-  commitOpenInputsBeforeAction(target.dataset.action || "执行操作");
-  void handleAction(target);
+  commitOpenInputsBeforeAction(payload.action || "执行操作");
+  void handleAction(payload);
 });
 
 root.addEventListener("change", (event) => {
@@ -107,10 +115,10 @@ async function handleScriptFileUpload(fileInput) {
   }
 }
 
-async function handleAction(target) {
-  const action = target.dataset.action;
-  const id = target.dataset.id;
-  const no = Number(target.dataset.no);
+async function handleAction(payload) {
+  const action = payload.action;
+  const id = payload.id;
+  const no = Number(payload.no);
 
   try {
     switch (action) {
@@ -330,7 +338,7 @@ async function handleAction(target) {
         addProvider();
         break;
       case "add-provider-template":
-        addProviderTemplate(target.dataset.template || "openai_proxy");
+        addProviderTemplate(payload.template || "openai_proxy");
         break;
       case "save-provider":
         await saveProvider(id);
@@ -441,9 +449,25 @@ async function executeTask(taskType, inputFactory, applyOutput, summary, options
 }
 
 function commitOpenInputsBeforeAction(actionName = "执行操作") {
-  const next = readOpenInputs(store.getState());
+  const current = store.getState();
+  const next = readOpenInputs(current);
+  if (!openInputsChanged(current, next)) return next;
   store.setState(next, `保存当前输入：${actionName}`, { version: false });
   return next;
+}
+
+function openInputsChanged(current, next) {
+  const pick = (state) => ({
+    scriptInput: state.scriptInput,
+    projectInput: {
+      title: state.currentProject.title,
+      creativeInput: state.currentProject.creativeInput,
+      episodeCount: state.currentProject.creativeConstraints?.episodeCount,
+      targetAudience: state.currentProject.creativeConstraints?.targetAudience,
+      tone: state.currentProject.creativeConstraints?.tone
+    }
+  });
+  return JSON.stringify(pick(current)) !== JSON.stringify(pick(next));
 }
 
 function inputMetaForTask(state, taskType) {
@@ -489,8 +513,8 @@ function saveCurrentAnalysisAsCase() {
     showToast("请先完成剧本分析");
     return;
   }
-  if (analysis.sourceMeta?.blockedSave) {
-    showToast("该分析大量字段由本地规则补齐，不能作为真实模型分析案例入库。请重新分析或执行结构修复。");
+  if (!canUseAnalysisForLearning(analysis)) {
+    showToast("该分析大量字段由本地规则补齐，不能用于案例库、模式资产或 Skill 沉淀。请重新分析或执行结构修复。");
     return;
   }
   store.setState((state) => {
@@ -516,6 +540,10 @@ function saveCurrentAnalysisAsCase() {
     return state;
   }, "保存分析结果到案例库", { targetType: "case", targetId: analysis.id, action: "generate" });
   showToast("已加入案例库");
+}
+
+function canUseAnalysisForLearning(analysis) {
+  return Boolean(analysis) && !analysis.sourceMeta?.blockedSave && analysis.usableForLearning !== false;
 }
 
 function lockSelected(key, summary) {

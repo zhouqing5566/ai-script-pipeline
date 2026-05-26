@@ -229,6 +229,8 @@ export async function callModel({
     apiModeDemoFallback,
     needsReview: Boolean(schemaMeta?.needsReview),
     blockedSave: Boolean(schemaMeta?.blockedSave),
+    usableForLearning: schemaMeta ? Boolean(schemaMeta.usableForLearning) : true,
+    usableForProduction: schemaMeta ? Boolean(schemaMeta.usableForProduction) : true,
     modelCompletenessScore: schemaMeta?.modelCompletenessScore ?? null,
     autoFilledFields: schemaMeta?.autoFilledFields || [],
     autoFilledSections: schemaMeta?.autoFilledSections || [],
@@ -276,6 +278,8 @@ export async function callModel({
     schemaMeta,
     needsReview: result.needsReview,
     blockedSave: result.blockedSave,
+    usableForLearning: result.usableForLearning,
+    usableForProduction: result.usableForProduction,
     modelCompletenessScore: result.modelCompletenessScore,
     apiModeDemoWarning: warnings.some((item) => item.includes("真实 API Mode")),
     apiModeDemoFallback,
@@ -552,7 +556,7 @@ function dispatchTask(taskType, input, state) {
     case "jsonRepair":
       return repairJsonText(input.brokenText);
     case "schemaRepairAnalyzeScript":
-      return analyzeScript(input);
+      return createDemoSchemaRepairDraft(input);
     default:
       throw new Error(`暂不支持的任务：${taskType}`);
   }
@@ -591,8 +595,10 @@ function unwrapTaskPayload(value, taskType) {
   let current = value;
   const unwrapPath = [];
   for (let depth = 0; depth < 5 && isPlainObject(current); depth += 1) {
+    if (taskType === "analyzeScript" && hasAnalyzeCoreField(current)) break;
     const key = wrapperKeys.find((candidate) => current[candidate] && (isPlainObject(current[candidate]) || Array.isArray(current[candidate])));
     if (!key) break;
+    if (!isWrapperPayload(current, key)) break;
     const inner = current[key];
     unwrapPath.push(key);
     current = inner;
@@ -603,6 +609,15 @@ function unwrapTaskPayload(value, taskType) {
     wrapperKey: unwrapPath.join(".") || null,
     unwrapPath
   };
+}
+
+function hasAnalyzeCoreField(value) {
+  return analyzeCoreSections.some((section) => Object.hasOwn(value, section));
+}
+
+function isWrapperPayload(value, wrapperKey) {
+  const auxiliaryKeys = new Set(["meta", "status", "message", "error", "errors", "ok", "success", "title", "name"]);
+  return Object.keys(value).every((key) => key === wrapperKey || auxiliaryKeys.has(key));
 }
 
 const analyzeCoreSections = [
@@ -623,6 +638,7 @@ function createAnalyzeSourceMeta({ source, unwrapped, issues = [] }) {
   const autoFilledSections = [...missingCoreSections];
   const modelCompletenessScore = Math.round((modelProvidedSections.length / analyzeCoreSections.length) * 100);
   const blockedSave = missingCoreSections.length >= 3;
+  const needsReview = missingCoreSections.length > 0;
   return {
     unwrapped: Boolean(unwrapped.changed),
     unwrapPath: unwrapped.unwrapPath || [],
@@ -632,17 +648,21 @@ function createAnalyzeSourceMeta({ source, unwrapped, issues = [] }) {
     modelProvidedSections,
     localFallbackSections,
     userPreservedFields: ["basicInfo.title", "basicInfo.genre", "basicInfo.episodeCount"],
-    needsReview: Boolean(missingCoreSections.length),
+    needsReview,
     blockedSave,
+    usableForLearning: !needsReview && !blockedSave,
+    usableForProduction: !blockedSave,
     modelCompletenessScore,
     warnings: []
   };
 }
 
 function hasUsefulSection(value) {
-  if (Array.isArray(value)) return value.length > 0;
-  if (isPlainObject(value)) return Object.keys(value).length > 0;
-  return value !== null && value !== undefined && value !== "";
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.some(hasUsefulSection);
+  if (isPlainObject(value)) return Object.values(value).some(hasUsefulSection);
+  return false;
 }
 
 function issuesToFields(issues = []) {
@@ -709,11 +729,38 @@ function stabilizeAnalyzeScriptOutput(value, inputMeta = {}, sourceMeta = null) 
   merged.reusablePatterns = Array.isArray(merged.reusablePatterns) ? merged.reusablePatterns : base.reusablePatterns;
   if (sourceMeta) {
     merged.sourceMeta = sourceMeta;
+    merged.usableForLearning = sourceMeta.usableForLearning;
+    merged.usableForProduction = sourceMeta.usableForProduction;
     if (sourceMeta.blockedSave) merged.confidence = Math.min(Number(merged.confidence) || 0.78, 0.35);
     else if ((sourceMeta.localFallbackSections || []).length >= 3) merged.confidence = Math.min(Number(merged.confidence) || 0.78, 0.45);
     else if (sourceMeta.unwrapped) merged.confidence = Math.min(Number(merged.confidence) || 0.78, 0.85);
   }
   return merged;
+}
+
+function createDemoSchemaRepairDraft(input = {}) {
+  const draft = analyzeScript(input);
+  draft.sourceMeta = {
+    unwrapped: false,
+    unwrapPath: [],
+    autoFilledFields: analyzeCoreSections,
+    autoFilledSections: analyzeCoreSections,
+    missingCoreSections: analyzeCoreSections,
+    modelProvidedSections: [],
+    localFallbackSections: analyzeCoreSections,
+    userPreservedFields: ["basicInfo.title", "basicInfo.genre", "basicInfo.episodeCount"],
+    needsReview: true,
+    blockedSave: true,
+    usableForLearning: false,
+    usableForProduction: false,
+    modelCompletenessScore: 0,
+    warnings: ["Demo schema repair 不代表真实模型修复。"]
+  };
+  draft.usableForLearning = false;
+  draft.usableForProduction = false;
+  draft.confidence = Math.min(Number(draft.confidence) || 0.78, 0.35);
+  draft.qualityNotes.weaknesses = uniqueList([...(draft.qualityNotes.weaknesses || []), "Demo schema repair 不代表真实模型修复。"]);
+  return draft;
 }
 
 function deepMerge(base, source) {

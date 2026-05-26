@@ -341,12 +341,63 @@ assert.equal(wrappedAnalysisResult.parsedJson.basicInfo.episodeCount, 24);
 assert.equal(validateTaskOutput("analyzeScript", wrappedAnalysisResult.parsedJson).ok, true);
 assert.equal(wrappedAnalysisResult.blockedSave, true);
 assert.equal(wrappedAnalysisResult.needsReview, true);
+assert.equal(wrappedAnalysisResult.usableForLearning, false);
+assert.equal(wrappedAnalysisResult.parsedJson.usableForLearning, false);
 assert.ok(wrappedAnalysisResult.modelCompletenessScore < 60);
 assert.deepEqual(wrappedAnalysisResult.schemaMeta.unwrapPath, ["data", "output", "scriptAnalysis"]);
 assert.ok(wrappedAnalysisResult.schemaMeta.localFallbackSections.length >= 3);
 assert.ok(wrappedAnalysisResult.schemaMeta.userPreservedFields.includes("basicInfo.title"));
 assert.ok(wrappedAnalysisResult.warnings.some((warning) => warning.includes("data.output.scriptAnalysis")));
 assert.ok(wrappedAnalysisResult.warnings.some((warning) => warning.includes("阻止直接入库")));
+delete globalThis.__MODEL_CALL_PROXY__;
+
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
+  const complete = analyzeScript(scriptDraftInput);
+  return {
+    outputText: JSON.stringify({ basicInfo: complete.basicInfo, analysis: { scriptAnalysis: complete } }),
+    tokenUsage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+    requestFormat: payload.requestFormat,
+    endpointType: "server_proxy",
+    status: 200
+  };
+};
+const mixedRootResult = await callModel({
+  taskType: "analyzeScript",
+  featureArea: "剧本分析中心",
+  inputMeta: scriptDraftInput,
+  state: apiSuccessState
+});
+assert.equal(mixedRootResult.success, true);
+assert.deepEqual(mixedRootResult.schemaMeta.unwrapPath, []);
+assert.equal(mixedRootResult.blockedSave, true);
+delete globalThis.__MODEL_CALL_PROXY__;
+
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => ({
+  outputText: JSON.stringify({
+    scriptAnalysis: {
+      basicInfo: { title: "" },
+      hookAnalysis: { riskNotes: [] },
+      audienceNeedAnalysis: {},
+      themeAnalysis: { themeStatement: "" },
+      characterAnalysis: {},
+      mainlineStructure: {},
+      episodeFunctionAnalysis: [{ title: "" }],
+      reusablePatterns: []
+    }
+  }),
+  tokenUsage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+  requestFormat: payload.requestFormat,
+  endpointType: "server_proxy",
+  status: 200
+});
+const emptyShellResult = await callModel({
+  taskType: "analyzeScript",
+  featureArea: "剧本分析中心",
+  inputMeta: scriptDraftInput,
+  state: apiSuccessState
+});
+assert.equal(emptyShellResult.blockedSave, true);
+assert.equal(emptyShellResult.schemaMeta.modelCompletenessScore, 0);
 delete globalThis.__MODEL_CALL_PROXY__;
 
 const routeProbeCalls = [];
@@ -395,6 +446,17 @@ assert.ok(Array.isArray(modelResult.matchedSkillIds));
 assert.equal(modelResult.usedFallback, false);
 assert.equal(modelResult.error, null);
 assert.ok(modelResult.latencyMs >= 0);
+
+const schemaRepairDemo = await callModel({
+  taskType: "schemaRepairAnalyzeScript",
+  featureArea: "JSON 修复",
+  inputMeta: scriptDraftInput,
+  state
+});
+assert.equal(schemaRepairDemo.success, true);
+assert.equal(schemaRepairDemo.mode, "demo");
+assert.equal(schemaRepairDemo.parsedJson.sourceMeta.blockedSave, true);
+assert.equal(schemaRepairDemo.parsedJson.usableForLearning, false);
 
 const apiDemoState = structuredClone(state);
 apiDemoState.apiConfig.mode = "api";
@@ -584,7 +646,10 @@ assert.ok(appSource.includes('autocomplete="new-password"'));
 assert.ok(appSource.includes("commitOpenInputsBeforeAction"));
 assert.ok(appSource.indexOf("const current = commitOpenInputsBeforeAction(taskLabels[taskType] || taskType);") < appSource.indexOf("busyAction = taskLabels[taskType] || taskType;"));
 assert.ok(appSource.includes("analysis.sourceMeta?.blockedSave"));
+assert.ok(appSource.includes("canUseAnalysisForLearning"));
 assert.ok(appSource.includes("renderAnalysisSourceAlert"));
+assert.ok(appSource.includes("async function handleAction(payload)"));
+assert.ok(!appSource.includes("const action = target.dataset.action"));
 const promptBuilderSource = await fs.readFile(new URL("../src/prompt-builder.js", import.meta.url), "utf8");
 const taskContractSource = await fs.readFile(new URL("../src/task-output-contracts.js", import.meta.url), "utf8");
 assert.ok(promptBuilderSource.includes("getTaskOutputContract"));
@@ -594,6 +659,10 @@ assert.ok(modelAdapterSource.includes("normalizeParsedOutputForTask"));
 assert.ok(modelAdapterSource.includes("coerceAnalyzeScriptOutput"));
 assert.ok(modelAdapterSource.includes("unwrapPath"));
 assert.ok(modelAdapterSource.includes("blockedSave"));
+assert.ok(modelAdapterSource.includes("hasAnalyzeCoreField"));
+assert.ok(modelAdapterSource.includes("isWrapperPayload"));
+assert.ok(modelAdapterSource.includes("usableForLearning"));
+assert.ok(modelAdapterSource.includes("createDemoSchemaRepairDraft"));
 
 console.log("check passed: V1.1 demo/API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");
 
