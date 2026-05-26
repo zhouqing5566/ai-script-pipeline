@@ -72,6 +72,14 @@ root.addEventListener("click", (event) => {
 });
 
 root.addEventListener("change", (event) => {
+  const selectedModel = event.target.closest("#current-selected-model");
+  if (selectedModel) {
+    store.setState((state) => {
+      state.apiConfig.selectedModelId = selectedModel.value;
+      return state;
+    }, "选择当前模型", { targetType: "settings", action: "edit", light: true });
+    return;
+  }
   const fileInput = event.target.closest("#script-file");
   if (!fileInput?.files?.length) return;
   void handleScriptFileUpload(fileInput);
@@ -735,6 +743,7 @@ function mergeSelectedSkill(skillId) {
 async function saveApiMode() {
   const nextMode = document.querySelector("#api-mode")?.value || "demo";
   const allowDemoInApiMode = document.querySelector("#allow-demo-in-api-mode")?.checked || false;
+  const selectedModelId = document.querySelector("#current-selected-model")?.value || store.getState().apiConfig.selectedModelId;
   if (
     nextMode === "api" &&
     allowDemoInApiMode &&
@@ -746,6 +755,7 @@ async function saveApiMode() {
   store.setState((state) => {
     state.apiConfig.mode = nextMode;
     state.apiConfig.globalDefaultModelId = document.querySelector("#global-default-model")?.value || "model-demo-rule-engine";
+    state.apiConfig.selectedModelId = selectedModelId;
     state.apiConfig.allowDemoInApiMode = allowDemoInApiMode;
     state.mode = state.apiConfig.mode;
     state.apiConfig.updatedAt = new Date().toISOString();
@@ -941,7 +951,10 @@ async function testCurrentTaskRoute() {
 
 async function switchCoreTasksToSelectedModel() {
   const current = store.getState();
-  const modelId = current.apiConfig.selectedModelId || document.querySelector("#global-default-model")?.value;
+  const modelId =
+    document.querySelector("#current-selected-model")?.value ||
+    document.querySelector("#global-default-model")?.value ||
+    current.apiConfig.selectedModelId;
   const model = current.apiConfig.models.find((item) => item.id === modelId);
   const provider = current.apiConfig.providers.find((item) => item.id === model?.providerId);
   if (!model || !provider || provider.providerType === "local") {
@@ -950,6 +963,7 @@ async function switchCoreTasksToSelectedModel() {
   }
   store.setState((state) => {
     state.apiConfig = switchCoreRoutesToModel(state.apiConfig, model.id);
+    state.apiConfig.selectedModelId = model.id;
     state.mode = "api";
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
@@ -1554,6 +1568,7 @@ function renderApiStatus(state) {
   const config = state.apiConfig;
   const demoWarnings = getApiModeDemoRouteWarnings(config);
   const routeTestTask = config.routeTestTaskType || config.routes.find((route) => route.id === config.selectedRouteId)?.taskType || "analyzeScript";
+  const selectedModelId = config.selectedModelId || config.globalDefaultModelId || config.models[0]?.id || "";
   return `
     <section class="two-column">
       <div class="panel">
@@ -1591,7 +1606,9 @@ function renderApiStatus(state) {
             </select>
           </label>
           <label>当前选中模型
-            <input readonly value="${escapeAttr(config.models.find((model) => model.id === config.selectedModelId)?.displayName || "未选择")}" />
+            <select id="current-selected-model">
+              ${config.models.map((model) => `<option value="${model.id}" ${selectedModelId === model.id ? "selected" : ""}>${escapeHtml(model.displayName)}｜${escapeHtml(providerNameForModel(config, model))}</option>`).join("")}
+            </select>
           </label>
         </div>
         <div class="panel-actions">
@@ -2386,6 +2403,10 @@ function getApiModeDemoRouteWarnings(config) {
     }
   }
   return warnings;
+}
+
+function providerNameForModel(config, model) {
+  return config.providers.find((provider) => provider.id === model.providerId)?.name || model.providerId || "未绑定 Provider";
 }
 
 function readSkillField(field) {

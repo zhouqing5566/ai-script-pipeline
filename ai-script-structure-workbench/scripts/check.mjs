@@ -487,6 +487,8 @@ assert.ok(appSource.includes("syncRuntimeSettings"));
 assert.ok(appSource.includes("配置已同步到本地服务"));
 assert.ok(appSource.includes("API Mode + Demo 兜底"));
 assert.ok(appSource.includes("轻量测试当前任务路由"));
+assert.ok(appSource.includes("current-selected-model"));
+assert.ok(appSource.includes("providerNameForModel"));
 assert.ok(appSource.includes("这是 Demo Provider 测试，不代表真实 API 可用"));
 assert.ok(appSource.includes("apiKeyInput && apiKeyInput !== provider.apiKey"));
 assert.ok(appSource.includes('autocomplete="new-password"'));
