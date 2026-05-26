@@ -121,18 +121,38 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/test-provider" && req.method === "POST") {
     const body = await readBody(req);
+    const startedAt = performance.now();
+    let provider = null;
+    let model = null;
+    let settingsUpdatedAt = null;
     try {
-      const { provider, model, settings } = await resolveProviderModel(body, { requireCurrentProviderModel: true });
+      const resolved = await resolveProviderModel(body, { requireCurrentProviderModel: true });
+      provider = resolved.provider;
+      model = resolved.model;
+      settingsUpdatedAt = resolved.settings.updatedAt || null;
       if (provider.providerType === "local") {
-        sendJson(res, 200, {
+        const responseBody = {
           ok: true,
           message: "本地 Demo Provider 可用。这是 Demo Provider 测试，不代表真实 API 可用。",
           mode: "demo",
           endpointType: "local_demo",
-          settingsUpdatedAt: settings.updatedAt || null,
+          taskType: body.taskType || "testProvider",
+          routeId: body.routeId || null,
+          providerId: provider.id || null,
+          providerName: provider.name || "",
+          modelId: model?.id || null,
+          modelName: model?.displayName || model?.modelName || "",
+          requestFormat: "demo",
+          serverStatus: 200,
+          providerStatus: 200,
+          providerRawPreview: "local demo provider",
+          settingsUpdatedAt,
           providerUpdatedAt: provider.updatedAt || null,
-          modelUpdatedAt: model?.updatedAt || null
-        });
+          modelUpdatedAt: model?.updatedAt || null,
+          latencyMs: Math.round(performance.now() - startedAt)
+        };
+        await appendServerProxyLog({ ...responseBody, source: "test-provider", success: true });
+        sendJson(res, 200, responseBody);
         return true;
       }
       if (!model?.id) {
@@ -150,19 +170,53 @@ async function handleApi(req, res, url) {
         options: { maxOutputTokens: 8, temperature: 0, timeoutMs: Number(provider.timeoutMs) || 30000 },
         source: "test-provider"
       });
-      sendJson(res, 200, {
+      const responseBody = {
         ok: true,
         status: 200,
         message: "真实 API 连接测试通过。",
         endpointType: "server_proxy",
+        taskType: body.taskType || "testProvider",
+        routeId: body.routeId || null,
+        providerId: provider.id || null,
+        providerName: provider.name || "",
+        modelId: model.id || null,
+        modelName: model.displayName || model.modelName || "",
         requestFormat: adapterResult.requestFormat,
-        settingsUpdatedAt: settings.updatedAt || null,
+        serverStatus: 200,
+        providerStatus: adapterResult.providerStatus || 200,
+        providerRawPreview: adapterResult.providerRawPreview,
+        settingsUpdatedAt,
         providerUpdatedAt: provider.updatedAt || null,
         modelUpdatedAt: model.updatedAt || null,
+        latencyMs: Math.round(performance.now() - startedAt),
         preview: adapterResult.outputText.slice(0, 300)
-      });
+      };
+      await appendServerProxyLog({ ...responseBody, source: "test-provider", success: true });
+      sendJson(res, 200, responseBody);
     } catch (error) {
-      sendJson(res, 502, { ok: false, endpointType: "server_proxy", error: normalizeProviderError(error).message });
+      const normalized = normalizeProviderError(error);
+      const responseBody = {
+        ok: false,
+        endpointType: "server_proxy",
+        taskType: body.taskType || "testProvider",
+        routeId: body.routeId || null,
+        providerId: provider?.id || body.providerId || null,
+        providerName: provider?.name || "",
+        modelId: model?.id || body.modelId || null,
+        modelName: model?.displayName || model?.modelName || "",
+        requestFormat: provider && model ? resolveRequestFormat({ provider, model }) : body.requestFormat || "auto",
+        serverStatus: 502,
+        providerStatus: null,
+        providerRawPreview: "",
+        settingsUpdatedAt,
+        providerUpdatedAt: provider?.updatedAt || null,
+        modelUpdatedAt: model?.updatedAt || null,
+        latencyMs: Math.round(performance.now() - startedAt),
+        error: normalized.message,
+        errorMessage: normalized.message
+      };
+      await appendServerProxyLog({ ...responseBody, source: "test-provider", success: false });
+      sendJson(res, 502, responseBody);
     }
     return true;
   }
@@ -198,6 +252,9 @@ async function handleApi(req, res, url) {
         routeId: body.routeId || null,
         taskType: body.taskType || null,
         requestFormat: adapterResult.requestFormat,
+        serverStatus: 200,
+        providerStatus: adapterResult.providerStatus || 200,
+        providerRawPreview: adapterResult.providerRawPreview,
         settingsUpdatedAt,
         providerUpdatedAt: provider.updatedAt || null,
         modelUpdatedAt: model.updatedAt || null,
@@ -220,6 +277,9 @@ async function handleApi(req, res, url) {
         routeId: body.routeId || null,
         taskType: body.taskType || null,
         requestFormat: provider && model ? resolveRequestFormat({ provider: { ...provider, requestFormat }, model }) : requestFormat,
+        serverStatus: 502,
+        providerStatus: null,
+        providerRawPreview: "",
         settingsUpdatedAt,
         providerUpdatedAt: provider?.updatedAt || null,
         modelUpdatedAt: model?.updatedAt || null,
@@ -262,6 +322,8 @@ async function performProviderCall({ provider, model, messages, options, source 
     ...adapterResult,
     endpointType: "server_proxy",
     requestFormat,
+    providerStatus: 200,
+    providerRawPreview: previewProviderRaw(adapterResult.raw),
     source
   };
 }
@@ -300,9 +362,19 @@ async function appendServerProxyLog(entry) {
   const line = JSON.stringify({
     ...entry,
     outputText: entry.outputText ? String(entry.outputText).slice(0, 240) : undefined,
+    providerRawPreview: entry.providerRawPreview ? String(entry.providerRawPreview).slice(0, 500) : undefined,
     receivedAt: new Date().toISOString()
   });
   await fs.appendFile(path.join(rootDir, "data/logs/model-server-proxy.jsonl"), `${line}\n`, "utf8");
+}
+
+function previewProviderRaw(raw) {
+  if (!raw) return "";
+  try {
+    return JSON.stringify(redactSecrets(raw)).slice(0, 500);
+  } catch {
+    return String(raw).slice(0, 500);
+  }
 }
 
 function normalizeProviderError(error) {

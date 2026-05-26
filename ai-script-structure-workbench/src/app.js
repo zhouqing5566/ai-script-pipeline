@@ -828,6 +828,9 @@ async function testProvider(providerId) {
       mode: result.mode || (provider?.providerType === "local" ? "demo" : "api"),
       endpointType: result.endpointType || (provider?.providerType === "local" ? "local_demo" : "server_proxy"),
       requestFormat: result.requestFormat || provider?.requestFormat || "auto",
+      serverStatus: result.serverStatus || result.status || null,
+      providerStatus: result.providerStatus || null,
+      providerRawPreview: result.providerRawPreview || "",
       settingsUpdatedAt: result.settingsUpdatedAt || null,
       providerUpdatedAt: result.providerUpdatedAt || null,
       modelUpdatedAt: result.modelUpdatedAt || null,
@@ -1660,7 +1663,7 @@ function renderProviderSettings(config) {
       </div>
       <div class="panel">
         ${selected ? renderProviderForm(selected) : emptyState("暂无 Provider", "新增 Provider 后可配置 Base URL 与 API Key。")}
-        ${config.lastTestResult ? `<div class="suggestion-box ${config.lastTestResult.mode === "demo" ? "has-warning" : ""}"><h3>最近测试</h3>${keyValueGrid([["结果", config.lastTestResult.success ? "成功" : "失败"], ["模式", config.lastTestResult.mode || "未记录"], ["端点", config.lastTestResult.endpointType || "未记录"], ["请求格式", config.lastTestResult.requestFormat || "auto"], ["说明", config.lastTestResult.message], ["设置同步时间", formatDate(config.lastTestResult.settingsUpdatedAt)], ["时间", formatDate(config.lastTestResult.createdAt)]])}${config.lastTestResult.mode === "demo" ? `<p class="warning-text">这是 Demo Provider 测试，不代表真实 API 可用。</p>` : ""}</div>` : ""}
+        ${config.lastTestResult ? `<div class="suggestion-box ${config.lastTestResult.mode === "demo" ? "has-warning" : ""}"><h3>最近测试</h3>${keyValueGrid([["结果", config.lastTestResult.success ? "成功" : "失败"], ["模式", config.lastTestResult.mode || "未记录"], ["端点", config.lastTestResult.endpointType || "未记录"], ["请求格式", config.lastTestResult.requestFormat || "auto"], ["服务端状态", config.lastTestResult.serverStatus || "未记录"], ["Provider 状态", config.lastTestResult.providerStatus || "未记录"], ["说明", config.lastTestResult.message], ["Provider 原始预览", config.lastTestResult.providerRawPreview || "未记录"], ["设置同步时间", formatDate(config.lastTestResult.settingsUpdatedAt)], ["时间", formatDate(config.lastTestResult.createdAt)]])}${config.lastTestResult.mode === "demo" ? `<p class="warning-text">这是 Demo Provider 测试，不代表真实 API 可用。</p>` : ""}</div>` : ""}
       </div>
     </section>
   `;
@@ -1783,7 +1786,7 @@ function renderModelLogs(state) {
         ${(state.modelLogs || [])
           .map((log) => {
             const demoFallback = log.apiModeDemoFallback || (log.requestedMode === "api" && log.mode === "demo" && !log.requiresRouteFix);
-            return `<div class="${log.warnings?.length || demoFallback ? "has-warning" : ""}"><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${escapeHtml(log.requestFormat || log.mode || "未知格式")}</span><span>${escapeHtml(log.endpointType || "未记录")}</span><span>${demoFallback ? "API Mode + Demo fallback" : log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.warnings?.join("；") || log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`;
+            return `<div class="${log.warnings?.length || demoFallback ? "has-warning" : ""}"><strong>${escapeHtml(log.taskLabel || log.taskType)}</strong><span>${escapeHtml(log.featureArea || "未记录")}</span><span>${escapeHtml(log.providerName || log.providerId || "Demo")}</span><span>${escapeHtml(log.modelName || log.modelId || "未知模型")}</span><span>${escapeHtml(log.requestFormat || log.mode || "未知格式")}</span><span>${escapeHtml(log.endpointType || "未记录")}</span><span>${demoFallback ? "API Mode + Demo 兜底" : log.usedFallback ? "fallback" : "主模型"}</span><span>${(log.matchedSkillIds || []).join("、") || "无"}</span><span>${log.success ? "成功" : "失败"}</span><span>${escapeHtml(log.warnings?.join("；") || log.errorMessage || "")}</span><span>${log.latencyMs} ms</span></div>`;
           })
           .join("") || "<p class='muted'>暂无调用记录。</p>"}
       </div>

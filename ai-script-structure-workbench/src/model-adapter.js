@@ -73,6 +73,8 @@ export async function callModel({
   let actualRequestFormat = null;
   let endpointType = null;
   let providerStatus = null;
+  let providerRawPreview = null;
+  let serverStatus = null;
   let settingsUpdatedAt = null;
   let providerUpdatedAt = null;
   let modelUpdatedAt = null;
@@ -117,7 +119,9 @@ export async function callModel({
       tokenUsage = response.tokenUsage;
       actualRequestFormat = response.requestFormat;
       endpointType = response.endpointType;
-      providerStatus = response.status;
+      providerStatus = response.providerStatus || response.status || null;
+      providerRawPreview = response.providerRawPreview || null;
+      serverStatus = response.serverStatus || response.status || null;
       settingsUpdatedAt = response.settingsUpdatedAt || null;
       providerUpdatedAt = response.providerUpdatedAt || null;
       modelUpdatedAt = response.modelUpdatedAt || null;
@@ -157,7 +161,9 @@ export async function callModel({
           tokenUsage = response.tokenUsage;
           actualRequestFormat = response.requestFormat;
           endpointType = response.endpointType;
-          providerStatus = response.status;
+          providerStatus = response.providerStatus || response.status || null;
+          providerRawPreview = response.providerRawPreview || null;
+          serverStatus = response.serverStatus || response.status || null;
           settingsUpdatedAt = response.settingsUpdatedAt || null;
           providerUpdatedAt = response.providerUpdatedAt || null;
           modelUpdatedAt = response.modelUpdatedAt || null;
@@ -193,6 +199,9 @@ export async function callModel({
     usedFallback,
     requiresRouteFix,
     apiModeDemoFallback,
+    serverStatus,
+    providerStatus,
+    providerRawPreview,
     settingsUpdatedAt,
     providerUpdatedAt,
     modelUpdatedAt,
@@ -222,6 +231,8 @@ export async function callModel({
     serverProxy: resolvedEndpointType === "server_proxy",
     status,
     providerStatus,
+    serverStatus,
+    providerRawPreview,
     modelId: result.modelId,
     modelName: model?.displayName || model?.modelName || "未选择",
     skillVersion: matchedSkills.map((skill) => `${skill.name} ${skill.version}`).join("；") || "未匹配",
@@ -363,6 +374,9 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
     requestFormat: response.requestFormat,
     endpointType: response.endpointType,
     status: response.status,
+    serverStatus: response.serverStatus,
+    providerStatus: response.providerStatus,
+    providerRawPreview: response.providerRawPreview,
     settingsUpdatedAt: response.settingsUpdatedAt,
     providerUpdatedAt: response.providerUpdatedAt,
     modelUpdatedAt: response.modelUpdatedAt
@@ -380,7 +394,11 @@ async function executeApiAttemptWithRetries({ label, attemptErrors, ...args }) {
       lastError = error;
       const prefix = totalAttempts === 1 ? `${label}失败` : `${label}第 ${index + 1}/${totalAttempts} 次失败`;
       attemptErrors.push(`${prefix}：${error.message}`);
-      if (!shouldRetryModelError(error) || index === totalAttempts - 1) break;
+      if (!shouldRetryModelError(error)) {
+        attemptErrors.push(`${label}不可重试原因：${modelErrorRetryBlockReason(error)}`);
+        break;
+      }
+      if (index === totalAttempts - 1) break;
     }
   }
   throw lastError || new Error(`${label}调用失败`);
@@ -420,6 +438,9 @@ async function callProvider({ provider, model, messages, options, taskType, rout
       requestFormat: data.requestFormat || requestFormat,
       endpointType: data.endpointType || "server_proxy",
       status: data.status || response.status,
+      serverStatus: data.serverStatus || response.status,
+      providerStatus: data.providerStatus || data.status || null,
+      providerRawPreview: data.providerRawPreview || null,
       settingsUpdatedAt: data.settingsUpdatedAt || null,
       providerUpdatedAt: data.providerUpdatedAt || null,
       modelUpdatedAt: data.modelUpdatedAt || null
@@ -517,6 +538,19 @@ export function shouldRetryModelError(error) {
     return true;
   }
   return false;
+}
+
+export function modelErrorRetryBlockReason(error) {
+  const message = error?.message || String(error || "");
+  if (/结构校验失败/i.test(message)) return "结构校验失败，重试会重复消耗 token，请先修复输出 schema 或 Prompt。";
+  if (/当前接口不接受 OpenAI Chat Completions 格式|Unknown name "messages"|Unknown name "max_tokens"|Unknown name "temperature"|Cannot find field/i.test(message)) return "400 请求格式错误或 requestFormat 不匹配，请修正 Provider 请求格式。";
+  if (/缺少 Base URL/i.test(message)) return "缺少 Base URL，请先保存 Provider 配置。";
+  if (/缺少 API Key/i.test(message)) return "缺少 API Key，请先保存本地密钥配置。";
+  if (/未找到 Provider 配置/i.test(message)) return "未找到 Provider 配置，请先保存 Provider。";
+  if (/未找到模型配置/i.test(message)) return "未找到 Model 配置，请先保存并启用模型。";
+  if (/模型不属于当前 Provider/i.test(message)) return "模型不属于当前 Provider，请重新选择模型。";
+  if (/400\b/i.test(message)) return "400 请求格式错误，请修正请求体或模型参数。";
+  return "该错误不属于临时网络/限流/5xx 类错误。";
 }
 
 function createLogId() {

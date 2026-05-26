@@ -96,7 +96,7 @@ npm run check
 - 真实 API 调用失败时不会静默切回 Demo。
 - 只有路由中配置了可用备用真实模型时才会 fallback，并在调用日志中记录 `usedFallback`。
 - 如果某个任务实际选择了 DemoRuleEngine，系统会在 UI、调用日志和 `ModelCallResult.warnings` 中提示：当前为真实 API Mode，但该任务路由仍指向 Demo 模型。
-- 默认情况下，真实 API Mode 命中 Demo 路由会返回失败和 `requiresRouteFix=true`，不会继续生成 Demo 结果；只有手动二次确认开启“API Mode 允许 Demo 兜底”才会继续使用 DemoRuleEngine，页面和调用日志会标记 `API Mode + Demo fallback`。
+- 默认情况下，真实 API Mode 命中 Demo 路由会返回失败和 `requiresRouteFix=true`，不会继续生成 Demo 结果；只有手动二次确认开启“API Mode 允许 Demo 兜底”才会继续使用 DemoRuleEngine，页面和调用日志会标记 `API Mode + Demo 兜底`。
 - Provider 类型为 `local` 时，“测试连接”只代表本地 Demo Provider 可用，页面会明确显示“这是 Demo Provider 测试，不代表真实 API 可用”。
 
 ## 确认某次任务是否使用了真实 API
@@ -118,7 +118,10 @@ endpointType     应为 server_proxy
 usedFallback    如果为 fallback，说明主模型失败后切到了备用模型
 warning/error   不应出现“真实 API Mode ... Demo 模型”
 settingsUpdatedAt 可辅助判断本次任务是否读到了最新同步配置
+不要出现 API Mode + Demo 兜底
 ```
+
+如果看到 `API Mode + Demo 兜底`，说明这次不是完整真实 API 调用。
 
 也可以查看任务执行返回的 `ModelCallResult`：
 
