@@ -184,9 +184,9 @@ detectScriptCoverage
 → 标准 analyzeScript 分析档案
 ```
 
-分析页会显示“长剧本分析进度”，包括覆盖检测、剧本切分、每集状态、token 估算、失败原因和“重试失败分集”。系统会同时显示声明/预期 chunk、系统实际切出 chunk、成功分析 chunk、失败 chunk、缺失分集和参与聚合数量。
+分析页会显示“长剧本分析进度”，包括覆盖检测、剧本切分、每集状态、token 估算、失败原因、“重试失败分集”和“重试全剧聚合”。系统会同时显示声明/预期 chunk、系统实际切出 chunk、成功分析 chunk、失败 chunk、缺失分集和参与聚合数量。
 
-失败 chunk 不会被静默跳过；成功 chunk 会保存到 `longScriptAnalysisProgress.chunkResults`，所以点击“重试失败分集”时不会丢失上一轮已经成功的分集结果。如果用户声明 50 集但系统只切出 1 集，`sourceMeta.missingChunks` 会记录缺失分集，并提示“仅切出 1/50 集，不能视为完整剧本分析完成”。
+失败 chunk 不会被静默跳过；成功 chunk 会保存到 `longScriptAnalysisProgress.chunkResults`，所以点击“重试失败分集”时不会丢失上一轮已经成功的分集结果。如果当前没有失败分集，系统不会误把“重试失败分集”降级成全量重跑；如果只是聚合失败，可以只重跑 `aggregateScriptAnalysis`。如果用户声明 50 集但系统只切出 1 集，`sourceMeta.missingChunks` 会记录缺失分集，并提示“仅切出 1/50 集，不能视为完整剧本分析完成”。
 
 最终结果会写入 `sourceMeta.failedChunks` / `sourceMeta.missingChunks`，并统一通过 `applyLongScriptGateFlags` 重算 `usableForFullScriptCase`、`usableForProduction`、`usableForPatternExtraction`、`usableForSkillLearning`。只要存在失败 chunk、缺失分集或 primitive evidence 标准化，结果只能保存为待复核草稿，不允许进入正式完整案例或 Skill 学习沉淀。
 

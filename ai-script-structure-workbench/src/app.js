@@ -144,6 +144,9 @@ async function handleAction(payload) {
       case "retry-failed-chunks":
         await executeLongScriptAnalysis({ retryFailedOnly: true });
         break;
+      case "retry-aggregate":
+        await executeLongScriptAnalysis({ retryAggregateOnly: true });
+        break;
       case "save-case":
         saveCurrentAnalysisAsCase();
         break;
@@ -464,24 +467,36 @@ async function executeAnalyzeScript() {
   }, "完成剧本结构分析", { targetType: "analysis", action: "generate" });
 }
 
-async function executeLongScriptAnalysis({ initialState = null, coverage = null, retryFailedOnly = false } = {}) {
-  let current = initialState || commitOpenInputsBeforeAction(retryFailedOnly ? "重试失败分集" : "长剧本分集分析");
+async function executeLongScriptAnalysis({ initialState = null, coverage = null, retryFailedOnly = false, retryAggregateOnly = false } = {}) {
+  const actionLabel = retryAggregateOnly ? "重试全剧聚合" : retryFailedOnly ? "重试失败分集" : "长剧本分集分析";
+  let current = initialState || commitOpenInputsBeforeAction(actionLabel);
   const input = current.scriptInput;
   const currentCoverage = coverage || detectScriptCoverage(input.text, input.episodeCount, { userConfirmedFullScript: input.userConfirmedFullScript });
   const split = prepareLongScriptChunks(input, currentCoverage);
   const allChunks = split.episodes || [];
   const previousProgress = current.longScriptAnalysisProgress || {};
-  const previousResults = retryFailedOnly ? { ...(previousProgress.chunkResults || {}) } : {};
+  const previousResults = retryFailedOnly || retryAggregateOnly ? { ...(previousProgress.chunkResults || {}) } : {};
   let chunks = allChunks;
-  if (retryFailedOnly) {
-    const failedKeys = new Set((previousProgress.failedChunks || []).map((item) => item.chunkKey).filter(Boolean));
-    const failedNos = new Set((previousProgress.failedChunks || []).map((item) => item.episodeNo).filter(Boolean));
+  const previousFailedChunks = previousProgress.failedChunks || [];
+  const aggregateFailed = previousFailedChunks.some((item) => item.failureStage === "aggregate" || item.detectedBy === "aggregate");
+  if (retryFailedOnly || retryAggregateOnly) {
+    const episodeFailures = previousFailedChunks.filter((item) => (item.failureStage || "episode_chunk") === "episode_chunk");
+    const failedKeys = new Set(episodeFailures.map((item) => item.chunkKey).filter(Boolean));
+    const failedNos = new Set(episodeFailures.map((item) => item.episodeNo).filter(Boolean));
     chunks = allChunks.filter((chunk) => failedKeys.has(getChunkKey(chunk)) || failedNos.has(chunk.episodeNo));
-    if (!chunks.length) chunks = allChunks;
+    if (retryAggregateOnly || (!chunks.length && aggregateFailed)) chunks = [];
+    if (retryFailedOnly && !chunks.length && !aggregateFailed) {
+      showToast("当前没有失败分集可重试。");
+      return;
+    }
+    if ((retryAggregateOnly || aggregateFailed) && !Object.keys(previousResults).length) {
+      showToast("没有可用于重新聚合的分集结果，请先完成分集分析。");
+      return;
+    }
   }
   const progress = createLongAnalysisProgress(allChunks, split);
   progress.steps[1].status = "成功";
-  progress.currentStep = retryFailedOnly ? "重试失败分集" : "剧本切分";
+  progress.currentStep = retryAggregateOnly ? "重试全剧聚合" : retryFailedOnly ? (chunks.length ? "重试失败分集" : "重试全剧聚合") : "剧本切分";
   progress.warnings = split.warnings || [];
   progress.chunkResults = previousResults;
   progress.chunks = (progress.chunks || []).map((item) => {
@@ -492,7 +507,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   store.setState((state) => {
     state.longScriptAnalysisProgress = progress;
     return state;
-  }, retryFailedOnly ? "重试失败分集分析" : "开始长剧本分集分析", { targetType: "analysis", action: "generate", light: true });
+  }, retryAggregateOnly ? "重试全剧聚合" : retryFailedOnly ? "重试失败分集分析" : "开始长剧本分集分析", { targetType: "analysis", action: "generate", light: true });
   render();
 
   const failedChunks = [];
@@ -529,6 +544,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       });
     } catch (error) {
       const failed = {
+        failureStage: "episode_chunk",
         chunkKey,
         episodeNo: chunk.episodeNo,
         title: chunk.title,
@@ -590,6 +606,8 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     finalAnalysis.caseScope = finalAnalysis.caseScope || currentCoverage.allowedCaseScope || "full_script";
     finalAnalysis.sourceMeta ||= {};
     finalAnalysis.sourceMeta.chunkedAnalysis = true;
+    finalAnalysis.sourceMeta.aggregateSource = "model";
+    finalAnalysis.sourceMeta.localAggregateFallback = false;
     finalAnalysis.sourceMeta.chunkCount = split.expectedChunkCount || episodeChunkAnalyses.length + failedChunks.length + missingChunks.length;
     finalAnalysis.sourceMeta.expectedChunks = split.expectedChunkCount || finalAnalysis.sourceMeta.chunkCount;
     finalAnalysis.sourceMeta.detectedChunks = split.detectedChunkCount || allChunks.length;
@@ -604,10 +622,12 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     ].filter(Boolean);
     applyLongScriptGateFlags(finalAnalysis);
   } catch (error) {
-    failedChunks.push({ episodeNo: null, title: "全剧结构聚合", detectedBy: "aggregate", error: error.message || "全剧聚合失败" });
+    failedChunks.push({ failureStage: "aggregate", episodeNo: null, title: "全剧结构聚合", detectedBy: "aggregate", error: error.message || "全剧聚合失败" });
     if (error.log) aggregateLog = error.log;
     finalAnalysis = aggregateScriptAnalysis({ ...aggregateInput, failedChunks });
     finalAnalysis.sourceMeta.aggregateFailed = true;
+    finalAnalysis.sourceMeta.aggregateSource = "local_fallback";
+    finalAnalysis.sourceMeta.localAggregateFallback = true;
     finalAnalysis.sourceMeta.needsReview = true;
     finalAnalysis.sourceMeta.usableForSkillLearning = false;
     finalAnalysis.sourceMeta.usableForLearning = false;
@@ -1541,6 +1561,9 @@ function renderAnalysisSourceAlert(analysis) {
 
 function renderLongScriptProgress(progress) {
   if (!progress) return "";
+  const failedChunks = progress.failedChunks || [];
+  const hasEpisodeFailures = failedChunks.some((item) => (item.failureStage || "episode_chunk") === "episode_chunk");
+  const hasAggregateFailure = failedChunks.some((item) => item.failureStage === "aggregate" || item.detectedBy === "aggregate");
   return `
     <section class="panel long-progress-panel">
       <div class="panel-title">
@@ -1548,7 +1571,10 @@ function renderLongScriptProgress(progress) {
           <h2>长剧本分析进度</h2>
           <p class="muted">完整剧本会按集/切块分析，再聚合全剧结构，避免一次 analyzeScript 超时或输出不完整。</p>
         </div>
-        ${(progress.failedChunks || []).length ? `<button class="secondary-button" data-action="retry-failed-chunks">${icon("loop")}重试失败分集</button>` : ""}
+        <div class="button-row">
+          ${hasEpisodeFailures ? `<button class="secondary-button" data-action="retry-failed-chunks">${icon("loop")}重试失败分集</button>` : ""}
+          ${hasAggregateFailure ? `<button class="secondary-button" data-action="retry-aggregate">${icon("loop")}重试全剧聚合</button>` : ""}
+        </div>
       </div>
       <div class="progress-steps">
         ${(progress.steps || []).map((step) => `<span class="status-pill ${statusClass(step.status)}">${escapeHtml(step.label)}｜${escapeHtml(step.status)}</span>`).join("")}
@@ -1575,6 +1601,8 @@ function renderLongScriptProgress(progress) {
             <span>${escapeHtml(chunk.status || "待分析")}</span>
             <span>估算 ${chunk.tokenEstimate || 0} tokens</span>
             <span>${escapeHtml(chunk.detectedBy || "")}</span>
+            ${chunk.detectedBy === "heading" ? `<em>启发式标题切分，需复核分集边界</em>` : ""}
+            ${chunk.detectedBy === "heuristic_chunk" ? `<em>启发式长度切块，需复核边界</em>` : ""}
             ${chunk.error ? `<em>${escapeHtml(chunk.error)}</em>` : ""}
           </div>`
           )

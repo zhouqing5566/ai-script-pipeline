@@ -154,6 +154,8 @@ export function aggregateScriptAnalysis(input = {}) {
     sourceMeta: {
       ...(base.sourceMeta || {}),
       chunkedAnalysis: true,
+      localAggregateFallback: true,
+      aggregateSource: "local_fallback",
       chunkCount: input.expectedChunkCount || chunks.length + failedChunks.length + missingChunks.length,
       expectedChunks: input.expectedChunkCount || chunks.length + failedChunks.length + missingChunks.length,
       detectedChunks: input.detectedChunkCount || chunks.length + failedChunks.length,
@@ -168,6 +170,7 @@ export function aggregateScriptAnalysis(input = {}) {
         ...(base.sourceMeta?.warnings || []),
         failedChunks.length ? `存在 ${failedChunks.length} 个失败分集/chunk，不能进入正式 Skill 沉淀。` : "",
         missingChunks.length ? `仅切出 ${chunks.length + failedChunks.length}/${input.expectedChunkCount || chunks.length + failedChunks.length + missingChunks.length} 个分集/chunk，不能视为完整剧本分析完成。` : "",
+        "全剧聚合使用本地合并兜底，部分全剧判断仍需主编复核。",
         "完整剧本已使用分集分析流程，而不是依赖单次超大输出。"
       ])
     },

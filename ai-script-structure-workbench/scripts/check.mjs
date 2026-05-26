@@ -193,6 +193,7 @@ assert.equal(aggregatedLong.sourceMeta.chunkedAnalysis, true);
 assert.equal(aggregatedLong.sourceMeta.failedChunks.length, 1);
 assert.equal(aggregatedLong.sourceMeta.needsReview, true);
 assert.equal(aggregatedLong.sourceMeta.usableForSkillLearning, false);
+assert.equal(aggregatedLong.sourceMeta.localAggregateFallback, true);
 const missingAggregate = aggregateScriptAnalysis({
   originalInput: { title: "声明五十集", genre: "都市", episodeCount: 50, text: declaredButShortText, userConfirmedFullScript: true },
   coverage: declaredShortCoverage,
@@ -919,12 +920,16 @@ assert.ok(appSource.includes("用户声明集数"));
 assert.ok(appSource.includes("系统检测集数"));
 assert.ok(appSource.includes("完整性来源"));
 assert.ok(appSource.includes("重试失败分集"));
+assert.ok(appSource.includes("重试全剧聚合"));
+assert.ok(appSource.includes("当前没有失败分集可重试"));
+assert.ok(appSource.includes("failureStage"));
 assert.ok(appSource.includes("chunkResults[chunkKey]"));
 assert.ok(appSource.includes("Object.values(chunkResults)"));
 assert.ok(appSource.includes("missingChunks"));
 assert.ok(appSource.includes("仅切出"));
 assert.ok(appSource.includes("applyLongScriptGateFlags"));
 assert.ok(appSource.includes("参与聚合 chunk"));
+assert.ok(appSource.includes("启发式标题切分，需复核分集边界"));
 assert.ok(appSource.includes("该任务已按安全输出上限发送。完整剧本将使用分集分析流程，而不是依赖单次超大输出。"));
 assert.ok(appSource.includes("sourceText 校验"));
 assert.ok(appSource.includes("原文未命中，需复核"));
@@ -959,6 +964,7 @@ assert.ok(longAnalysisSource.includes("failedChunks"));
 assert.ok(longAnalysisSource.includes("missingChunks"));
 assert.ok(longAnalysisSource.includes("applyLongScriptGateFlags"));
 assert.ok(longAnalysisSource.includes("chunkedAnalysis"));
+assert.ok(longAnalysisSource.includes("localAggregateFallback"));
 assert.ok(evidenceValidatorSource.includes("validateEvidenceSourceText"));
 assert.ok(evidenceValidatorSource.includes("invalidEvidenceRatio"));
 assert.ok(evidenceValidatorSource.includes("missingSourceText"));

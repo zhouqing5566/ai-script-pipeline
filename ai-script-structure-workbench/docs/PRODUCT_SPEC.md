@@ -559,7 +559,13 @@ sourceMeta.usableForFullScriptCase = false
 sourceMeta.usableForSkillLearning = false
 ```
 
-重试失败分集时，已成功分集结果必须保存在 `longScriptAnalysisProgress.chunkResults` 中，重试成功后替换对应 chunk，最终聚合使用所有成功 chunkResults，而不是只聚合本轮重试的分集。
+重试失败分集时，已成功分集结果必须保存在 `longScriptAnalysisProgress.chunkResults` 中，重试成功后替换对应 chunk，最终聚合使用所有成功 chunkResults，而不是只聚合本轮重试的分集。如果当前没有失败分集，不允许自动重跑全部 chunk；如果失败项只是全剧聚合失败，系统应保留已有 `chunkResults`，只重跑 `aggregateScriptAnalysis`。
+
+`failedChunks` 应区分失败阶段：
+
+```js
+failureStage: "episode_chunk" | "aggregate"
+```
 
 所有路径（真实模型聚合成功、本地聚合兜底、聚合失败后兜底）都必须调用统一门禁：
 

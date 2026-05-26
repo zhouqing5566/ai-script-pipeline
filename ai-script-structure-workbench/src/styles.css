@@ -1695,6 +1695,13 @@ pre {
   margin: 10px 0;
 }
 
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .long-progress-summary {
   display: grid;
   grid-template-columns: repeat(5, minmax(110px, 1fr));
@@ -1737,7 +1744,7 @@ pre {
 
 .chunk-progress-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1.4fr) 80px 120px 120px minmax(0, 1fr);
+  grid-template-columns: minmax(180px, 1.3fr) 80px 120px 120px minmax(140px, 1fr) minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
