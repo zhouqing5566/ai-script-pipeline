@@ -1,7 +1,7 @@
-import { extractJsonCandidate } from "./json-extractor.js";
+import { extractTaskJsonCandidate } from "./json-extractor.js";
 
 export async function parseJsonWithRepair(text, options = {}) {
-  const extracted = extractJsonCandidate(text);
+  const extracted = extractTaskJsonCandidate(text, options.taskType);
   const candidate = extracted.candidate || String(text || "");
   const errors = [];
   try {
@@ -23,7 +23,7 @@ export async function parseJsonWithRepair(text, options = {}) {
   if (typeof options.repairFn === "function") {
     try {
       const repairedText = await options.repairFn(candidate || text, errors);
-      const repairedExtraction = extractJsonCandidate(repairedText);
+      const repairedExtraction = extractTaskJsonCandidate(repairedText, options.taskType);
       return {
         ok: true,
         value: JSON.parse(repairedExtraction.candidate || repairedText),

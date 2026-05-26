@@ -480,7 +480,9 @@ src/json-repair.js
 输出必须能被 JSON.parse 直接解析。
 ```
 
-如果模型仍返回说明性文字，`extractJsonCandidate(text)` 会优先提取可解析的最长 JSON 主体，并记录 `jsonExtractionMethod`。解析失败时，调用日志和 chunk failure 必须记录 `rawOutputPreview`、`jsonRepairAttempted`、`jsonRepairError` 和 `parseErrorPosition`。
+如果模型仍返回说明性文字，`extractJsonCandidate(text)` 会优先提取可解析的 JSON 主体，并记录 `jsonExtractionMethod`。当同一输出里存在多个 JSON 候选时，`extractTaskJsonCandidate(text, taskType)` 会按任务结构评分选择最匹配的候选；例如 `analyzeEpisodeChunk` 优先选择包含 `evidenceLedger`、非空 `episodeBeatLedger` 和 `episodeFunctionAnalysis` 的 JSON，而不是误选更长的示例 JSON。
+
+`analyzeEpisodeChunk` 不允许用本地补齐掩盖模型结构失败。若真实模型只返回 `{}`、`{"ok":true}` 或缺少 compact contract 的关键字段，本地 normalize 只能生成待复核草稿，同时返回 `schema_validation` 失败；该 chunk 不得进入成功分析数量，也不得作为 Skill 学习沉淀。解析失败时，调用日志和 chunk failure 必须记录 `rawOutputPreview`、`jsonRepairAttempted`、`jsonRepairError` 和 `parseErrorPosition`。
 
 ## 长剧本分集分析
 

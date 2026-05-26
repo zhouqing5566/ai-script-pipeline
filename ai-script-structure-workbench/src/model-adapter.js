@@ -675,6 +675,10 @@ function coerceEpisodeChunkOutput(value, inputMeta = {}) {
   const source = isPlainObject(value) ? value : {};
   const merged = deepMerge(base, source);
   const warnings = [];
+  const missingCompactFields = [];
+  if (!isPlainObject(source.evidenceLedger)) missingCompactFields.push("evidenceLedger");
+  if (!Array.isArray(source.episodeBeatLedger) || !source.episodeBeatLedger.length) missingCompactFields.push("episodeBeatLedger");
+  if (!isPlainObject(source.episodeFunctionAnalysis)) missingCompactFields.push("episodeFunctionAnalysis");
   merged.episodeNo = Number(source.episodeNo) || Number(inputMeta.episodeNo) || base.episodeNo || null;
   merged.title = source.title || inputMeta.episodeTitle || base.title || `第${merged.episodeNo || "?"}集`;
   merged.coverage = isPlainObject(source.coverage) ? source.coverage : base.coverage;
@@ -688,7 +692,16 @@ function coerceEpisodeChunkOutput(value, inputMeta = {}) {
   merged.continuityNotes = Array.isArray(source.continuityNotes) && source.continuityNotes.length ? source.continuityNotes : ["本集未发现明确连续性备注。"];
   merged.confidence = Number(source.confidence ?? base.confidence ?? 0.55);
   merged.needsReview = Boolean(source.needsReview ?? base.needsReview);
-  merged.sourceMeta = { ...(source.sourceMeta || {}), normalizedEpisodeChunk: true };
+  merged.sourceMeta = {
+    ...(source.sourceMeta || {}),
+    normalizedEpisodeChunk: true,
+    modelStructureIncomplete: missingCompactFields.length > 0,
+    missingCompactFields
+  };
+  if (missingCompactFields.length) {
+    merged.needsReview = true;
+    warnings.push(`模型未返回 ${missingCompactFields.join("、")}，本地仅能补齐展示草稿，不能视为真实分集分析成功。`);
+  }
   applyEvidenceValidationToAnalysis(merged, inputMeta.episodeText || inputMeta.text || "");
   const validation = merged.sourceMeta.evidenceValidation || {};
   if ((validation.invalidEvidenceRatio || 0) > 0.5 || (validation.checkedCount || 0) === 0) {
@@ -1052,6 +1065,7 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
   let parsedJson = null;
   if (schema || options.jsonModeRequired) {
     const repaired = await parseJsonWithRepair(response.outputText, {
+      taskType,
       repairFn:
         taskType === "jsonRepair"
           ? null
@@ -1061,7 +1075,7 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
                 featureArea: "JSON 修复",
                 projectId,
                 skillIds,
-                inputMeta: { project, brokenText, errors },
+                inputMeta: { project, brokenText, errors, targetTaskType: taskType },
                 state
               });
               if (!repairResult.success) {
@@ -1087,8 +1101,12 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
     const normalized = normalizeParsedOutputForTask(taskType, repaired.value, inputMeta || { project });
     parsedJson = normalized.value;
     const shape = validateTaskOutput(taskType, parsedJson);
-    if (!shape.ok) {
-      const error = new Error(schemaValidationMessage(taskType, shape.issues));
+    if (!shape.ok || normalized.meta?.modelStructureIncomplete) {
+      const missingFields = normalized.meta?.missingCompactFields || [];
+      const message = normalized.meta?.modelStructureIncomplete
+        ? `分集结构校验失败：模型未返回 ${missingFields.join("、")}，不能用本地补齐结果冒充真实分集分析。`
+        : schemaValidationMessage(taskType, shape.issues);
+      const error = new Error(message);
       attachJsonErrorMeta(error, response, "schema_validation");
       throw error;
     }

@@ -193,6 +193,8 @@ detectScriptCoverage
 
 如果连续 3 个分集返回非 JSON、无法提取 JSON 主体或 schema 不通过，系统会熔断长剧本分析，标记 `sourceMeta.abortedByJsonFailure=true` 和 `progress.aborted=true`。后续未调用分集会标为 `skippedDueToJsonFailure`，不会被记成 Provider/API 失败。失败详情会显示 `rawOutputPreview`、`jsonExtractionMethod`、`jsonRepairAttempted` 和错误类型。
 
+如果模型输出里同时包含“示例 JSON”和“正式 JSON”，解析器会按 `taskType` 优先选择最像当前任务结构的候选，而不是简单选择最长 JSON。对 `analyzeEpisodeChunk`，候选必须由模型实际返回 `evidenceLedger`、非空 `episodeBeatLedger` 和 `episodeFunctionAnalysis`；如果只返回 `{}`、`{"ok":true}` 或其他错误 JSON 壳，本地补齐只能生成待复核草稿，任务会按 `schema_validation` 失败，不会被记为真实分集分析成功。
+
 最终结果会写入 `sourceMeta.failedChunks` / `sourceMeta.missingChunks` / `sourceMeta.skippedChunks`，并统一通过 `applyLongScriptGateFlags` 重算 `usableForFullScriptCase`、`usableForProduction`、`usableForPatternExtraction`、`usableForSkillLearning`。只要存在失败 chunk、缺失分集、跳过分集、primitive evidence 标准化或本地聚合兜底，结果只能保存为待复核草稿，不允许进入正式完整案例或 Skill 学习沉淀。
 
 ## 配置 OpenAI-compatible API
