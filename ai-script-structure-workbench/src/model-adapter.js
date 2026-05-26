@@ -113,6 +113,7 @@ export async function callModel({
         schema,
         state,
         project,
+        inputMeta,
         route: selection.route
       });
       outputText = response.outputText;
@@ -127,6 +128,7 @@ export async function callModel({
       providerUpdatedAt = response.providerUpdatedAt || null;
       modelUpdatedAt = response.modelUpdatedAt || null;
       costEstimate = estimateCost(model, tokenUsage);
+      warnings.push(...(response.schemaWarnings || []));
     }
   } catch (providerError) {
     const mainMeta = providerError.providerPayload || null;
@@ -165,6 +167,7 @@ export async function callModel({
             schema,
             state,
             project,
+            inputMeta,
             route: selection.route
           });
           outputText = response.outputText;
@@ -179,6 +182,7 @@ export async function callModel({
           providerUpdatedAt = response.providerUpdatedAt || null;
           modelUpdatedAt = response.modelUpdatedAt || null;
           costEstimate = estimateCost(model, tokenUsage);
+          warnings.push(...(response.schemaWarnings || []));
         } catch (fallbackError) {
           const fallbackMeta = fallbackError.providerPayload || null;
           if (fallbackMeta) {
@@ -539,7 +543,146 @@ function dispatchTask(taskType, input, state) {
   }
 }
 
-async function executeApiAttempt({ taskType, projectId, skillIds, provider, model, messages, options, schema, state, project, route }) {
+function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
+  const unwrapped = unwrapTaskPayload(value, taskType);
+  const warnings = [];
+  if (unwrapped.changed) {
+    warnings.push(`模型返回包含 ${unwrapped.wrapperKey} 外层，已自动展开为任务根对象。`);
+  }
+
+  if (taskType !== "analyzeScript") {
+    return { value: unwrapped.value, warnings };
+  }
+
+  const shape = validateTaskOutput(taskType, unwrapped.value);
+  if (shape.ok) return { value: stabilizeAnalyzeScriptOutput(unwrapped.value, inputMeta), warnings };
+
+  const normalized = coerceAnalyzeScriptOutput(unwrapped.value, inputMeta, shape.issues);
+  warnings.push("真实模型输出的剧本分析结构不完整，已按标准分析档案补齐缺失字段；请查看质量备注并按需重新生成。");
+  return { value: normalized, warnings };
+}
+
+function unwrapTaskPayload(value, taskType) {
+  if (!isPlainObject(value)) return { value, changed: false, wrapperKey: null };
+  const wrapperKeys = taskType === "analyzeScript" ? ["scriptAnalysis", "analysis", "result", "data", "output"] : ["result", "data", "output"];
+  for (const key of wrapperKeys) {
+    const inner = value[key];
+    if (inner && (isPlainObject(inner) || Array.isArray(inner))) {
+      return { value: inner, changed: true, wrapperKey: key };
+    }
+  }
+  return { value, changed: false, wrapperKey: null };
+}
+
+function coerceAnalyzeScriptOutput(value, inputMeta = {}, issues = []) {
+  const base = analyzeScript(inputMeta);
+  const source = isPlainObject(value) ? value : {};
+  const merged = deepMerge(base, source);
+  const structureFunction = source.structureFunction || source.structure || source.structureValue || {};
+  if (isPlainObject(structureFunction)) {
+    const hook = firstText(structureFunction.hook, structureFunction.openingHook, structureFunction.coreHook);
+    if (hook) merged.hookAnalysis.openingSummary = hook;
+    const pacing = firstText(structureFunction.pacing, structureFunction.rhythm, structureFunction.stagePacing);
+    if (pacing) merged.mainlineStructure.escalationLogic = pacing;
+    const riskItems = toStringArray(structureFunction.riskAssessment || structureFunction.risks || []);
+    if (riskItems.length) merged.qualityNotes.weaknesses = uniqueList([...(merged.qualityNotes.weaknesses || []), ...riskItems]);
+  }
+  const sourceTitle = firstText(source.title, source.name, source.basicInfo?.title);
+  if (sourceTitle && !inputMeta.title) {
+    merged.title = sourceTitle;
+    merged.basicInfo.title = sourceTitle;
+  }
+  merged.qualityNotes.suggestedRepairs = uniqueList([
+    ...(merged.qualityNotes.suggestedRepairs || []),
+    "当前真实模型返回字段未完全匹配标准档案，建议在路由测试后重新分析，或调高该任务 Prompt/schema 约束。"
+  ]);
+  merged.qualityNotes.weaknesses = uniqueList([
+    ...(merged.qualityNotes.weaknesses || []),
+    `模型结构缺项：${issues.join("；") || "字段层级不完整"}`
+  ]);
+  merged.analystNotes = [source.analystNotes, source.summary, merged.analystNotes].filter(Boolean).join("\n");
+  return stabilizeAnalyzeScriptOutput(merged, inputMeta);
+}
+
+function stabilizeAnalyzeScriptOutput(value, inputMeta = {}) {
+  const base = analyzeScript(inputMeta);
+  const merged = deepMerge(base, isPlainObject(value) ? value : {});
+  const title = inputMeta.title || merged.basicInfo?.title || merged.title || "未命名剧本";
+  merged.title = title;
+  merged.basicInfo.title = title;
+  const inputGenres = splitScope(inputMeta.genre);
+  if (inputGenres.length) {
+    merged.basicInfo.genre = inputGenres;
+    merged.classificationTags.genre = inputGenres;
+  } else {
+    merged.basicInfo.genre = toStringArray(merged.basicInfo.genre);
+    merged.classificationTags.genre = toStringArray(merged.classificationTags.genre || merged.basicInfo.genre);
+  }
+  const episodeCount = Number(inputMeta.episodeCount) || Number(merged.basicInfo.episodeCount) || 24;
+  merged.basicInfo.episodeCount = episodeCount;
+  merged.basicInfo.estimatedLength = merged.basicInfo.estimatedLength || `${episodeCount} 集`;
+  merged.classificationTags.audienceNeeds = toStringArray(merged.classificationTags.audienceNeeds || merged.audienceNeedAnalysis.primaryNeeds);
+  merged.classificationTags.hookTypes = toStringArray(merged.classificationTags.hookTypes || merged.hookAnalysis.hookTypes);
+  merged.episodeFunctionAnalysis = Array.isArray(merged.episodeFunctionAnalysis) ? merged.episodeFunctionAnalysis : base.episodeFunctionAnalysis;
+  merged.reusablePatterns = Array.isArray(merged.reusablePatterns) ? merged.reusablePatterns : base.reusablePatterns;
+  return merged;
+}
+
+function deepMerge(base, source) {
+  if (Array.isArray(base)) return mergeArray(base, source);
+  if (isPlainObject(base)) {
+    const result = { ...base };
+    if (!isPlainObject(source)) return result;
+    for (const [key, value] of Object.entries(source)) {
+      result[key] = key in result ? deepMerge(result[key], value) : value;
+    }
+    return result;
+  }
+  if (source === null || source === undefined || source === "") return base;
+  return source;
+}
+
+function mergeArray(base, source) {
+  if (Array.isArray(source)) {
+    if (!source.length) return base;
+    if (base.every(isPlainObject) && source.every(isPlainObject)) {
+      return source.map((item, index) => deepMerge(base[index] || {}, item));
+    }
+    return source.map((item) => (typeof item === "string" ? item : item));
+  }
+  if (typeof source === "string" && source.trim()) return [source.trim()];
+  return base;
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function splitScope(value = "") {
+  return String(value)
+    .split(/[、，,\/|｜\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function toStringArray(value) {
+  if (Array.isArray(value)) return value.map((item) => (typeof item === "string" ? item : JSON.stringify(item))).filter(Boolean);
+  if (typeof value === "string") return splitScope(value);
+  return [];
+}
+
+function firstText(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function uniqueList(items = []) {
+  return [...new Set(items.filter(Boolean))];
+}
+
+async function executeApiAttempt({ taskType, projectId, skillIds, provider, model, messages, options, schema, state, project, inputMeta, route }) {
   const response = await callProvider({ provider, model, messages, options, taskType, route });
   let parsedJson = null;
   if (schema || options.jsonModeRequired) {
@@ -563,9 +706,11 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
             }
     });
     if (!repaired.ok) throw new Error(repaired.error);
-    parsedJson = repaired.value;
+    const normalized = normalizeParsedOutputForTask(taskType, repaired.value, inputMeta || { project });
+    parsedJson = normalized.value;
     const shape = validateTaskOutput(taskType, parsedJson);
     if (!shape.ok) throw new Error(schemaValidationMessage(taskType, shape.issues));
+    response.schemaWarnings = normalized.warnings;
   }
   return {
     outputText: response.outputText,
@@ -579,7 +724,8 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
     providerRawPreview: response.providerRawPreview,
     settingsUpdatedAt: response.settingsUpdatedAt,
     providerUpdatedAt: response.providerUpdatedAt,
-    modelUpdatedAt: response.modelUpdatedAt
+    modelUpdatedAt: response.modelUpdatedAt,
+    schemaWarnings: response.schemaWarnings || []
   };
 }
 

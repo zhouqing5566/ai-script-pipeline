@@ -429,9 +429,10 @@ async function syncApiSettings(options = {}) {
 }
 
 async function executeTask(taskType, inputFactory, applyOutput, summary, options = {}) {
+  const current = readOpenInputs(store.getState());
+  store.setState(current, "保存当前表单输入", { version: false });
   busyAction = taskLabels[taskType] || taskType;
   render();
-  const current = readOpenInputs(store.getState());
   const { output, log, result } = await runModelTask(taskType, inputFactory(current), current);
   applyOutput(current, output, log);
   busyAction = null;

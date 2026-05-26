@@ -1,4 +1,5 @@
 import { summarizeSkillForPrompt } from "./skill-manager.js";
+import { getTaskOutputContract } from "./task-output-contracts.js";
 
 const systemPrinciples = [
   "你是一个专业短剧、漫剧、爽剧、网文改编方向的剧本结构顾问。",
@@ -28,7 +29,7 @@ export function buildPrompt({ taskType, project, input, matchedSkills = [], outp
   const skillBlock = matchedSkills.length
     ? matchedSkills.map(summarizeSkillForPrompt).join("\n\n")
     : "未匹配到专用 Skill，仅使用通用系统原则。";
-  const schemaBlock = outputSchema ? JSON.stringify(outputSchema, null, 2) : "请返回符合任务要求的 JSON 对象。";
+  const schemaBlock = outputSchema ? JSON.stringify(outputSchema, null, 2) : getTaskOutputContract(taskType) || "请返回符合任务要求的 JSON 对象。";
   const user = [
     `当前任务：${taskType}`,
     "",

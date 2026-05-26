@@ -260,6 +260,53 @@ assert.equal(Object.hasOwn(proxyCalls[0], "provider"), false);
 assert.equal(Object.hasOwn(proxyCalls[0], "model"), false);
 delete globalThis.__MODEL_CALL_PROXY__;
 
+const wrappedAnalysisCalls = [];
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
+  wrappedAnalysisCalls.push(payload);
+  return {
+    outputText:
+      "```json\n" +
+      JSON.stringify({
+        scriptAnalysis: {
+          title: "模型自带标题",
+          structureFunction: {
+            hook: "开局直接给出可追看的命运危机。",
+            pacing: "前 5 集建立压迫和小反击，中段转向主线真相。",
+            riskAssessment: ["模型返回了非标准字段，需要补齐结构档案。"]
+          }
+        }
+      }) +
+      "\n```",
+    tokenUsage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+    requestFormat: payload.requestFormat,
+    endpointType: "server_proxy",
+    status: 200
+  };
+};
+const scriptDraftInput = {
+  ...apiSuccessState.scriptInput,
+  title: "用户填写标题",
+  genre: "都市 / 重生 / 复仇",
+  episodeCount: 24,
+  text: "毒手巫医\n第一集\n主角在危机中重生。"
+};
+const wrappedAnalysisResult = await callModel({
+  taskType: "analyzeScript",
+  featureArea: "剧本分析中心",
+  inputMeta: scriptDraftInput,
+  state: apiSuccessState
+});
+assert.equal(wrappedAnalysisResult.success, true);
+assert.equal(wrappedAnalysisResult.mode, "api");
+assert.equal(wrappedAnalysisCalls.length, 1);
+assert.equal(wrappedAnalysisResult.parsedJson.basicInfo.title, "用户填写标题");
+assert.deepEqual(wrappedAnalysisResult.parsedJson.basicInfo.genre, ["都市", "重生", "复仇"]);
+assert.equal(wrappedAnalysisResult.parsedJson.basicInfo.episodeCount, 24);
+assert.equal(validateTaskOutput("analyzeScript", wrappedAnalysisResult.parsedJson).ok, true);
+assert.ok(wrappedAnalysisResult.warnings.some((warning) => warning.includes("scriptAnalysis")));
+assert.ok(wrappedAnalysisResult.warnings.some((warning) => warning.includes("结构不完整")));
+delete globalThis.__MODEL_CALL_PROXY__;
+
 const routeProbeCalls = [];
 globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
   routeProbeCalls.push(payload);
@@ -492,6 +539,13 @@ assert.ok(appSource.includes("providerNameForModel"));
 assert.ok(appSource.includes("这是 Demo Provider 测试，不代表真实 API 可用"));
 assert.ok(appSource.includes("apiKeyInput && apiKeyInput !== provider.apiKey"));
 assert.ok(appSource.includes('autocomplete="new-password"'));
+assert.ok(appSource.indexOf("const current = readOpenInputs(store.getState());") < appSource.indexOf("busyAction = taskLabels[taskType] || taskType;"));
+const promptBuilderSource = await fs.readFile(new URL("../src/prompt-builder.js", import.meta.url), "utf8");
+const taskContractSource = await fs.readFile(new URL("../src/task-output-contracts.js", import.meta.url), "utf8");
+assert.ok(promptBuilderSource.includes("getTaskOutputContract"));
+assert.ok(taskContractSource.includes("不得包在 scriptAnalysis"));
+assert.ok(modelAdapterSource.includes("normalizeParsedOutputForTask"));
+assert.ok(modelAdapterSource.includes("coerceAnalyzeScriptOutput"));
 
 console.log("check passed: V1.1 demo/API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");
 
