@@ -505,7 +505,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       };
       return state;
     }, "阻止长剧本分析：任务路由未通过", { targetType: "analysis", action: "generate", light: true });
-    showToast("analyzeEpisodeChunk JSON 输出测试未通过，已阻止长剧本分析。请先修复 Provider/requestFormat 或更换模型。");
+    showToast(readiness.warnings?.[0] || "analyzeEpisodeChunk JSON 输出测试未通过，已阻止长剧本分析。请先修复 Provider/requestFormat 或更换模型。");
     return;
   }
   const previousProgress = current.longScriptAnalysisProgress || {};
@@ -976,7 +976,20 @@ function validateTaskRouteHealthFresh(config = {}, taskType, health = {}) {
   const current = createTaskRouteFingerprint(config, taskType);
   const saved = health.fingerprint || null;
   if (!saved) return { fresh: false, reasons: ["缺少任务路由测试指纹"] };
-  const fields = ["providerId", "modelId", "routeId", "requestFormat", "baseUrlHash", "providerUpdatedAt", "modelUpdatedAt", "routeUpdatedAt"];
+  const fields = [
+    "providerId",
+    "modelId",
+    "routeId",
+    "requestFormat",
+    "resolvedRequestFormat",
+    "baseUrlHash",
+    "providerUpdatedAt",
+    "modelUpdatedAt",
+    "routeUpdatedAt",
+    "jsonModeRequired",
+    "timeoutMs",
+    "maxOutputTokens"
+  ];
   const reasons = fields
     .filter((field) => (saved[field] || null) !== (current[field] || null))
     .map((field) => `${field} 已变化`);
@@ -1002,7 +1015,10 @@ function createTaskRouteFingerprintFromBundle(bundle = {}) {
     baseUrlHash: hashConfigValue(provider.baseUrl || ""),
     providerUpdatedAt: provider.updatedAt || null,
     modelUpdatedAt: model.updatedAt || null,
-    routeUpdatedAt: route.updatedAt || null
+    routeUpdatedAt: route.updatedAt || null,
+    jsonModeRequired: Boolean(route.jsonModeRequired),
+    timeoutMs: Number(route.timeoutMs || provider.timeoutMs || 0) || null,
+    maxOutputTokens: Number(route.maxOutputTokens || model.maxOutputTokens || 0) || null
   };
 }
 
@@ -1964,7 +1980,7 @@ function finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorT
     baseUrlType: diagnostics.protocolGuess || "unknown",
     checks,
     success,
-    message: success ? `该模型可用于 ${taskType}。` : "路由连通通过，但该模型暂不可用于长剧本分集 JSON 分析。",
+    message: success ? `该模型可用于 ${taskType}。` : `该模型暂不可用于 ${taskType} 的结构化 JSON 输出。`,
     errorType,
     errorMessage,
     diagnostics,
@@ -2639,7 +2655,8 @@ function renderLongScriptRouteReadiness(readiness = {}) {
       ${(readiness.requiredTasks || ["analyzeEpisodeChunk", "aggregateScriptAnalysis"])
         .map((taskType) => {
           const item = readiness.health?.[taskType];
-          return `<p>${escapeHtml(taskType)}：task_smoke ${item?.checks?.task_smoke?.success ? "通过" : "未通过"}${item?.stale ? "｜测试已过期" : ""}${item?.errorMessage ? `｜${escapeHtml(item.errorMessage)}` : ""}</p>`;
+          const staleDetail = (readiness.stale || []).find((entry) => entry.taskType === taskType)?.reasons?.join("；") || item?.staleReason || "";
+          return `<p>${escapeHtml(taskType)}：task_smoke ${item?.checks?.task_smoke?.success ? "通过" : "未通过"}${staleDetail ? `｜测试已过期：${escapeHtml(staleDetail)}` : ""}${item?.errorMessage ? `｜${escapeHtml(item.errorMessage)}` : ""}</p>`;
         })
         .join("")}
       ${(readiness.warnings || []).map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
@@ -3264,7 +3281,7 @@ function renderTaskChainTestResult(result) {
   return `
     <div class="suggestion-box ${result.success ? "" : "has-warning"}">
       <h3>最近完整任务链路测试</h3>
-      ${result.stale ? `<p class="warning-text">配置已变化，请重新执行完整任务链路测试。</p>` : ""}
+      ${result.stale ? `<p class="warning-text">${escapeHtml(result.staleReason || "配置已变化，请重新执行完整任务链路测试。")}</p>` : ""}
       ${(result.warnings || []).map((item) => `<p class="warning-text">${escapeHtml(item)}</p>`).join("")}
       <div class="compact-list">
         ${(result.results || [])
@@ -3272,7 +3289,7 @@ function renderTaskChainTestResult(result) {
             <div class="${item.success ? "" : "has-warning"}">
               <strong>${escapeHtml(item.taskType)}</strong>
               <span>${escapeHtml(item.message || "")}</span>
-              <small>provider_ping ${item.checks?.provider_ping?.success ? "通过" : "失败"}｜chat_smoke ${item.checks?.chat_smoke?.success ? "通过" : "失败"}｜json_smoke ${item.checks?.json_smoke?.success ? "通过" : "失败"}｜task_smoke ${item.checks?.task_smoke?.success ? "通过" : "失败"}${item.stale ? "｜测试已过期" : ""}</small>
+              <small>provider_ping ${item.checks?.provider_ping?.success ? "通过" : "失败"}｜chat_smoke ${item.checks?.chat_smoke?.success ? "通过" : "失败"}｜json_smoke ${item.checks?.json_smoke?.success ? "通过" : "失败"}｜task_smoke ${item.checks?.task_smoke?.success ? "通过" : "失败"}${item.stale ? `｜测试已过期：${escapeHtml(item.staleReason || "配置已变化")}` : ""}</small>
               ${item.errorMessage ? `<small class="warning-text">${escapeHtml(item.errorMessage)}</small>` : ""}
               ${item.staleReason ? `<small class="warning-text">${escapeHtml(item.staleReason)}</small>` : ""}
               ${(item.suggestions || []).length ? `<small>建议：${escapeHtml(item.suggestions.join("；"))}</small>` : ""}
@@ -3280,7 +3297,7 @@ function renderTaskChainTestResult(result) {
           `)
           .join("")}
       </div>
-      <p class="${result.success ? "sync-ok" : "warning-text"}">${result.success ? "该模型可用于所测任务。" : "路由连通通过，但该模型暂不可用于长剧本分集 JSON 分析。"}</p>
+      <p class="${result.success ? "sync-ok" : "warning-text"}">${result.success ? "该模型可用于所测任务。" : "该模型暂不可用于所测任务的结构化 JSON 输出。长剧本分析依赖 analyzeEpisodeChunk 和 aggregateScriptAnalysis。"}</p>
     </div>
   `;
 }
@@ -3307,8 +3324,8 @@ function renderProviderHealthPanel(config) {
               <span>provider_ping：${renderHealthCheck(health.checks?.provider_ping)}</span>
               <span>chat_smoke：${renderHealthCheck(health.checks?.chat_smoke)}</span>
               <span>json_smoke：${renderHealthCheck(health.checks?.json_smoke)}</span>
-              <span>task_smoke analyzeEpisodeChunk：${renderTaskHealthStatus(taskEpisode)}</span>
-              <span>task_smoke aggregateScriptAnalysis：${renderTaskHealthStatus(taskAggregate)}</span>
+              <span>task_smoke analyzeEpisodeChunk：${renderTaskHealthStatus(taskEpisode, config, "analyzeEpisodeChunk")}</span>
+              <span>task_smoke aggregateScriptAnalysis：${renderTaskHealthStatus(taskAggregate, config, "aggregateScriptAnalysis")}</span>
               <span>最近错误：${escapeHtml(health.lastErrorType || health.message || "无")}</span>
               <span>修复建议：${escapeHtml((health.suggestions || diagnostics.suggestions || []).join("；") || "无")}</span>
             </div>`;
@@ -3324,9 +3341,13 @@ function renderHealthCheck(check) {
   return check.success ? "通过" : "失败";
 }
 
-function renderTaskHealthStatus(health) {
+function renderTaskHealthStatus(health, config = null, taskType = "") {
   if (!health) return "未测试";
-  if (health.stale) return "测试已过期";
+  const freshness = config && taskType ? validateTaskRouteHealthFresh(config, taskType, health) : { fresh: !health.stale, reasons: health.staleReason ? [health.staleReason] : [] };
+  if (!freshness.fresh || health.stale) {
+    const reasons = freshness.reasons?.length ? freshness.reasons : [health.staleReason || "配置已变化"];
+    return `测试已过期：${escapeHtml(reasons.join("；"))}`;
+  }
   return health.checks?.task_smoke?.success ? "通过" : "未通过";
 }
 
