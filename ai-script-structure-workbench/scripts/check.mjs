@@ -41,7 +41,12 @@ import { hasUsefulRuntimeSettings, mergeRuntimeApiConfig, syncRuntimeSettings } 
 import { resolveRequestFormat } from "../src/request-format.js";
 import { detectScriptCoverage } from "../src/script-coverage.js";
 import { normalizeRelationshipEdge } from "../src/analysis-normalizers.js";
-import { applyEvidenceValidationToAnalysis, validateEvidenceSourceText } from "../src/evidence-validator.js";
+import {
+  applyEvidenceValidationToAnalysis,
+  normalizeBeatEntry,
+  normalizeEvidenceEntry,
+  validateEvidenceSourceText
+} from "../src/evidence-validator.js";
 import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, shouldUseGeminiNative } from "../src/provider-adapters/gemini.js";
 import { buildOpenAIChatRequestBody } from "../src/provider-adapters/openai-compatible.js";
 import { labelForKey } from "../src/schemas.js";
@@ -167,6 +172,41 @@ assert.equal(declaredWithoutLedger.sourceMeta.evidenceValidation.invalidEvidence
 assert.equal(fragmentAnalysis.sourceMeta.usableForCaseSave, true);
 assert.equal(fragmentAnalysis.sourceMeta.usableForFullScriptCase, false);
 assert.equal(fragmentAnalysis.sourceMeta.usableForSkillLearning, false);
+const primitiveEvidenceText = "△火车上林清突然流血倒地。";
+const normalizedPrimitiveEvidence = normalizeEvidenceEntry(primitiveEvidenceText, { group: "hookEvidence", index: 0 });
+assert.equal(normalizedPrimitiveEvidence.sourceText, primitiveEvidenceText);
+assert.equal(normalizedPrimitiveEvidence.summary, primitiveEvidenceText);
+assert.ok(normalizedPrimitiveEvidence.id.startsWith("E_HOOK_"));
+assert.equal(normalizedPrimitiveEvidence.normalizedFromPrimitive, true);
+const normalizedPrimitiveBeat = normalizeBeatEntry("火车危机", 0);
+assert.equal(normalizedPrimitiveBeat.sourceText, "火车危机");
+assert.equal(normalizedPrimitiveBeat.beatSummary, "火车危机");
+assert.equal(normalizedPrimitiveBeat.normalizedFromPrimitive, true);
+const primitiveEvidenceAnalysis = structuredClone(fragmentAnalysis);
+primitiveEvidenceAnalysis.evidenceLedger.hookEvidence = [primitiveEvidenceText];
+primitiveEvidenceAnalysis.sourceMeta = { usableForSkillLearning: true, usableForLearning: true };
+const primitiveValidation = validateEvidenceSourceText(primitiveEvidenceAnalysis, fragmentText);
+assert.ok(primitiveValidation.validCount > 0);
+assert.equal(typeof primitiveEvidenceAnalysis.evidenceLedger.hookEvidence[0], "object");
+assert.equal(primitiveEvidenceAnalysis.evidenceLedger.hookEvidence[0].sourceText, primitiveEvidenceText);
+assert.equal(primitiveEvidenceAnalysis.evidenceLedger.hookEvidence[0].summary, primitiveEvidenceText);
+assert.equal(primitiveEvidenceAnalysis.evidenceLedger.hookEvidence[0].normalizedFromPrimitive, true);
+applyEvidenceValidationToAnalysis(primitiveEvidenceAnalysis, fragmentText);
+assert.ok(primitiveEvidenceAnalysis.sourceMeta.normalizedEvidenceEntries > 0);
+assert.equal(primitiveEvidenceAnalysis.sourceMeta.needsReview, true);
+assert.equal(primitiveEvidenceAnalysis.sourceMeta.usableForSkillLearning, false);
+assert.equal(primitiveEvidenceAnalysis.sourceMeta.usableForLearning, false);
+const primitiveBeatAnalysis = structuredClone(fragmentAnalysis);
+primitiveBeatAnalysis.episodeBeatLedger = ["火车危机"];
+assert.doesNotThrow(() => validateEvidenceSourceText(primitiveBeatAnalysis, fragmentText));
+assert.equal(typeof primitiveBeatAnalysis.episodeBeatLedger[0], "object");
+assert.equal(primitiveBeatAnalysis.episodeBeatLedger[0].beatSummary, "火车危机");
+assert.equal(primitiveBeatAnalysis.episodeBeatLedger[0].normalizedFromPrimitive, true);
+const malformedEvidenceAnalysis = structuredClone(fragmentAnalysis);
+malformedEvidenceAnalysis.evidenceLedger.hookEvidence = [null, 123, false];
+assert.doesNotThrow(() => validateEvidenceSourceText(malformedEvidenceAnalysis, fragmentText));
+assert.ok(malformedEvidenceAnalysis.evidenceLedger.hookEvidence.every((item) => typeof item === "object"));
+assert.ok(malformedEvidenceAnalysis.evidenceLedger.hookEvidence.every((item) => item.needsReview || item.invalidSourceText));
 
 state.currentProject.ideaEvaluation = evaluateIdea(state.currentProject);
 state.currentProject.directionCandidates = generateDirections(state.currentProject);
@@ -769,6 +809,7 @@ assert.ok(appSource.includes("Beat 账本"));
 assert.ok(appSource.includes("确认这是完整剧本"));
 assert.ok(appSource.includes("sourceText 校验"));
 assert.ok(appSource.includes("原文未命中，需复核"));
+assert.ok(appSource.includes("模型返回为字符串，已自动标准化，需复核"));
 assert.ok(appSource.includes("usableForCaseSave"));
 assert.ok(appSource.includes("analysis.caseScope === \"full_script\" ? \"已加入完整案例库\" : \"已按片段/开头/单集案例保存\""));
 assert.ok(appSource.includes("async function handleAction(payload)"));

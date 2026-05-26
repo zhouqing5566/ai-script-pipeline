@@ -1379,16 +1379,18 @@ function renderEvidenceLedger(ledger = {}) {
     ...(ledger.goldfingerEvidence || []),
     ...(ledger.suspenseEvidence || []),
     ...(ledger.endingEvidence || []),
-    ...(ledger.conflictBeats || [])
+    ...(ledger.conflictBeats || []),
+    ...(ledger.characterMentions || [])
   ];
   if (!items.length) return emptyState("暂无证据账本", "模型或本地规则未能从原文中抽取到可审计证据。");
   return `
     <div class="ledger-list">
       ${items
-        .map(
-          (item) => `
+        .map((rawItem, index) => {
+          const item = normalizeDisplayEvidenceItem(rawItem, index);
+          return `
         <article class="ledger-row">
-          <div><strong>${escapeHtml(item.id)}</strong><span>${escapeHtml(item.evidenceType || "evidence")}</span>${item.invalidSourceText ? "<em>原文未命中，需复核</em>" : ""}</div>
+          <div><strong>${escapeHtml(item.id)}</strong><span>${escapeHtml(item.evidenceType || "evidence")}</span>${item.normalizedFromPrimitive ? "<em>模型返回为字符串，已自动标准化，需复核</em>" : ""}${item.invalidSourceText ? "<em>原文未命中，需复核</em>" : ""}</div>
           <blockquote>${escapeHtml(item.sourceText || "")}</blockquote>
           ${keyValueGrid([
             ["证据说明", item.summary],
@@ -1396,8 +1398,8 @@ function renderEvidenceLedger(ledger = {}) {
             ["关联 Beat", item.relatedBeatIds],
             ["信心", Math.round((item.confidence || 0) * 100) + "%"]
           ])}
-        </article>`
-        )
+        </article>`;
+        })
         .join("")}
     </div>
   `;
@@ -1408,10 +1410,11 @@ function renderBeatLedger(beats = []) {
   return `
     <div class="ledger-list">
       ${beats
-        .map(
-          (beat) => `
+        .map((rawBeat, index) => {
+          const beat = normalizeDisplayBeatItem(rawBeat, index);
+          return `
         <article class="ledger-row beat">
-          <div><strong>${escapeHtml(beat.beatId)}</strong><span>第 ${beat.episodeNo ?? "?"} 集 / 场 ${beat.sceneNo ?? "?"}</span>${beat.invalidSourceText ? "<em>原文未命中，需复核</em>" : ""}</div>
+          <div><strong>${escapeHtml(beat.beatId)}</strong><span>第 ${beat.episodeNo ?? "?"} 集 / 场 ${beat.sceneNo ?? "?"}</span>${beat.normalizedFromPrimitive ? "<em>模型返回为字符串，已自动标准化，需复核</em>" : ""}${beat.invalidSourceText ? "<em>原文未命中，需复核</em>" : ""}</div>
           <blockquote>${escapeHtml(beat.sourceText || "")}</blockquote>
           ${keyValueGrid([
             ["Beat 摘要", beat.beatSummary],
@@ -1422,8 +1425,8 @@ function renderBeatLedger(beats = []) {
             ["关联模块", beat.relatedModules],
             ["信心", Math.round((beat.confidence || 0) * 100) + "%"]
           ])}
-        </article>`
-        )
+        </article>`;
+        })
         .join("")}
     </div>
   `;
@@ -2744,8 +2747,60 @@ function countEvidenceItems(ledger = {}) {
     ...(ledger.goldfingerEvidence || []),
     ...(ledger.suspenseEvidence || []),
     ...(ledger.endingEvidence || []),
-    ...(ledger.conflictBeats || [])
+    ...(ledger.conflictBeats || []),
+    ...(ledger.characterMentions || [])
   ].length;
+}
+
+function normalizeDisplayEvidenceItem(item, index = 0) {
+  if (item && typeof item === "object") {
+    return {
+      ...item,
+      id: item.id || `E_DISPLAY_${index + 1}`,
+      sourceText: item.sourceText || item.summary || "",
+      summary: item.summary || item.sourceText || "",
+      relatedCharacters: Array.isArray(item.relatedCharacters) ? item.relatedCharacters : [],
+      relatedBeatIds: Array.isArray(item.relatedBeatIds) ? item.relatedBeatIds : []
+    };
+  }
+  const sourceText = item === null || item === undefined ? "" : String(item);
+  return {
+    id: `E_DISPLAY_${index + 1}`,
+    evidenceType: "evidence",
+    sourceText,
+    summary: sourceText || "证据结构缺失",
+    relatedCharacters: [],
+    relatedBeatIds: [],
+    confidence: sourceText ? 0.55 : 0.1,
+    normalizedFromPrimitive: true,
+    needsReview: true,
+    invalidSourceText: !sourceText
+  };
+}
+
+function normalizeDisplayBeatItem(beat, index = 0) {
+  if (beat && typeof beat === "object") {
+    return {
+      ...beat,
+      beatId: beat.beatId || `B_DISPLAY_${index + 1}`,
+      sourceText: beat.sourceText || beat.beatSummary || "",
+      beatSummary: beat.beatSummary || beat.sourceText || "",
+      audienceEmotion: Array.isArray(beat.audienceEmotion) ? beat.audienceEmotion : [],
+      relatedModules: Array.isArray(beat.relatedModules) ? beat.relatedModules : []
+    };
+  }
+  const sourceText = beat === null || beat === undefined ? "" : String(beat);
+  return {
+    beatId: `B_DISPLAY_${index + 1}`,
+    sourceText,
+    beatSummary: sourceText || "Beat 结构缺失",
+    audienceEmotion: [],
+    relatedModules: [],
+    confidence: sourceText ? 0.45 : 0.1,
+    normalizedFromPrimitive: true,
+    needsReview: true,
+    invalidSourceText: !sourceText
+  };
 }
 
 function findMissingEvidenceModules(analysis = {}) {
