@@ -844,7 +844,7 @@ async function testProvider(providerId) {
 function hasUnsavedProviderFormChanges(provider) {
   if (!provider) return false;
   const apiKeyInput = document.querySelector('[data-provider-field="apiKey"]')?.value?.trim() || "";
-  if (apiKeyInput) return true;
+  if (apiKeyInput && apiKeyInput !== provider.apiKey) return true;
   const enabled = document.querySelector('[data-provider-field="enabled"]')?.checked || false;
   return (
     readProviderField("name") !== provider.name ||
@@ -1687,7 +1687,7 @@ function renderProviderForm(provider) {
         <select data-provider-field="requestFormat">${requestFormatTypes.map((type) => `<option value="${type}" ${(provider.requestFormat || "auto") === type ? "selected" : ""}>${type}</option>`).join("")}</select>
       </label>
       <label>Base URL<input data-provider-field="baseUrl" value="${escapeAttr(provider.baseUrl)}" /></label>
-      <label>API Key<input data-provider-field="apiKey" type="password" placeholder="${escapeAttr(maskApiKey(provider.apiKey))}" /></label>
+      <label>API Key<input data-provider-field="apiKey" type="password" autocomplete="new-password" data-1p-ignore="true" placeholder="${escapeAttr(maskApiKey(provider.apiKey))}" /></label>
       <label>是否启用<input data-provider-field="enabled" type="checkbox" ${provider.enabled ? "checked" : ""} /></label>
       <label>优先级<input data-provider-field="priority" type="number" value="${provider.priority}" /></label>
       <label>超时时间 ms<input data-provider-field="timeoutMs" type="number" value="${provider.timeoutMs}" /></label>
