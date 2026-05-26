@@ -1,10 +1,12 @@
-const episodeMarkerPattern = /(?:^|\n)\s*(第\s*([0-9０-９零〇一二两三四五六七八九十百千]+)\s*[集话回章][^\n]*)/g;
+import { splitScriptIntoEpisodes } from "./script-splitter.js";
 
 export function detectScriptCoverage(scriptText = "", userEpisodeCount = null, options = {}) {
   const text = String(scriptText || "").trim();
   const userConfirmedFullScript = Boolean(options.userConfirmedFullScript);
   const userCount = Number(userEpisodeCount) > 0 ? Number(userEpisodeCount) : null;
-  const detectedEpisodeMarkers = [...text.matchAll(episodeMarkerPattern)].map((match) => match[1].trim());
+  const split = splitScriptIntoEpisodes(text);
+  const markerEpisodes = (split.episodes || []).filter((episode) => episode.detectedBy === "episode_marker" || episode.detectedBy === "heading");
+  const detectedEpisodeMarkers = markerEpisodes.map((episode) => episode.title);
   const detectedEpisodeCount = uniqueEpisodeMarkerCount(detectedEpisodeMarkers);
   const hasEpisodeMarkers = detectedEpisodeCount > 0;
   const dialogueLineCount = (text.match(/^[\s\S]{0,12}[：:]/gm) || []).length;
@@ -38,6 +40,7 @@ export function detectScriptCoverage(scriptText = "", userEpisodeCount = null, o
   const allowedCaseScope = decideCaseScope({ inputType, detectedEpisodeMarkers });
   const warnings = buildCoverageWarnings({
     inputType,
+    userConfirmedFullScript,
     userCount,
     detectedEpisodeCount,
     coverageRatio,
@@ -53,6 +56,7 @@ export function detectScriptCoverage(scriptText = "", userEpisodeCount = null, o
     detectedEpisodeMarkers,
     estimatedCoverageRatio: coverageRatio,
     fullScriptConfidence,
+    completenessSource: completenessSource({ userConfirmedFullScript, fullScriptByUserCount, fullScriptByEnding, detectedEpisodeCount, userCount }),
     requiresManualFullScriptConfirmation,
     coverageReason: coverageReason({ inputType, detectedEpisodeCount, userCount, coverageRatio, looksLikeOutline, looksLikeSynopsis }),
     canAnalyzeOpening,
@@ -102,8 +106,14 @@ function decideCaseScope({ inputType, detectedEpisodeMarkers }) {
   return "fragment_case";
 }
 
-function buildCoverageWarnings({ inputType, userCount, detectedEpisodeCount, coverageRatio, canAnalyzeFullMainline, canAnalyzeEnding }) {
+function buildCoverageWarnings({ inputType, userConfirmedFullScript, userCount, detectedEpisodeCount, coverageRatio, canAnalyzeFullMainline, canAnalyzeEnding }) {
   const warnings = [];
+  if (userConfirmedFullScript && userCount && detectedEpisodeCount < Math.max(1, Math.floor(userCount * 0.5))) {
+    warnings.push(`用户确认这是完整剧本，但系统仅检测到 ${detectedEpisodeCount} 集。请确认文本是否包含完整内容。`);
+  }
+  if (userCount && detectedEpisodeCount >= userCount && inputType === "full_script") {
+    warnings.push(`系统检测到 ${detectedEpisodeCount} 集，覆盖用户声明集数。`);
+  }
   if (userCount && detectedEpisodeCount && detectedEpisodeCount < userCount) {
     warnings.push(`用户填写 ${userCount} 集，但文本只检测到 ${detectedEpisodeCount} 集，完整主线/结局/全剧分集功能只能作为推断。`);
   }
@@ -126,4 +136,13 @@ function coverageReason({ inputType, detectedEpisodeCount, userCount, coverageRa
   if (inputType === "full_script") return `检测到 ${detectedEpisodeCount} 个分集标记，覆盖比例约 ${Math.round(coverageRatio * 100)}%。`;
   if (userCount) return `用户填写 ${userCount} 集，检测到 ${detectedEpisodeCount} 集，覆盖比例约 ${Math.round(coverageRatio * 100)}%。`;
   return "未检测到足够分集标记，按片段或局部剧本处理。";
+}
+
+function completenessSource({ userConfirmedFullScript, fullScriptByUserCount, fullScriptByEnding, detectedEpisodeCount, userCount }) {
+  const sources = [];
+  if (detectedEpisodeCount) sources.push("系统检测");
+  if (userConfirmedFullScript) sources.push("用户手动确认");
+  if (fullScriptByEnding) sources.push("终局信号");
+  if (fullScriptByUserCount || (userCount && detectedEpisodeCount)) sources.push("覆盖比例估算");
+  return sources.length ? sources : ["未知"];
 }

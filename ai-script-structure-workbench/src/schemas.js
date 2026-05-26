@@ -14,6 +14,10 @@ export const navItems = [
 
 export const taskLabels = {
   analyzeScript: "剧本结构分析",
+  analyzeScriptChunk: "剧本切块分析",
+  analyzeEpisodeChunk: "分集 Chunk 分析",
+  aggregateScriptAnalysis: "全剧结构聚合",
+  mergeEvidenceLedAnalysis: "证据分析合并",
   extractPatterns: "模式提取",
   classifyCase: "案例分类",
   generateSkillSuggestion: "Skill 优化建议",

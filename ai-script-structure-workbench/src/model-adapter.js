@@ -22,6 +22,7 @@ import { parseJsonWithRepair, extractObjectBody } from "./json-repair.js";
 import { schemaValidationMessage, validateTaskOutput } from "./schema-validator.js";
 import { resolveRequestFormat } from "./request-format.js";
 import { applyEvidenceValidationToAnalysis } from "./evidence-validator.js";
+import { aggregateScriptAnalysis, analyzeEpisodeChunk, mergeEvidenceLedAnalysis } from "./long-script-analysis.js";
 
 export async function callModel({
   taskType,
@@ -515,6 +516,13 @@ function dispatchTask(taskType, input, state) {
   switch (taskType) {
     case "analyzeScript":
       return analyzeScript(input);
+    case "analyzeScriptChunk":
+    case "analyzeEpisodeChunk":
+      return analyzeEpisodeChunk(input);
+    case "aggregateScriptAnalysis":
+      return aggregateScriptAnalysis(input);
+    case "mergeEvidenceLedAnalysis":
+      return mergeEvidenceLedAnalysis(input);
     case "evaluateIdea":
       return evaluateIdea(project);
     case "generateDirections":
@@ -571,7 +579,7 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
     warnings.push(`模型返回包含 ${unwrapped.unwrapPath.join(".")} 外层，已自动展开为任务根对象。`);
   }
 
-  if (taskType !== "analyzeScript") {
+  if (!isAnalyzeRootTask(taskType)) {
     return {
       value: unwrapped.value,
       warnings,
@@ -587,11 +595,11 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
   const shape = validateTaskOutput(taskType, unwrapped.value);
   if (shape.ok) {
     const meta = createAnalyzeSourceMeta({ source: unwrapped.value, unwrapped, missingCoreSections: [] });
-    return { value: stabilizeAnalyzeScriptOutput(unwrapped.value, inputMeta, meta), warnings, meta };
+    return { value: stabilizeAnalyzeScriptOutput(unwrapped.value, analyzeInputMeta(inputMeta), meta), warnings, meta };
   }
 
   const meta = createAnalyzeSourceMeta({ source: unwrapped.value, unwrapped, issues: shape.issues });
-  const normalized = coerceAnalyzeScriptOutput(unwrapped.value, inputMeta, shape.issues, meta);
+  const normalized = coerceAnalyzeScriptOutput(unwrapped.value, analyzeInputMeta(inputMeta), shape.issues, meta);
   warnings.push(
     meta.blockedSave
       ? "真实模型输出缺少多个核心分析模块，已作为待复核草稿展示并阻止直接入库。请执行结构修复或重新分析。"
@@ -602,11 +610,11 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
 
 function unwrapTaskPayload(value, taskType) {
   if (!isPlainObject(value)) return { value, changed: false, wrapperKey: null, unwrapPath: [] };
-  const wrapperKeys = taskType === "analyzeScript" ? ["scriptAnalysis", "analysis", "result", "data", "output", "payload", "content"] : ["result", "data", "output", "payload", "content"];
+  const wrapperKeys = isAnalyzeRootTask(taskType) ? ["scriptAnalysis", "analysis", "result", "data", "output", "payload", "content"] : ["result", "data", "output", "payload", "content"];
   let current = value;
   const unwrapPath = [];
   for (let depth = 0; depth < 5 && isPlainObject(current); depth += 1) {
-    if (taskType === "analyzeScript" && hasAnalyzeCoreField(current)) break;
+    if (isAnalyzeRootTask(taskType) && hasAnalyzeCoreField(current)) break;
     const key = wrapperKeys.find((candidate) => current[candidate] && (isPlainObject(current[candidate]) || Array.isArray(current[candidate])));
     if (!key) break;
     if (!isWrapperPayload(current, key)) break;
@@ -649,6 +657,14 @@ const analyzeCoreSections = [
   "episodeFunctionAnalysis",
   "reusablePatterns"
 ];
+
+function isAnalyzeRootTask(taskType) {
+  return ["analyzeScript", "aggregateScriptAnalysis", "mergeEvidenceLedAnalysis"].includes(taskType);
+}
+
+function analyzeInputMeta(inputMeta = {}) {
+  return inputMeta.originalInput || inputMeta.input || inputMeta;
+}
 
 const locallyDerivableAnalyzeSections = new Set(["coverage", "caseScope", "evidenceLedger", "episodeBeatLedger"]);
 
@@ -1032,6 +1048,10 @@ async function callProvider({ provider, model, messages, options, taskType, rout
 function featureAreaForTask(taskType) {
   const map = {
     analyzeScript: "剧本分析中心",
+    analyzeScriptChunk: "剧本分析中心",
+    analyzeEpisodeChunk: "剧本分析中心",
+    aggregateScriptAnalysis: "剧本分析中心",
+    mergeEvidenceLedAnalysis: "剧本分析中心",
     extractPatterns: "模式资产中心",
     classifyCase: "分类与标签",
     generateSkillSuggestion: "Skill 进化中心",

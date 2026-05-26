@@ -91,7 +91,7 @@ function createSelection({ mode, route, model, provider, reason, taskType }) {
   const maxOutputTokens = clampMaxOutputTokens(requestedMaxOutputTokens, taskType || route?.taskType);
   const optionWarnings = [];
   if (Number(requestedMaxOutputTokens) > maxOutputTokens) {
-    optionWarnings.push(`maxOutputTokens ${requestedMaxOutputTokens} 已按 ${taskType || route?.taskType || "当前任务"} 安全上限 ${maxOutputTokens} 发送，避免真实 API 超时或拒绝。`);
+    optionWarnings.push(`maxOutputTokens ${requestedMaxOutputTokens} 已按 ${taskType || route?.taskType || "当前任务"} 安全上限 ${maxOutputTokens} 发送。该任务已按安全输出上限发送。完整剧本将使用分集分析流程，而不是依赖单次超大输出。`);
   }
   return {
     mode,
@@ -119,6 +119,10 @@ export function clampMaxOutputTokens(value, taskType = "") {
   const requested = Math.max(1, Number(value) || 4096);
   const caps = {
     analyzeScript: 12000,
+    analyzeScriptChunk: 6000,
+    analyzeEpisodeChunk: 6000,
+    aggregateScriptAnalysis: 12000,
+    mergeEvidenceLedAnalysis: 12000,
     schemaRepairAnalyzeScript: 12000,
     generateEpisodeOutline: 16000,
     generateMacroOutline: 12000,

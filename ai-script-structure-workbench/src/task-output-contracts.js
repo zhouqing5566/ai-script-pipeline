@@ -275,9 +275,92 @@ const contracts = {
   "confidence": 0.8
 }
 如果无法确认某项，请填空字符串、空数组或风险说明，但不要省略字段。`
+  ,
+  analyzeEpisodeChunk: `必须返回一个可直接 JSON.parse 的 EpisodeChunkAnalysis 根对象，不得包在 result/data/output 内。
+只分析当前 episodeText，不推断后续全剧结局，不补写未输入集数。
+所有 sourceText 必须来自当前集文本，不得编造。
+本集分集功能、开头钩子、结尾悬念必须引用 episodeBeatLedger 的 beatIds。
+可复用模式必须引用本集 sourceEvidenceIds 或 sourceBeatIds。
+根对象结构：
+{
+  "episodeNo": 1,
+  "title": "本集标题",
+  "coverage": {},
+  "evidenceLedger": {
+    "coverage": {},
+    "scenes": [],
+    "characterMentions": [],
+    "conflictBeats": [],
+    "hookEvidence": [],
+    "goldfingerEvidence": [],
+    "suspenseEvidence": [],
+    "endingEvidence": [],
+    "episodeEvidence": []
+  },
+  "episodeBeatLedger": [
+    {
+      "beatId": "B001",
+      "episodeNo": 1,
+      "sceneNo": 1,
+      "sourceText": "必须来自当前集原文",
+      "beatSummary": "这一 beat 发生了什么",
+      "characters": [],
+      "audienceEmotion": [],
+      "suspenseQuestion": "观众追问",
+      "structureFunction": "结构功能",
+      "reusableValue": "可复用价值",
+      "relatedModules": [],
+      "confidence": 0.8
+    }
+  ],
+  "episodeFunctionAnalysis": {
+    "episodeNo": 1,
+    "title": "集标题",
+    "summary": "本集摘要",
+    "openingHook": "开头钩子",
+    "episodeGoal": "本集目标",
+    "mainConflict": "核心冲突",
+    "keyEvent": "关键事件",
+    "coolMoment": "爽点",
+    "emotionalBeat": "情绪点",
+    "informationGain": "信息增量",
+    "characterFunction": "人物功能",
+    "relationshipChange": "关系变化",
+    "themeFunction": "主题功能",
+    "foreshadowingPlanted": [],
+    "foreshadowingUsed": [],
+    "cliffhanger": "结尾悬念",
+    "episodeFunctionType": [],
+    "weaknessNotes": [],
+    "score": 80,
+    "evidenceIds": [],
+    "evidenceBeatIds": [],
+    "inferenceLevel": "原文明确 | 合理推断 | 创作建议 | 不足以判断",
+    "confidence": 0.8,
+    "riskNotes": []
+  },
+  "hookAnalysis": {},
+  "characterMentions": [],
+  "goldfingerEvidence": [],
+  "suspenseEvidence": [],
+  "reusablePatterns": [],
+  "openQuestions": [],
+  "continuityNotes": [],
+  "confidence": 0.8,
+  "needsReview": false
+}`,
+  aggregateScriptAnalysis: `必须返回标准 analyzeScript 根对象。
+只基于 episodeChunkAnalyses 的 evidenceLedger、episodeBeatLedger、episodeFunctionAnalysis 做聚合。
+不要重新编造原文证据；全剧主题/主线/人物/结局必须引用已有 evidenceIds / beatIds。
+如果 failedChunks 不为空，必须在 sourceMeta.failedChunks 中保留，sourceMeta.needsReview=true，usableForSkillLearning=false。
+如果后段集数缺失，不得输出确定性结局，也不得把 endingAnalysis.inferenceLevel 标为“原文明确”。
+输出结构与 analyzeScript 完全一致，并额外包含 sourceMeta.chunkedAnalysis=true、sourceMeta.chunkCount、sourceMeta.failedChunks。`,
+  mergeEvidenceLedAnalysis: `合并 evidence-led 分析结果，要求与 aggregateScriptAnalysis 相同。`
 };
 
 export function getTaskOutputContract(taskType) {
+  if (taskType === "analyzeScriptChunk") return contracts.analyzeEpisodeChunk;
+  if (taskType === "mergeEvidenceLedAnalysis") return contracts.aggregateScriptAnalysis;
   if (taskType === "schemaRepairAnalyzeScript") {
     return [
       "这是 analyzeScript 的结构修复任务。只允许根据原始模型输出和原剧本文本整理为标准结构，不允许编造没有依据的分析。",

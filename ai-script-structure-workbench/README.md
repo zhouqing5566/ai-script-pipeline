@@ -32,6 +32,7 @@
 - 导出：完整项目 JSON、剧本分析 Markdown、分集细纲 Markdown、人物小传 Markdown、审计报告 Markdown、成稿 Markdown
 - Skill 可编辑资产系统：新增、编辑、复制、停用、启用、回滚、Demo 合并入口、版本记录、适用范围、规则、Prompt 补充、正反例、评估标准、风险提示、模型偏好
 - API 与模型配置中心：多 Provider、多模型、任务路由、功能区路由、Skill 模型偏好、项目级覆盖预留、备用模型、调用日志、安全说明
+- 长剧本分集分析：完整 5 集以上或长文本剧本会自动切换为“分集/切块分析 → 全剧聚合 → 证据校验”，不再依赖单次超大 `analyzeScript`
 
 ## 运行方式
 
@@ -80,6 +81,7 @@ npm run check
 - `requestFormat=openai_chat` 时即使模型名包含 Gemini 也走 OpenAI-compatible
 - DeepSeek 模板默认 `requestFormat=openai_chat`
 - 新建模型默认不发送 `response_format`，除非用户明确勾选 JSON 支持
+- 完整剧本 5 集以上会走长剧本分析管线，检查分集切分、失败 chunk 标记、全剧聚合、Skill 学习沉淀门禁
 
 ## 模式说明
 
@@ -94,6 +96,7 @@ npm run check
 - `/api/model-call` 与 `/api/test-provider` 的真实路径只从前端接收 `providerId/modelId`，服务端再从 `data/settings/model-settings.json` 读取真实 Key，避免把完整 Provider 和 API Key 放进任务请求体。
 - 保存 Provider、模型、路由、API Mode 或“一键切换核心任务”后，前端会等待 `/api/settings` 同步完成；看到“配置已同步到本地服务”后再测试，能避免服务端读取旧配置。
 - 系统会按任务类型限制过大的 `maxOutputTokens`，避免把 `200000` 这类输出上限直接发给 Provider 导致长任务超时；调用日志会记录对应警告。
+- 路由保存时也会提前按安全上限 clamp：`analyzeScript=12000`、`analyzeEpisodeChunk=6000`、`aggregateScriptAnalysis=12000`。完整剧本不会靠单次超大输出完成，而是自动进入分集分析流程。
 - 真实 API 调用失败时不会静默切回 Demo。
 - 只有路由中配置了可用备用真实模型时才会 fallback，并在调用日志中记录 `usedFallback`。
 - 如果某个任务实际选择了 DemoRuleEngine，系统会在 UI、调用日志和 `ModelCallResult.warnings` 中提示：当前为真实 API Mode，但该任务路由仍指向 Demo 模型。
@@ -158,6 +161,30 @@ settingsUpdatedAt 可辅助判断本次任务是否读到了最新同步配置
 如果 Provider 测试通过，但完整剧本分析仍超时，优先检查该任务路由的 `maxOutputTokens` 和 `timeoutMs`。`deepseek-v4-pro` 等推理模型在长 JSON 任务上可能明显慢于普通 chat/flash 模型，建议先用轻量路由测试确认链路，再把生产任务切到更快模型或提高超时。
 
 Provider 测试也会走服务端 settings：如果刚修改了 Base URL、API Key、启用状态或请求格式，请先点击“保存 Provider”，再点击“测试连接”。测试连接不会退回去拿 Demo 模型冒充当前 Provider 的结果；当前 Provider 下没有启用模型时会直接报错。
+
+## 长剧本分析流程
+
+当满足以下任一条件时，系统不会直接发起单次 `analyzeScript`：
+
+```text
+coverage.inputType = full_script 且用户声明集数 >= 5
+系统检测集数 >= 5
+剧本文本超过 LONG_SCRIPT_CHAR_LIMIT
+用户勾选“确认这是完整剧本”且集数 >= 5
+```
+
+流程会变成：
+
+```text
+detectScriptCoverage
+→ splitScriptIntoEpisodes
+→ analyzeEpisodeChunk 逐集/逐 chunk 分析
+→ aggregateScriptAnalysis 全剧聚合
+→ evidence/sourceText 校验
+→ 标准 analyzeScript 分析档案
+```
+
+分析页会显示“长剧本分析进度”，包括覆盖检测、剧本切分、每集状态、token 估算、失败原因和“重试失败分集”。失败 chunk 不会被静默跳过；最终结果会写入 `sourceMeta.failedChunks`，并禁止正式 Skill 学习沉淀，只允许作为待复核草稿处理。
 
 ## 配置 OpenAI-compatible API
 

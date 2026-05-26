@@ -5,6 +5,15 @@ import { auditDraft } from "./audit.js";
 import { loadRuntimeSettings, mergeRuntimeApiConfig, resetLocalState, syncRuntimeSettings, writeExport } from "./storage.js";
 import { parseScriptFile } from "./file-parser.js";
 import { normalizeRelationshipEdge } from "./analysis-normalizers.js";
+import { detectScriptCoverage } from "./script-coverage.js";
+import {
+  aggregateScriptAnalysis,
+  createEpisodeChunkInput,
+  createLongAnalysisProgress,
+  prepareLongScriptChunks,
+  shouldUseLongScriptAnalysis
+} from "./long-script-analysis.js";
+import { clampMaxOutputTokens } from "./model-router.js";
 import {
   navItems,
   analysisTabs,
@@ -128,11 +137,10 @@ async function handleAction(payload) {
         showToast("已重置为初始 Demo 数据，API/模型配置已保留");
         break;
       case "analyze-script":
-        await executeTask("analyzeScript", (state) => state.scriptInput, (state, output, log) => {
-          state.currentAnalysis = output;
-          state.currentProject.analysisId = output.id;
-          state.modelLogs = [log, ...state.modelLogs].slice(0, 80);
-        }, "完成剧本结构分析", { targetType: "analysis", action: "generate" });
+        await executeAnalyzeScript();
+        break;
+      case "retry-failed-chunks":
+        await executeLongScriptAnalysis({ retryFailedOnly: true });
         break;
       case "save-case":
         saveCurrentAnalysisAsCase();
@@ -436,6 +444,190 @@ async function syncApiSettings(options = {}) {
     showToast(result.ok ? successMessage : `${failureMessage}${result.error ? `：${result.error}` : ""}`);
   }
   return result;
+}
+
+async function executeAnalyzeScript() {
+  const current = commitOpenInputsBeforeAction("剧本结构分析");
+  const input = current.scriptInput;
+  const coverage = detectScriptCoverage(input.text, input.episodeCount, { userConfirmedFullScript: input.userConfirmedFullScript });
+  if (shouldUseLongScriptAnalysis(input, coverage)) {
+    await executeLongScriptAnalysis({ initialState: current, coverage });
+    return;
+  }
+  await executeTask("analyzeScript", (state) => state.scriptInput, (state, output, log) => {
+    state.currentAnalysis = output;
+    state.currentProject.analysisId = output.id;
+    state.modelLogs = [log, ...state.modelLogs].slice(0, 80);
+    state.longScriptAnalysisProgress = null;
+  }, "完成剧本结构分析", { targetType: "analysis", action: "generate" });
+}
+
+async function executeLongScriptAnalysis({ initialState = null, coverage = null, retryFailedOnly = false } = {}) {
+  let current = initialState || commitOpenInputsBeforeAction(retryFailedOnly ? "重试失败分集" : "长剧本分集分析");
+  const input = current.scriptInput;
+  const currentCoverage = coverage || detectScriptCoverage(input.text, input.episodeCount, { userConfirmedFullScript: input.userConfirmedFullScript });
+  const split = prepareLongScriptChunks(input);
+  let chunks = split.episodes || [];
+  if (retryFailedOnly) {
+    const failedNos = new Set((current.longScriptAnalysisProgress?.failedChunks || []).map((item) => item.episodeNo));
+    chunks = chunks.filter((chunk) => failedNos.has(chunk.episodeNo));
+    if (!chunks.length) chunks = split.episodes || [];
+  }
+  const progress = createLongAnalysisProgress(chunks);
+  progress.steps[1].status = "成功";
+  progress.currentStep = retryFailedOnly ? "重试失败分集" : "剧本切分";
+  progress.warnings = split.warnings || [];
+  busyAction = "长剧本分析";
+  store.setState((state) => {
+    state.longScriptAnalysisProgress = progress;
+    return state;
+  }, retryFailedOnly ? "重试失败分集分析" : "开始长剧本分集分析", { targetType: "analysis", action: "generate", light: true });
+  render();
+
+  const episodeChunkAnalyses = [];
+  const failedChunks = [];
+  const logs = [];
+  for (const chunk of chunks) {
+    updateLongProgress((draft) => {
+      draft.currentStep = `第 ${chunk.episodeNo || "?"} 集分析中`;
+      markChunkStatus(draft, chunk, "分析中", "");
+    });
+    const chunkInput = createEpisodeChunkInput({
+      input,
+      chunk,
+      coverage: currentCoverage,
+      globalContextSummary: `${input.title || "未命名剧本"}｜${input.genre || ""}｜用户声明 ${input.episodeCount || "未填"} 集`
+    });
+    try {
+      const result = await callModel({
+        taskType: "analyzeEpisodeChunk",
+        featureArea: "剧本分析中心",
+        projectId: current.currentProject.id,
+        inputMeta: chunkInput,
+        schema: true,
+        state: store.getState()
+      });
+      logs.unshift(result.log);
+      if (!result.success) throw Object.assign(new Error(result.error || "分集分析失败"), { result });
+      episodeChunkAnalyses.push(result.parsedJson || result.outputText);
+      updateLongProgress((draft) => {
+        markChunkStatus(draft, chunk, "成功", "");
+      });
+    } catch (error) {
+      const failed = {
+        episodeNo: chunk.episodeNo,
+        title: chunk.title,
+        detectedBy: chunk.detectedBy,
+        error: error.message || "分集分析失败"
+      };
+      failedChunks.push(failed);
+      if (error.log) logs.unshift(error.log);
+      updateLongProgress((draft) => {
+        markChunkStatus(draft, chunk, "失败", failed.error);
+        draft.failedChunks = failedChunks;
+      });
+    }
+  }
+
+  updateLongProgress((draft) => {
+    draft.currentStep = "全剧结构聚合";
+    draft.steps[2].status = "分析中";
+    draft.failedChunks = failedChunks;
+  });
+  let finalAnalysis = null;
+  let aggregateLog = null;
+  const aggregateInput = {
+    projectMeta: {
+      projectId: current.currentProject.id,
+      title: input.title,
+      genre: input.genre,
+      episodeCount: input.episodeCount
+    },
+    originalInput: input,
+    coverage: currentCoverage,
+    episodeChunkAnalyses,
+    allOpenQuestions: episodeChunkAnalyses.flatMap((item) => item.openQuestions || []),
+    allReusablePatterns: episodeChunkAnalyses.flatMap((item) => item.reusablePatterns || []),
+    allCharacterMentions: episodeChunkAnalyses.flatMap((item) => item.characterMentions || []),
+    failedChunks
+  };
+  try {
+    const aggregateResult = await callModel({
+      taskType: "aggregateScriptAnalysis",
+      featureArea: "剧本分析中心",
+      projectId: current.currentProject.id,
+      inputMeta: aggregateInput,
+      schema: true,
+      state: store.getState()
+    });
+    aggregateLog = aggregateResult.log;
+    if (!aggregateResult.success) throw Object.assign(new Error(aggregateResult.error || "全剧聚合失败"), { result: aggregateResult });
+    finalAnalysis = aggregateResult.parsedJson || aggregateScriptAnalysis(aggregateInput);
+    finalAnalysis.coverage = finalAnalysis.coverage || currentCoverage;
+    finalAnalysis.caseScope = finalAnalysis.caseScope || currentCoverage.allowedCaseScope || "full_script";
+    finalAnalysis.sourceMeta ||= {};
+    finalAnalysis.sourceMeta.chunkedAnalysis = true;
+    finalAnalysis.sourceMeta.chunkCount = episodeChunkAnalyses.length + failedChunks.length;
+    finalAnalysis.sourceMeta.successfulChunks = episodeChunkAnalyses.length;
+    finalAnalysis.sourceMeta.failedChunks = failedChunks;
+    if (failedChunks.length) {
+      finalAnalysis.sourceMeta.needsReview = true;
+      finalAnalysis.sourceMeta.usableForSkillLearning = false;
+      finalAnalysis.sourceMeta.usableForLearning = false;
+      finalAnalysis.usableForLearning = false;
+    }
+  } catch (error) {
+    failedChunks.push({ episodeNo: null, title: "全剧结构聚合", detectedBy: "aggregate", error: error.message || "全剧聚合失败" });
+    if (error.log) aggregateLog = error.log;
+    finalAnalysis = aggregateScriptAnalysis({ ...aggregateInput, failedChunks });
+    finalAnalysis.sourceMeta.aggregateFailed = true;
+    finalAnalysis.sourceMeta.needsReview = true;
+    finalAnalysis.sourceMeta.usableForSkillLearning = false;
+    finalAnalysis.sourceMeta.usableForLearning = false;
+    finalAnalysis.sourceMeta.warnings = [...(finalAnalysis.sourceMeta.warnings || []), `全剧聚合模型失败，已使用本地合并兜底：${error.message || "未知错误"}`];
+  }
+
+  updateLongProgress((draft) => {
+    draft.currentStep = "证据校验";
+    draft.steps[2].status = aggregateLog?.success === false ? "失败" : "成功";
+    draft.steps[3].status = "成功";
+    draft.failedChunks = failedChunks;
+    draft.active = false;
+  });
+  busyAction = null;
+  current = readOpenInputs(store.getState());
+  store.setState((state) => {
+    state.currentAnalysis = finalAnalysis;
+    state.currentProject.analysisId = finalAnalysis.id;
+    state.currentProject.status = statusLabels.audit;
+    state.modelLogs = [aggregateLog, ...logs, ...state.modelLogs].filter(Boolean).slice(0, 80);
+    state.longScriptAnalysisProgress = {
+      ...(state.longScriptAnalysisProgress || progress),
+      active: false,
+      currentStep: "完成",
+      failedChunks
+    };
+    return state;
+  }, failedChunks.length ? "完成长剧本分集分析（需复核失败分集）" : "完成长剧本分集分析", { targetType: "analysis", action: "generate" });
+  showToast(failedChunks.length ? `长剧本分析完成，但有 ${failedChunks.length} 个失败 chunk，需复核或重试。` : "完成长剧本分集分析");
+}
+
+function updateLongProgress(mutator) {
+  store.setState((state) => {
+    const progress = structuredClone(state.longScriptAnalysisProgress || { chunks: [], steps: [] });
+    mutator(progress);
+    progress.updatedAt = new Date().toISOString();
+    state.longScriptAnalysisProgress = progress;
+    return state;
+  }, "更新长剧本分析进度", { version: false });
+}
+
+function markChunkStatus(progress, chunk, status, error = "") {
+  progress.chunks = (progress.chunks || []).map((item) =>
+    item.episodeNo === chunk.episodeNo && item.startOffset === chunk.startOffset
+      ? { ...item, status, error }
+      : item
+  );
 }
 
 async function executeTask(taskType, inputFactory, applyOutput, summary, options = {}) {
@@ -1024,18 +1216,22 @@ function addRoute() {
 }
 
 async function saveRoute(routeId) {
+  const taskType = readRouteField("taskType");
+  const requestedMaxOutput = Number(readRouteField("maxOutputTokens")) || 4096;
+  const safeMaxOutput = clampMaxOutputTokens(requestedMaxOutput, taskType);
+  const clamped = requestedMaxOutput > safeMaxOutput;
   store.setState((state) => {
     state.apiConfig.routes = state.apiConfig.routes.map((route) =>
       route.id === routeId
         ? {
             ...route,
             featureArea: readRouteField("featureArea"),
-            taskType: readRouteField("taskType"),
+            taskType,
             primaryModelId: readRouteField("primaryModelId"),
             fallbackModelIds: parseCsv(readRouteField("fallbackModelIds")),
             requiredCapabilities: parseCsv(readRouteField("requiredCapabilities")),
             maxInputTokens: Number(readRouteField("maxInputTokens")) || 24000,
-            maxOutputTokens: Number(readRouteField("maxOutputTokens")) || 4096,
+            maxOutputTokens: safeMaxOutput,
             temperature: Number(readRouteField("temperature")) || 0,
             topP: Number(readRouteField("topP")) || 1,
             jsonModeRequired: document.querySelector('[data-route-field="jsonModeRequired"]')?.checked || false,
@@ -1052,7 +1248,11 @@ async function saveRoute(routeId) {
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存模型路由", { targetType: "settings", action: "edit", light: true });
-  await syncApiSettings();
+  await syncApiSettings({
+    successMessage: clamped
+      ? "配置已同步到本地服务。该任务已按安全输出上限发送。完整剧本将使用分集分析流程，而不是依赖单次超大输出。"
+      : "配置已同步到本地服务。"
+  });
 }
 
 function addFeedback() {
@@ -1263,6 +1463,7 @@ function renderAnalysis(state) {
       </div>
       <textarea id="script-text" class="large-textarea" spellcheck="false">${escapeHtml(input.text)}</textarea>
     </section>
+    ${renderLongScriptProgress(state.longScriptAnalysisProgress)}
     ${
       analysis
         ? `
@@ -1305,6 +1506,48 @@ function renderAnalysisSourceAlert(analysis) {
   `;
 }
 
+function renderLongScriptProgress(progress) {
+  if (!progress) return "";
+  return `
+    <section class="panel long-progress-panel">
+      <div class="panel-title">
+        <div>
+          <h2>长剧本分析进度</h2>
+          <p class="muted">完整剧本会按集/切块分析，再聚合全剧结构，避免一次 analyzeScript 超时或输出不完整。</p>
+        </div>
+        ${(progress.failedChunks || []).length ? `<button class="secondary-button" data-action="retry-failed-chunks">${icon("loop")}重试失败分集</button>` : ""}
+      </div>
+      <div class="progress-steps">
+        ${(progress.steps || []).map((step) => `<span class="status-pill ${statusClass(step.status)}">${escapeHtml(step.label)}｜${escapeHtml(step.status)}</span>`).join("")}
+      </div>
+      <p class="muted">当前步骤：${escapeHtml(progress.currentStep || "待分析")}</p>
+      <div class="chunk-progress-list">
+        ${(progress.chunks || [])
+          .map(
+            (chunk) => `
+          <div class="chunk-progress-row ${statusClass(chunk.status)}">
+            <strong>${escapeHtml(chunk.title || `第 ${chunk.episodeNo || "?"} 集`)}</strong>
+            <span>${escapeHtml(chunk.status || "待分析")}</span>
+            <span>估算 ${chunk.tokenEstimate || 0} tokens</span>
+            <span>${escapeHtml(chunk.detectedBy || "")}</span>
+            ${chunk.error ? `<em>${escapeHtml(chunk.error)}</em>` : ""}
+          </div>`
+          )
+          .join("")}
+      </div>
+      ${(progress.warnings || []).length ? `<div class="warning-list">${progress.warnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>` : ""}
+    </section>
+  `;
+}
+
+function statusClass(status = "") {
+  if (status === "成功") return "ok";
+  if (status === "失败") return "bad";
+  if (status === "分析中") return "running";
+  if (status === "待重试") return "warn";
+  return "";
+}
+
 function renderCoverageSummary(analysis) {
   const coverage = analysis.coverage || analysis.evidenceLedger?.coverage || {};
   const certain = [
@@ -1325,9 +1568,14 @@ function renderCoverageSummary(analysis) {
         <p>${escapeHtml(coverage.coverageReason || "等待完整度检测。")}</p>
       </div>
       <div>
-        <span>集数检测</span>
-        <strong>${coverage.detectedEpisodeCount ?? 0} / ${coverage.userEpisodeCount ?? "未填"}</strong>
-        <p>覆盖比例 ${Math.round((coverage.estimatedCoverageRatio || 0) * 100)}%</p>
+        <span>用户声明集数</span>
+        <strong>${coverage.userEpisodeCount ?? "未填"}</strong>
+        <p>系统检测集数：${coverage.detectedEpisodeCount ?? 0}</p>
+      </div>
+      <div>
+        <span>完整性来源</span>
+        <strong>${formatValue(coverage.completenessSource || ["未知"])}</strong>
+        <p>覆盖比例估算 ${Math.round((coverage.estimatedCoverageRatio || 0) * 100)}%</p>
       </div>
       <div>
         <span>可确定模块</span>
@@ -1357,6 +1605,9 @@ function renderAnalysisOverview(analysis) {
     </div>
     ${keyValueGrid([
       ["输入类型", labelInputType(coverage.inputType)],
+      ["用户声明集数", coverage.userEpisodeCount ?? "未填"],
+      ["系统检测集数", coverage.detectedEpisodeCount ?? 0],
+      ["完整性来源", coverage.completenessSource || ["未知"]],
       ["原文证据数量", evidenceCount],
       ["剧情 Beat 数量", beatCount],
       ["可确定分析模块", [coverage.canAnalyzeOpening ? "开头" : "", coverage.canAnalyzeEpisodeFunctions ? "已输入分集" : "", coverage.canAnalyzeReusablePatterns ? "片段模式" : ""].filter(Boolean).join("、") || "暂无"],
@@ -1367,6 +1618,8 @@ function renderAnalysisOverview(analysis) {
       ["模型完整度", analysis.sourceMeta?.modelCompletenessScore !== undefined ? `${analysis.sourceMeta.modelCompletenessScore}%` : "未记录"],
       ["sourceText 校验", analysis.sourceMeta?.evidenceValidation ? `${analysis.sourceMeta.evidenceValidation.validCount}/${analysis.sourceMeta.evidenceValidation.checkedCount} 有效` : "未记录"],
       ["无效证据比例", analysis.sourceMeta?.evidenceValidation ? `${Math.round((analysis.sourceMeta.evidenceValidation.invalidEvidenceRatio || 0) * 100)}%` : "未记录"],
+      ["分集分析流程", analysis.sourceMeta?.chunkedAnalysis ? `是，chunk ${analysis.sourceMeta.chunkCount || 0}` : "否"],
+      ["失败 chunk", analysis.sourceMeta?.failedChunks?.length ? analysis.sourceMeta.failedChunks.map((item) => item.title || item.episodeNo).join("、") : "无"],
       ["是否可用于学习沉淀", analysis.sourceMeta?.usableForSkillLearning ? "可用于完整 Skill 沉淀" : "仅可用于片段/钩子/爽点模式参考"],
       ["缺失证据模块", missingEvidenceModules.join("、") || "无"]
     ])}
@@ -1965,8 +2218,10 @@ function renderRouteSettings(config) {
 }
 
 function renderRouteForm(route, config) {
+  const safeCap = clampMaxOutputTokens(Number.MAX_SAFE_INTEGER, route.taskType);
   return `
     <div class="panel-title"><h2>${escapeHtml(route.taskType)}</h2><span class="status-pill">${route.enabled ? "启用" : "停用"}</span></div>
+    <p class="muted">任务安全上限：${escapeHtml(route.taskType)} 单次输出安全上限 ${safeCap} tokens。analyzeScript：12000；analyzeEpisodeChunk：6000；aggregateScriptAnalysis：12000。</p>
     <div class="form-grid three">
       <label>功能区<select data-route-field="featureArea">${featureAreas.map((area) => `<option ${route.featureArea === area ? "selected" : ""}>${area}</option>`).join("")}</select></label>
       <label>任务类型<select data-route-field="taskType">${modelTaskTypes.map((type) => `<option ${route.taskType === type ? "selected" : ""}>${type}</option>`).join("")}</select></label>
@@ -2131,12 +2386,18 @@ function renderAnalysisQualityPanel(analysis) {
       <h2>分析质量面板</h2>
       <div class="quality-list">
         <div><span>输入类型</span><strong>${labelInputType(coverage.inputType)}</strong></div>
-        <div><span>集数覆盖</span><strong>${coverage.detectedEpisodeCount ?? 0} / ${coverage.userEpisodeCount ?? "未填"}</strong></div>
-        <div><span>覆盖比例</span><strong>${Math.round((coverage.estimatedCoverageRatio || 0) * 100)}%</strong></div>
+        <div><span>用户声明集数</span><strong>${coverage.userEpisodeCount ?? "未填"}</strong></div>
+        <div><span>系统检测集数</span><strong>${coverage.detectedEpisodeCount ?? 0}</strong></div>
+        <div><span>完整性来源</span><strong>${formatValue(coverage.completenessSource || ["未知"])}</strong></div>
+        <div><span>覆盖比例估算</span><strong>${Math.round((coverage.estimatedCoverageRatio || 0) * 100)}%</strong></div>
         <div><span>证据 / Beat</span><strong>${evidenceCount} / ${beatCount}</strong></div>
+        <div><span>长剧本分集流程</span><strong>${analysis.sourceMeta?.chunkedAnalysis ? `是｜${analysis.sourceMeta.chunkCount || 0} 个 chunk` : "否"}</strong></div>
+        <div><span>失败 chunk</span><strong>${analysis.sourceMeta?.failedChunks?.length || 0}</strong></div>
         <div><span>sourceText 校验</span><strong>${analysis.sourceMeta?.evidenceValidation ? `${analysis.sourceMeta.evidenceValidation.validCount}/${analysis.sourceMeta.evidenceValidation.checkedCount}` : "未记录"}</strong></div>
         <div><span>无效证据比例</span><strong>${analysis.sourceMeta?.evidenceValidation ? `${Math.round((analysis.sourceMeta.evidenceValidation.invalidEvidenceRatio || 0) * 100)}%` : "未记录"}</strong></div>
         <div><span>无效 evidence/beat</span><strong>${analysis.sourceMeta?.evidenceValidation ? `${analysis.sourceMeta.evidenceValidation.invalidEvidenceIds.length}/${analysis.sourceMeta.evidenceValidation.invalidBeatIds.length}` : "未记录"}</strong></div>
+        <div><span>字符串 evidence 标准化数量</span><strong>${analysis.sourceMeta?.normalizedEvidenceEntries || 0}</strong></div>
+        <div><span>字符串 beat 标准化数量</span><strong>${analysis.sourceMeta?.normalizedBeatEntries || 0}</strong></div>
         <div><span>模型结构完整度</span><strong>${analysis.sourceMeta?.modelCompletenessScore !== undefined ? `${analysis.sourceMeta.modelCompletenessScore}%` : "未记录"}</strong></div>
         <div><span>本地补齐模块</span><strong>${formatValue(analysis.sourceMeta?.localFallbackSections || [])}</strong></div>
         <div><span>blockedSave</span><strong>${analysis.sourceMeta?.blockedSave ? "是" : "否"}</strong></div>

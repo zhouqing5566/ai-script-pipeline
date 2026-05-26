@@ -1684,6 +1684,72 @@ pre {
   }
 }
 
+.long-progress-panel {
+  margin-bottom: 16px;
+}
+
+.progress-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.status-pill.ok {
+  border-color: #86efac;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.status-pill.bad {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.status-pill.running {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.chunk-progress-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.chunk-progress-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) 80px 120px 120px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+}
+
+.chunk-progress-row.ok {
+  border-color: #bbf7d0;
+}
+
+.chunk-progress-row.bad {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.chunk-progress-row.running {
+  border-color: #bfdbfe;
+  background: #f8fbff;
+}
+
+.chunk-progress-row em {
+  color: var(--danger);
+  font-style: normal;
+}
+
 @media (max-width: 1280px) {
   :root {
     --sidebar: 220px;
@@ -1774,6 +1840,7 @@ pre {
   .node-list,
   .three-column,
   .diff-grid,
+  .chunk-progress-row,
   .log-table div {
     grid-template-columns: 1fr;
   }

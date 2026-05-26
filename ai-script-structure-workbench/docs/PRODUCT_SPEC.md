@@ -472,6 +472,84 @@ src/json-repair.js
 → 明确报错
 ```
 
+## 长剧本分集分析
+
+V1.2 增加长剧本分析模式，避免完整 50 集剧本仍然依赖单次 `analyzeScript`。
+
+触发条件：
+
+```text
+coverage.inputType === full_script 且 userEpisodeCount >= 5
+detectedEpisodeCount >= 5
+scriptText.length > LONG_SCRIPT_CHAR_LIMIT
+用户勾选“确认这是完整剧本”且 episodeCount >= 5
+```
+
+新增任务类型：
+
+```text
+analyzeScriptChunk
+analyzeEpisodeChunk
+aggregateScriptAnalysis
+mergeEvidenceLedAnalysis
+```
+
+执行流程：
+
+```text
+detectScriptCoverage
+→ splitScriptIntoEpisodes
+→ analyzeEpisodeChunk
+→ aggregateScriptAnalysis
+→ mergeEvidenceLedAnalysis / evidence validation
+→ 标准 analyzeScript 分析档案
+```
+
+`analyzeEpisodeChunk` 只分析当前集，输出 `EpisodeChunkAnalysis`：
+
+```js
+{
+  episodeNo,
+  title,
+  coverage,
+  evidenceLedger,
+  episodeBeatLedger,
+  episodeFunctionAnalysis,
+  hookAnalysis,
+  characterMentions,
+  goldfingerEvidence,
+  suspenseEvidence,
+  reusablePatterns,
+  openQuestions,
+  continuityNotes,
+  confidence,
+  needsReview
+}
+```
+
+`aggregateScriptAnalysis` 只基于分集分析结果聚合，不重新编造原文证据。最终 `sourceMeta` 必须包含：
+
+```js
+{
+  chunkedAnalysis: true,
+  chunkCount,
+  successfulChunks,
+  failedChunks,
+  needsReview,
+  usableForSkillLearning
+}
+```
+
+如果存在 `failedChunks` 或大量 primitive evidence 标准化，只能保存为待复核完整案例草稿，不允许进入正式 Skill 学习沉淀。
+
+路由安全输出上限：
+
+```text
+analyzeScript: 12000
+analyzeEpisodeChunk: 6000
+aggregateScriptAnalysis: 12000
+```
+
 ## 安全边界
 
 - API Key 只允许本地运行时填写。

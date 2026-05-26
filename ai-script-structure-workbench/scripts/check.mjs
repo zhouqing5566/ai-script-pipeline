@@ -40,6 +40,12 @@ import { extractDocxTextFromArrayBuffer, parseScriptFile } from "../src/file-par
 import { hasUsefulRuntimeSettings, mergeRuntimeApiConfig, syncRuntimeSettings } from "../src/storage.js";
 import { resolveRequestFormat } from "../src/request-format.js";
 import { detectScriptCoverage } from "../src/script-coverage.js";
+import { splitScriptIntoEpisodes } from "../src/script-splitter.js";
+import {
+  aggregateScriptAnalysis,
+  analyzeEpisodeChunk,
+  shouldUseLongScriptAnalysis
+} from "../src/long-script-analysis.js";
 import { normalizeRelationshipEdge } from "../src/analysis-normalizers.js";
 import {
   applyEvidenceValidationToAnalysis,
@@ -133,6 +139,68 @@ assert.ok(tenCoverage.estimatedCoverageRatio >= 0.78);
 const endingCoverage = detectScriptCoverage("第一集\n开局\n第二集\n升级\n第三集\n大结局，全剧终", null);
 assert.equal(endingCoverage.inputType, "full_script");
 assert.equal(endingCoverage.canAnalyzeEnding, true);
+const markerText = [
+  "第一集\n开局",
+  "第1集\n升级",
+  "第 2 集\n追击",
+  "EP01\n英文标记",
+  "Episode 2\n英文完整标记",
+  "第01话\n话本标记",
+  "一、公共空间突发危机"
+].join("\n");
+const markerSplit = splitScriptIntoEpisodes(markerText);
+assert.ok(markerSplit.episodes.some((episode) => episode.title.includes("第一集")));
+assert.ok(markerSplit.episodes.some((episode) => episode.title.includes("第1集")));
+assert.ok(markerSplit.episodes.some((episode) => episode.title.includes("第 2 集")));
+assert.ok(markerSplit.episodes.some((episode) => episode.title.includes("EP01")));
+assert.ok(markerSplit.episodes.some((episode) => episode.title.includes("Episode 2")));
+assert.ok(markerSplit.episodes.some((episode) => episode.title.includes("第01话")));
+assert.ok(markerSplit.episodes.some((episode) => episode.detectedBy === "heading"));
+const fiftyEpisodeText = Array.from({ length: 50 }, (_, index) => `第${index + 1}集\n主角在第${index + 1}集遭遇危机并留下悬念。`).join("\n");
+const fiftyCoverage = detectScriptCoverage(fiftyEpisodeText, 50, { userConfirmedFullScript: true });
+assert.equal(fiftyCoverage.inputType, "full_script");
+assert.equal(fiftyCoverage.detectedEpisodeCount, 50);
+assert.ok(fiftyCoverage.completenessSource.includes("系统检测"));
+assert.equal(shouldUseLongScriptAnalysis({ title: "五十集长剧", episodeCount: 50, text: fiftyEpisodeText, userConfirmedFullScript: true }, fiftyCoverage), true);
+const episodeChunk = analyzeEpisodeChunk({
+  projectTitle: "五十集长剧",
+  genre: "都市",
+  episodeNo: 1,
+  episodeTitle: "第一集",
+  episodeText: "第一集\n△火车危机爆发。\n主角：我来救人。\n医生：这不可能！"
+});
+assert.equal(episodeChunk.episodeNo, 1);
+assert.ok(episodeChunk.episodeBeatLedger.length >= 1);
+assert.ok(episodeChunk.evidenceLedger);
+assert.ok(episodeChunk.episodeFunctionAnalysis.evidenceBeatIds?.length >= 1 || episodeChunk.episodeFunctionAnalysis.needsReview === true);
+const aggregatedLong = aggregateScriptAnalysis({
+  originalInput: { title: "五十集长剧", genre: "都市", episodeCount: 50, text: fiftyEpisodeText, userConfirmedFullScript: true },
+  coverage: fiftyCoverage,
+  episodeChunkAnalyses: [episodeChunk],
+  failedChunks: [{ episodeNo: 2, title: "第二集", error: "测试失败" }]
+});
+assert.equal(aggregatedLong.sourceMeta.chunkedAnalysis, true);
+assert.equal(aggregatedLong.sourceMeta.failedChunks.length, 1);
+assert.equal(aggregatedLong.sourceMeta.needsReview, true);
+assert.equal(aggregatedLong.sourceMeta.usableForSkillLearning, false);
+const successfulAggregate = aggregateScriptAnalysis({
+  originalInput: {
+    title: "短完整剧",
+    genre: "都市",
+    episodeCount: 5,
+    text: Array.from({ length: 5 }, (_, index) => `第${index + 1}集\n△主角第${index + 1}次破局。\n主角：留下证据。`).join("\n"),
+    userConfirmedFullScript: true
+  },
+  coverage: detectScriptCoverage(Array.from({ length: 5 }, (_, index) => `第${index + 1}集\n△主角第${index + 1}次破局。\n主角：留下证据。`).join("\n"), 5, { userConfirmedFullScript: true }),
+  episodeChunkAnalyses: [
+    analyzeEpisodeChunk({ projectTitle: "短完整剧", episodeNo: 1, episodeText: "第一集\n△主角破局。\n主角：留下证据。" }),
+    analyzeEpisodeChunk({ projectTitle: "短完整剧", episodeNo: 2, episodeText: "第二集\n△反派追击。\n主角：反证成立。" })
+  ],
+  failedChunks: []
+});
+assert.equal(successfulAggregate.sourceMeta.failedChunks.length, 0);
+assert.equal(successfulAggregate.sourceMeta.chunkedAnalysis, true);
+assert.equal(successfulAggregate.sourceMeta.usableForSkillLearning, successfulAggregate.sourceMeta.evidenceValidation.invalidEvidenceRatio === 0 && !successfulAggregate.sourceMeta.needsReview);
 const forgedAnalysis = structuredClone(fragmentAnalysis);
 forgedAnalysis.episodeBeatLedger[0].sourceText = "这是一段完全不存在于原文中的伪造证据。";
 forgedAnalysis.hookAnalysis.evidenceBeatIds = [forgedAnalysis.episodeBeatLedger[0].beatId];
@@ -376,6 +444,8 @@ const apiSelection = selectModelRoute({
 assert.equal(apiSelection.mode, "api");
 assert.equal(apiSelection.model.id, "model-openai-compatible-default");
 assert.equal(clampMaxOutputTokens(200000, "analyzeScript"), 12000);
+assert.equal(clampMaxOutputTokens(200000, "analyzeEpisodeChunk"), 6000);
+assert.equal(clampMaxOutputTokens(200000, "aggregateScriptAnalysis"), 12000);
 assert.equal(clampMaxOutputTokens(200000, "jsonRepair"), 4096);
 
 const proxyCalls = [];
@@ -780,6 +850,8 @@ assert.ok(!modelAdapterSource.includes("callOpenAICompatible"));
 assert.ok(!modelAdapterSource.includes("callGemini"));
 assert.ok(modelAdapterSource.includes("requiresRouteFix"));
 assert.ok(modelAdapterSource.includes("executeApiAttemptWithRetries"));
+assert.ok(modelAdapterSource.includes("analyzeEpisodeChunk"));
+assert.ok(modelAdapterSource.includes("aggregateScriptAnalysis"));
 assert.ok(modelAdapterSource.includes("jsonModeRequired: false"));
 assert.ok(!modelAdapterSource.includes("function resolveClientRequestFormat"));
 const requestFormatSource = await fs.readFile(new URL("../src/request-format.js", import.meta.url), "utf8");
@@ -807,6 +879,14 @@ assert.ok(appSource.includes("normalizeRelationshipEdge"));
 assert.ok(appSource.includes("证据账本"));
 assert.ok(appSource.includes("Beat 账本"));
 assert.ok(appSource.includes("确认这是完整剧本"));
+assert.ok(appSource.includes("shouldUseLongScriptAnalysis"));
+assert.ok(appSource.includes("executeLongScriptAnalysis"));
+assert.ok(appSource.includes("长剧本分析进度"));
+assert.ok(appSource.includes("用户声明集数"));
+assert.ok(appSource.includes("系统检测集数"));
+assert.ok(appSource.includes("完整性来源"));
+assert.ok(appSource.includes("重试失败分集"));
+assert.ok(appSource.includes("该任务已按安全输出上限发送。完整剧本将使用分集分析流程，而不是依赖单次超大输出。"));
 assert.ok(appSource.includes("sourceText 校验"));
 assert.ok(appSource.includes("原文未命中，需复核"));
 assert.ok(appSource.includes("模型返回为字符串，已自动标准化，需复核"));
@@ -817,6 +897,8 @@ assert.ok(!appSource.includes("const action = target.dataset.action"));
 const promptBuilderSource = await fs.readFile(new URL("../src/prompt-builder.js", import.meta.url), "utf8");
 const taskContractSource = await fs.readFile(new URL("../src/task-output-contracts.js", import.meta.url), "utf8");
 const coverageSource = await fs.readFile(new URL("../src/script-coverage.js", import.meta.url), "utf8");
+const splitterSource = await fs.readFile(new URL("../src/script-splitter.js", import.meta.url), "utf8");
+const longAnalysisSource = await fs.readFile(new URL("../src/long-script-analysis.js", import.meta.url), "utf8");
 const evidenceValidatorSource = await fs.readFile(new URL("../src/evidence-validator.js", import.meta.url), "utf8");
 assert.ok(promptBuilderSource.includes("getTaskOutputContract"));
 assert.ok(taskContractSource.includes("不得包在 scriptAnalysis"));
@@ -828,6 +910,13 @@ assert.ok(taskContractSource.includes("variableSlots"));
 assert.ok(taskContractSource.includes("schemaRepairAnalyzeScript"));
 assert.ok(coverageSource.includes("requiresManualFullScriptConfirmation"));
 assert.ok(coverageSource.includes("fullScriptConfidence"));
+assert.ok(coverageSource.includes("completenessSource"));
+assert.ok(splitterSource.includes("splitScriptIntoEpisodes"));
+assert.ok(splitterSource.includes("EP|Episode"));
+assert.ok(longAnalysisSource.includes("shouldUseLongScriptAnalysis"));
+assert.ok(longAnalysisSource.includes("aggregateScriptAnalysis"));
+assert.ok(longAnalysisSource.includes("failedChunks"));
+assert.ok(longAnalysisSource.includes("chunkedAnalysis"));
 assert.ok(evidenceValidatorSource.includes("validateEvidenceSourceText"));
 assert.ok(evidenceValidatorSource.includes("invalidEvidenceRatio"));
 assert.ok(evidenceValidatorSource.includes("missingSourceText"));

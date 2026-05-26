@@ -20,6 +20,56 @@ const taskShapeRules = {
       "reusablePatterns"
     ]
   },
+  analyzeScriptChunk: {
+    type: "object",
+    required: ["episodeNo", "title", "coverage", "evidenceLedger", "episodeBeatLedger", "episodeFunctionAnalysis", "openQuestions", "continuityNotes", "confidence", "needsReview"]
+  },
+  analyzeEpisodeChunk: {
+    type: "object",
+    required: ["episodeNo", "title", "coverage", "evidenceLedger", "episodeBeatLedger", "episodeFunctionAnalysis", "openQuestions", "continuityNotes", "confidence", "needsReview"]
+  },
+  aggregateScriptAnalysis: {
+    type: "object",
+    required: [
+      "coverage",
+      "caseScope",
+      "evidenceLedger",
+      "episodeBeatLedger",
+      "basicInfo",
+      "hookAnalysis",
+      "audienceNeedAnalysis",
+      "themeAnalysis",
+      "characterAnalysis",
+      "goldfingerAnalysis",
+      "obstacleAnalysis",
+      "mainlineStructure",
+      "mainlineReversalAnalysis",
+      "endingAnalysis",
+      "episodeFunctionAnalysis",
+      "reusablePatterns"
+    ]
+  },
+  mergeEvidenceLedAnalysis: {
+    type: "object",
+    required: [
+      "coverage",
+      "caseScope",
+      "evidenceLedger",
+      "episodeBeatLedger",
+      "basicInfo",
+      "hookAnalysis",
+      "audienceNeedAnalysis",
+      "themeAnalysis",
+      "characterAnalysis",
+      "goldfingerAnalysis",
+      "obstacleAnalysis",
+      "mainlineStructure",
+      "mainlineReversalAnalysis",
+      "endingAnalysis",
+      "episodeFunctionAnalysis",
+      "reusablePatterns"
+    ]
+  },
   schemaRepairAnalyzeScript: {
     type: "object",
     required: [
@@ -122,8 +172,11 @@ export function validateTaskOutput(taskType, value) {
     }
     issues.push(...missingFields(value, rule.required || []).map((field) => `缺少 ${field}`));
   }
-  if (taskType === "analyzeScript" || taskType === "schemaRepairAnalyzeScript") {
+  if (taskType === "analyzeScript" || taskType === "schemaRepairAnalyzeScript" || taskType === "aggregateScriptAnalysis" || taskType === "mergeEvidenceLedAnalysis") {
     issues.push(...validateAnalyzeScriptContract(value));
+  }
+  if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk") {
+    issues.push(...validateEpisodeChunkContract(value));
   }
   return { ok: issues.length === 0, issues };
 }
@@ -194,6 +247,22 @@ function validateAnalyzeScriptContract(value) {
     list.slice(0, 12).forEach((item, index) => {
       if (item?.id && !item.sourceText) issues.push(`evidenceLedger.${group}[${index}] 缺少 sourceText`);
     });
+  }
+  return issues;
+}
+
+function validateEpisodeChunkContract(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const issues = [];
+  const beats = Array.isArray(value.episodeBeatLedger) ? value.episodeBeatLedger : [];
+  beats.slice(0, 8).forEach((beat, index) => {
+    for (const field of ["beatId", "sourceText", "beatSummary", "confidence"]) {
+      if (beat?.[field] === undefined || beat?.[field] === null || beat?.[field] === "") issues.push(`episodeBeatLedger[${index}] 缺少 ${field}`);
+    }
+  });
+  const episode = value.episodeFunctionAnalysis || {};
+  if (!arrayHasItems(episode.evidenceIds) && !arrayHasItems(episode.evidenceBeatIds) && episode.needsReview !== true) {
+    issues.push("episodeFunctionAnalysis 缺少 evidenceIds/evidenceBeatIds 时必须 needsReview=true");
   }
   return issues;
 }

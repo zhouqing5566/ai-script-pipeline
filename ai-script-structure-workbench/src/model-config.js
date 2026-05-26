@@ -38,6 +38,8 @@ export const coreRouteTaskTypes = [
   "generateEndingCandidates",
   "generateMajorNodes",
   "analyzeScript",
+  "analyzeEpisodeChunk",
+  "aggregateScriptAnalysis",
   "generateMacroOutline",
   "generateStageOutline",
   "generateEpisodeOutline",
@@ -62,6 +64,10 @@ export const featureAreas = [
 
 export const modelTaskTypes = [
   "analyzeScript",
+  "analyzeScriptChunk",
+  "analyzeEpisodeChunk",
+  "aggregateScriptAnalysis",
+  "mergeEvidenceLedAnalysis",
   "extractPatterns",
   "classifyCase",
   "generateSkillSuggestion",
@@ -197,6 +203,44 @@ export function createDefaultRoutes() {
       allowFallback: true,
       enabled: true,
       notes: "剧本结构分析必须稳定返回 JSON。"
+    },
+    {
+      id: "route-analyze-episode-chunk",
+      featureArea: "剧本分析中心",
+      taskType: "analyzeEpisodeChunk",
+      primaryModelId: "model-demo-rule-engine",
+      fallbackModelIds: [],
+      requiredCapabilities: ["json"],
+      maxInputTokens: 18000,
+      maxOutputTokens: 6000,
+      temperature: 0.3,
+      topP: 0.9,
+      jsonModeRequired: true,
+      streamingEnabled: false,
+      retryCount: 1,
+      timeoutMs: 60000,
+      allowFallback: true,
+      enabled: true,
+      notes: "长剧本分集分析：只分析当前 episode/chunk，不推断后续。"
+    },
+    {
+      id: "route-aggregate-script-analysis",
+      featureArea: "剧本分析中心",
+      taskType: "aggregateScriptAnalysis",
+      primaryModelId: "model-demo-rule-engine",
+      fallbackModelIds: [],
+      requiredCapabilities: ["json"],
+      maxInputTokens: 32000,
+      maxOutputTokens: 12000,
+      temperature: 0.25,
+      topP: 0.9,
+      jsonModeRequired: true,
+      streamingEnabled: false,
+      retryCount: 1,
+      timeoutMs: 90000,
+      allowFallback: true,
+      enabled: true,
+      notes: "只基于分集分析结果聚合全剧结构，不重新编造原文证据。"
     },
     {
       id: "route-generate-episode-outline",
@@ -529,6 +573,10 @@ export function switchCoreRoutesToModel(apiConfig, modelId) {
 export function featureAreaForTaskType(taskType) {
   const map = {
     analyzeScript: "剧本分析中心",
+    analyzeScriptChunk: "剧本分析中心",
+    analyzeEpisodeChunk: "剧本分析中心",
+    aggregateScriptAnalysis: "剧本分析中心",
+    mergeEvidenceLedAnalysis: "剧本分析中心",
     extractPatterns: "模式资产中心",
     classifyCase: "分类与标签",
     generateSkillSuggestion: "Skill 进化中心",
@@ -580,6 +628,7 @@ function createEmptyConfig() {
 }
 
 function defaultTimeoutForTask(taskType) {
+  if (taskType === "aggregateScriptAnalysis") return 90000;
   if (taskType === "generateEpisodeOutline") return 90000;
   if (taskType === "schemaRepairAnalyzeScript") return 60000;
   if (taskType === "jsonRepair") return 30000;
@@ -587,6 +636,9 @@ function defaultTimeoutForTask(taskType) {
 }
 
 function defaultMaxOutputForTask(taskType) {
+  if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk") return 6000;
+  if (taskType === "aggregateScriptAnalysis" || taskType === "mergeEvidenceLedAnalysis") return 12000;
+  if (taskType === "analyzeScript") return 12000;
   if (taskType === "generateEpisodeOutline") return 16000;
   if (taskType === "generateDraft") return 12000;
   if (taskType === "schemaRepairAnalyzeScript") return 12000;
