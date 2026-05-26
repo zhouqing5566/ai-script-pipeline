@@ -41,6 +41,7 @@ import { hasUsefulRuntimeSettings, mergeRuntimeApiConfig, syncRuntimeSettings } 
 import { resolveRequestFormat } from "../src/request-format.js";
 import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, shouldUseGeminiNative } from "../src/provider-adapters/gemini.js";
 import { buildOpenAIChatRequestBody } from "../src/provider-adapters/openai-compatible.js";
+import { labelForKey } from "../src/schemas.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -57,6 +58,14 @@ assert.ok(analysis.mainlineReversalAnalysis.foreshadowingBeforeReveal.length >= 
 assert.ok(analysis.endingAnalysis.promisedEmotionReturned);
 assert.ok(analysis.episodeFunctionAnalysis.length >= 5);
 assert.ok(analysis.reusablePatterns.length >= 2);
+assert.equal(labelForKey("openingSummary"), "开头概述");
+assert.equal(labelForKey("hookTypes"), "钩子类型");
+assert.equal(labelForKey("firstSceneFunction"), "首场功能");
+assert.equal(labelForKey("viewerQuestion"), "观众追问");
+assert.equal(labelForKey("mainlineStrengthScore"), "主线强度");
+assert.equal(labelForKey("reversalStrengthScore"), "大反差强度");
+assert.equal(labelForKey("endingStrengthScore"), "结局强度");
+assert.equal(labelForKey("unknownFutureField"), "补充字段");
 
 state.currentProject.ideaEvaluation = evaluateIdea(state.currentProject);
 state.currentProject.directionCandidates = generateDirections(state.currentProject);
