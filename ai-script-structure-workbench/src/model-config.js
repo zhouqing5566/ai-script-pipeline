@@ -357,6 +357,8 @@ export function normalizeApiConfig(config = {}) {
     selectedRouteId: merged.selectedRouteId || merged.routes?.[0]?.id || "",
     activeSettingsTab: merged.activeSettingsTab || "status",
     lastTestResult: merged.lastTestResult || null,
+    lastTaskChainTest: merged.lastTaskChainTest || null,
+    taskRouteHealth: merged.taskRouteHealth || {},
     routeTestTaskType: merged.routeTestTaskType || "analyzeScript",
     lastRouteTestResult: merged.lastRouteTestResult || null,
     updatedAt: merged.updatedAt || new Date().toISOString()
@@ -378,8 +380,21 @@ export function normalizeProvider(provider = {}) {
     timeoutMs: Number(provider.timeoutMs) || 60000,
     rateLimit: provider.rateLimit || "",
     notes: provider.notes || "",
+    health: normalizeProviderHealth(provider.health),
     createdAt: provider.createdAt || now,
     updatedAt: provider.updatedAt || now
+  };
+}
+
+function normalizeProviderHealth(health = {}) {
+  return {
+    status: ["unknown", "ok", "warning", "protocol_error", "task_json_failed"].includes(health.status) ? health.status : "unknown",
+    lastCheckedAt: health.lastCheckedAt || null,
+    lastErrorType: health.lastErrorType || "",
+    diagnostics: health.diagnostics || null,
+    checks: health.checks || null,
+    suggestions: Array.isArray(health.suggestions) ? health.suggestions : [],
+    message: health.message || ""
   };
 }
 

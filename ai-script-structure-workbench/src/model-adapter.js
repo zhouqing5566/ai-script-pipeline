@@ -21,6 +21,7 @@ import { buildPrompt } from "./prompt-builder.js";
 import { parseJsonWithRepair, extractObjectBody } from "./json-repair.js";
 import { schemaValidationMessage, validateTaskOutput } from "./schema-validator.js";
 import { resolveRequestFormat } from "./request-format.js";
+import { classifyProviderError } from "./provider-diagnostics.js";
 import { applyEvidenceValidationToAnalysis } from "./evidence-validator.js";
 import { aggregateScriptAnalysis, analyzeEpisodeChunk, mergeEvidenceLedAnalysis } from "./long-script-analysis.js";
 import { evaluateEpisodeChunkCompactShape } from "./episode-chunk-shape.js";
@@ -1300,6 +1301,7 @@ async function callProvider({ provider, model, messages, options, taskType, rout
     if (!response.ok || data.ok === false) {
       const error = new Error(data.errorMessage || data.error || `Provider 请求失败：${response.status}`);
       error.providerPayload = data;
+      error.errorType = data.errorType || classifyProviderError(error.message);
       throw error;
     }
     return {
@@ -1318,6 +1320,7 @@ async function callProvider({ provider, model, messages, options, taskType, rout
   } catch (error) {
     const normalized = new Error(normalizeClientProviderError(error.message));
     if (error.providerPayload) normalized.providerPayload = error.providerPayload;
+    normalized.errorType = error.errorType || error.providerPayload?.errorType || classifyProviderError(normalized.message);
     throw normalized;
   }
 }
@@ -1396,7 +1399,7 @@ function normalizeClientProviderError(message = "") {
     return message;
   }
   if (/Unknown name "messages"|Unknown name "max_tokens"|Unknown name "temperature"|Cannot find field/i.test(message)) {
-    return `${message}。当前接口不接受 OpenAI Chat Completions 格式。若你使用 OpenAI 代理/DeepSeek，请将 requestFormat 改为 openai_chat，并确认 Base URL 是 OpenAI-compatible 地址；若你使用官方 Gemini API，请改为 gemini_native。`;
+    return `${message}。当前接口不接受 OpenAI Chat Completions 请求体。你可能把 Gemini native 接口配置成了 OpenAI-compatible，或 Base URL 不是 /chat/completions 兼容地址。`;
   }
   if (/Failed to fetch/i.test(message)) {
     return `${message}。前端请求本地 /api/model-call 失败。请确认本地服务 http://127.0.0.1:4178 正在运行，server.js 未报错，且没有被浏览器/代理拦截。`;
@@ -1409,7 +1412,9 @@ function normalizeClientProviderError(message = "") {
 
 export function shouldRetryModelError(error) {
   const message = error?.message || String(error || "");
-  if (/JSON 解析失败|not valid JSON|未找到 JSON|结构校验失败|当前接口不接受 OpenAI Chat Completions 格式|缺少 Base URL|缺少 API Key|模型不属于当前 Provider|未找到 Provider 配置|未找到模型配置|400\b/i.test(message)) {
+  const errorType = error?.errorType || error?.providerPayload?.errorType || classifyProviderError(message);
+  if (errorType === "provider_protocol_mismatch") return false;
+  if (/JSON 解析失败|not valid JSON|未找到 JSON|结构校验失败|当前接口不接受 OpenAI Chat Completions 格式|当前接口不接受 OpenAI Chat Completions 请求体|缺少 Base URL|缺少 API Key|模型不属于当前 Provider|未找到 Provider 配置|未找到模型配置|400\b/i.test(message)) {
     return false;
   }
   if (/Failed to fetch|fetch failed|timeout|timed out|超时|aborted|AbortError|请求被中止|429\b|500\b|502\b|503\b|504\b|empty response|空响应/i.test(message)) {
@@ -1420,9 +1425,11 @@ export function shouldRetryModelError(error) {
 
 export function modelErrorRetryBlockReason(error) {
   const message = error?.message || String(error || "");
+  const errorType = error?.errorType || error?.providerPayload?.errorType || classifyProviderError(message);
+  if (errorType === "provider_protocol_mismatch") return "Provider 协议不匹配：当前接口不接受 OpenAI Chat Completions 请求体，请修正 requestFormat / Base URL。";
   if (/JSON 解析失败|not valid JSON|未找到 JSON/i.test(message)) return "模型返回非 JSON，重试同一 Prompt 通常会重复消耗 token，请先执行分集 JSON 输出测试、调整 Prompt 或更换模型。";
   if (/结构校验失败/i.test(message)) return "结构校验失败，重试会重复消耗 token，请先修复输出 schema 或 Prompt。";
-  if (/当前接口不接受 OpenAI Chat Completions 格式|Unknown name "messages"|Unknown name "max_tokens"|Unknown name "temperature"|Cannot find field/i.test(message)) return "400 请求格式错误或 requestFormat 不匹配，请修正 Provider 请求格式。";
+  if (/当前接口不接受 OpenAI Chat Completions 格式|当前接口不接受 OpenAI Chat Completions 请求体|Unknown name "messages"|Unknown name "max_tokens"|Unknown name "temperature"|Cannot find field/i.test(message)) return "400 请求格式错误或 requestFormat 不匹配，请修正 Provider 请求格式。";
   if (/缺少 Base URL/i.test(message)) return "缺少 Base URL，请先保存 Provider 配置。";
   if (/缺少 API Key/i.test(message)) return "缺少 API Key，请先保存本地密钥配置。";
   if (/未找到 Provider 配置/i.test(message)) return "未找到 Provider 配置，请先保存 Provider。";

@@ -40,7 +40,7 @@ export function selectModelRoute({
   for (const item of ordered) {
     const model = findUsableModel(config, item.modelId, matchedSkills);
     if (!model) continue;
-    const provider = config.providers.find((candidate) => candidate.id === model.providerId && candidate.enabled);
+    const provider = config.providers.find((candidate) => candidate.id === model.providerId && candidate.enabled && candidate.health?.status !== "protocol_error");
     if (isDemoModel(model, provider)) {
       return createSelection({ mode: "demo", route, model, provider, reason: item.reason, taskType });
     }
@@ -68,7 +68,7 @@ export function selectFallbackModel({ config, route, failedModelId, matchedSkill
     if (modelId === failedModelId) continue;
     const model = findUsableModel(normalized, modelId, matchedSkills);
     if (!model || model.id === demoModelId) continue;
-    const provider = normalized.providers.find((candidate) => candidate.id === model.providerId && candidate.enabled);
+    const provider = normalized.providers.find((candidate) => candidate.id === model.providerId && candidate.enabled && candidate.health?.status !== "protocol_error");
     if (provider) return { model, provider };
   }
   return null;
@@ -156,7 +156,7 @@ function findUsableModel(config, modelId, matchedSkills) {
   const model = config.models.find((candidate) => candidate.id === modelId && candidate.enabled);
   if (!model) return null;
   const provider = config.providers.find((candidate) => candidate.id === model.providerId);
-  if (!provider?.enabled && model.id !== demoModelId) return null;
+  if ((!provider?.enabled || provider.health?.status === "protocol_error") && model.id !== demoModelId) return null;
   const requiredCapabilities = matchedSkills.flatMap((skill) => skill.modelPreference?.requireCapabilities || []);
   if (!hasCapabilities(model, requiredCapabilities)) return null;
   return model;

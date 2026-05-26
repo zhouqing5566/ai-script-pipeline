@@ -62,6 +62,7 @@ import { buildOpenAIChatRequestBody } from "../src/provider-adapters/openai-comp
 import { labelForKey } from "../src/schemas.js";
 import { extractJsonCandidate, extractJsonCandidates, extractTaskJsonCandidate } from "../src/json-extractor.js";
 import { evaluateEpisodeChunkCompactShape, scoreEpisodeChunkCandidate } from "../src/episode-chunk-shape.js";
+import { classifyProviderError, diagnoseProviderProtocol, suggestProviderFix } from "../src/provider-diagnostics.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -1145,7 +1146,7 @@ assert.equal(failingResult.log.success, false);
 assert.equal(failingResult.log.attemptErrors.length, 4);
 assert.equal(failingResult.endpointType, "server_proxy");
 assert.ok(failingResult.error.includes("前端请求本地 /api/model-call 失败"));
-assert.ok(failingResult.error.includes("当前接口不接受 OpenAI Chat Completions 格式"));
+assert.ok(failingResult.error.includes("当前接口不接受 OpenAI Chat Completions 请求体"));
 assert.ok(failingResult.error.includes("不可重试原因"));
 assert.equal(failingProxyCalls.length, 3);
 assert.ok(failingProxyCalls.every((payload) => !Object.hasOwn(payload, "provider") && !Object.hasOwn(payload, "model")));
@@ -1156,6 +1157,18 @@ assert.equal(shouldRetryModelError(new Error("Provider 请求失败：503 unavai
 assert.equal(shouldRetryModelError(new Error("结构校验失败：缺少 directionCandidates")), false);
 assert.equal(shouldRetryModelError(new Error("JSON 解析失败：Unexpected token 作")), false);
 assert.equal(shouldRetryModelError(new Error("Provider 请求失败：400 Unknown name \"messages\"")), false);
+assert.equal(classifyProviderError('Invalid JSON payload received. Unknown name "messages"'), "provider_protocol_mismatch");
+assert.equal(classifyProviderError("Provider 请求失败：429 Resource exhausted"), "provider_rate_limit");
+assert.equal(classifyProviderError("结构校验失败：缺少 episodeBeatLedger"), "task_schema_failed");
+const geminiMismatchDiagnostics = diagnoseProviderProtocol(
+  { id: "p-gemini-bad", providerType: "openai_compatible", requestFormat: "openai_chat", baseUrl: "https://generativelanguage.googleapis.com/v1beta" },
+  { id: "m-gemini", modelName: "gemini-pro" }
+);
+assert.equal(geminiMismatchDiagnostics.severity, "error");
+assert.ok(["openai_chat_to_gemini_native", "openai_compatible_to_gemini_native"].includes(geminiMismatchDiagnostics.likelyMismatch));
+assert.ok(geminiMismatchDiagnostics.issues.join("；").includes("Gemini 官方接口"));
+assert.ok(suggestProviderFix('Unknown name "messages"', { providerType: "openai_compatible" }, {}).join("；").includes("gemini_native"));
+assert.ok(suggestProviderFix("Provider error: response_format unsupported", {}, {}).join("；").includes("supportsJsonMode"));
 delete globalThis.__MODEL_CALL_PROXY__;
 
 const invalidShape = validateTaskOutput("generateDirections", { bad: true });
@@ -1234,6 +1247,9 @@ assert.ok(serverSource.includes("modelUpdatedAt"));
 assert.ok(serverSource.includes("serverStatus"));
 assert.ok(serverSource.includes("providerStatus"));
 assert.ok(serverSource.includes("providerRawPreview"));
+assert.ok(serverSource.includes("diagnoseProviderProtocol"));
+assert.ok(serverSource.includes("provider_protocol_mismatch"));
+assert.ok(serverSource.includes("suggestions"));
 assert.ok(serverSource.includes("appendServerProxyLog({ ...responseBody, source: \"test-provider\""));
 const modelAdapterSource = await fs.readFile(new URL("../src/model-adapter.js", import.meta.url), "utf8");
 assert.ok(modelAdapterSource.includes('fetch("/api/model-call"'));
@@ -1242,6 +1258,7 @@ assert.ok(modelAdapterSource.includes("taskType: taskType || null"));
 assert.ok(modelAdapterSource.includes("shouldRetryModelError"));
 assert.ok(modelAdapterSource.includes("testModelRoute"));
 assert.ok(modelAdapterSource.includes("modelErrorRetryBlockReason"));
+assert.ok(modelAdapterSource.includes("classifyProviderError"));
 assert.ok(modelAdapterSource.includes("不可重试原因"));
 assert.ok(!modelAdapterSource.includes("const payload = { provider, model"));
 assert.ok(!modelAdapterSource.includes("callOpenAICompatible"));
@@ -1260,6 +1277,21 @@ assert.ok(appSource.includes("syncRuntimeSettings"));
 assert.ok(appSource.includes("配置已同步到本地服务"));
 assert.ok(appSource.includes("API Mode + Demo 兜底"));
 assert.ok(appSource.includes("轻量测试当前任务路由"));
+assert.ok(appSource.includes("完整测试当前任务链路"));
+assert.ok(appSource.includes("诊断 Provider 协议"));
+assert.ok(appSource.includes("Provider 健康状态"));
+assert.ok(appSource.includes("provider_ping"));
+assert.ok(appSource.includes("chat_smoke"));
+assert.ok(appSource.includes("json_smoke"));
+assert.ok(appSource.includes("task_smoke"));
+assert.ok(appSource.includes("ensureLongScriptTaskRoutesReady"));
+assert.ok(appSource.includes("analyzeScript 测试通过不能代替"));
+assert.ok(appSource.includes("analyzeEpisodeChunk JSON 输出测试未通过，已阻止长剧本分析"));
+assert.ok(appSource.includes("skippedDueToProviderProtocolMismatch"));
+assert.ok(appSource.includes("Provider 协议不匹配，已停止后续调用。"));
+assert.ok(appSource.includes("provider_protocol_mismatch"));
+assert.ok(appSource.includes('if (!["schema_validation", "empty_model_structure"].includes(result.errorType)) return false;'));
+assert.ok(appSource.indexOf("ensureLongScriptTaskRoutesReady") < appSource.indexOf("busyAction = \"长剧本分析\""));
 assert.ok(appSource.includes("current-selected-model"));
 assert.ok(appSource.includes("providerNameForModel"));
 assert.ok(appSource.includes("这是 Demo Provider 测试，不代表真实 API 可用"));
@@ -1328,6 +1360,12 @@ const splitterSource = await fs.readFile(new URL("../src/script-splitter.js", im
 const longAnalysisSource = await fs.readFile(new URL("../src/long-script-analysis.js", import.meta.url), "utf8");
 const evidenceValidatorSource = await fs.readFile(new URL("../src/evidence-validator.js", import.meta.url), "utf8");
 const jsonExtractorSource = await fs.readFile(new URL("../src/json-extractor.js", import.meta.url), "utf8");
+const providerDiagnosticsSource = await fs.readFile(new URL("../src/provider-diagnostics.js", import.meta.url), "utf8");
+const modelRouterSource = await fs.readFile(new URL("../src/model-router.js", import.meta.url), "utf8");
+assert.ok(providerDiagnosticsSource.includes("diagnoseProviderProtocol"));
+assert.ok(providerDiagnosticsSource.includes("protocol_mismatch_openai_body_to_gemini_native"));
+assert.ok(providerDiagnosticsSource.includes("suggestProviderFix"));
+assert.ok(modelRouterSource.includes('candidate.health?.status !== "protocol_error"'));
 assert.ok(promptBuilderSource.includes("getTaskOutputContract"));
 assert.ok(promptBuilderSource.includes("你是严格 JSON 生成器，不是聊天助手"));
 assert.ok(promptBuilderSource.includes("只返回 EpisodeChunkAnalysis JSON 对象"));

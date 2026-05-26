@@ -56,6 +56,12 @@ import {
   switchCoreRoutesToModel
 } from "./model-config.js";
 import {
+  classifyProviderError,
+  createProviderHealthPatch,
+  diagnoseProviderProtocol,
+  suggestProviderFix
+} from "./provider-diagnostics.js";
+import {
   exportAnalysisMarkdown,
   exportAuditMarkdown,
   exportCharactersMarkdown,
@@ -368,6 +374,9 @@ async function handleAction(payload) {
       case "test-provider":
         await testProvider(id);
         break;
+      case "diagnose-provider":
+        diagnoseSelectedProvider(id);
+        break;
       case "add-model":
         addModel();
         break;
@@ -394,6 +403,9 @@ async function handleAction(payload) {
         break;
       case "test-task-route":
         await testCurrentTaskRoute();
+        break;
+      case "test-task-chain":
+        await testCurrentTaskChain();
         break;
       case "test-episode-json":
         await testEpisodeChunkJsonOutput();
@@ -480,6 +492,22 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   const currentCoverage = coverage || detectScriptCoverage(input.text, input.episodeCount, { userConfirmedFullScript: input.userConfirmedFullScript });
   const split = prepareLongScriptChunks(input, currentCoverage);
   const allChunks = split.episodes || [];
+  const readiness = ensureLongScriptTaskRoutesReady(current.apiConfig);
+  if (!readiness.ready && !retryFailedOnly && !retryAggregateOnly) {
+    store.setState((state) => {
+      state.longScriptAnalysisProgress = {
+        ...createLongAnalysisProgress(allChunks, split),
+        active: false,
+        aborted: true,
+        currentStep: "任务路由未通过，已阻止",
+        warnings: readiness.warnings,
+        routeReadiness: readiness
+      };
+      return state;
+    }, "阻止长剧本分析：任务路由未通过", { targetType: "analysis", action: "generate", light: true });
+    showToast("analyzeEpisodeChunk JSON 输出测试未通过，已阻止长剧本分析。请先修复 Provider/requestFormat 或更换模型。");
+    return;
+  }
   const previousProgress = current.longScriptAnalysisProgress || {};
   const previousResults = retryFailedOnly || retryAggregateOnly ? { ...(previousProgress.chunkResults || {}) } : {};
   let chunks = allChunks;
@@ -509,6 +537,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   progress.steps[1].status = "成功";
   progress.currentStep = retryAggregateOnly ? "重试全剧聚合" : retryFailedOnly ? (chunks.length ? "重试失败分集" : "重试全剧聚合") : "剧本切分";
   progress.warnings = split.warnings || [];
+  progress.routeReadiness = readiness;
   progress.chunkResults = previousResults;
   progress.chunks = (progress.chunks || []).map((item) => {
     if (previousResults[item.chunkKey]) return { ...item, status: "成功", error: "" };
@@ -584,7 +613,11 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       });
       if (isJsonChunkFailure(failed)) jsonFailureStreak += 1;
       else jsonFailureStreak = 0;
-      if (isProbeChunk && ["json_parse", "schema_validation", "source_text_validation", "empty_model_structure"].includes(failed.errorType)) {
+      const providerProtocolMismatch = failed.errorType === "provider_protocol_mismatch";
+      if (providerProtocolMismatch) {
+        abortedByProbeFailure = true;
+        probeFailureType = "provider_protocol_mismatch";
+      } else if (isProbeChunk && ["json_parse", "schema_validation", "source_text_validation", "empty_model_structure"].includes(failed.errorType)) {
         abortedByProbeFailure = true;
         probeFailureType = failed.errorType;
         abortedByJsonFailure = failed.errorType === "json_parse";
@@ -601,12 +634,15 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
             episodeNo: skipped.episodeNo,
             title: skipped.title,
             detectedBy: skipped.detectedBy,
-            errorType: skippedDueToProbeFailure ? "skipped_due_to_probe_failure" : "skipped_due_to_json_failure",
-            skippedDueToProbeFailure,
+            errorType: providerProtocolMismatch ? "skipped_due_to_provider_protocol_mismatch" : skippedDueToProbeFailure ? "skipped_due_to_probe_failure" : "skipped_due_to_json_failure",
+            skippedDueToProbeFailure: skippedDueToProbeFailure && !providerProtocolMismatch,
             probeFailureType: skippedDueToProbeFailure ? probeFailureType : "",
+            skippedDueToProviderProtocolMismatch: providerProtocolMismatch,
             skippedDueToJsonFailure: !skippedDueToProbeFailure,
             error: skippedDueToProbeFailure
-              ? `skippedDueToProbeFailure：第一集探针 ${probeFailureType} 失败，已暂停后续调用。`
+              ? providerProtocolMismatch
+                ? "skippedDueToProviderProtocolMismatch：Provider 协议不匹配，已停止后续调用。"
+                : `skippedDueToProbeFailure：第一集探针 ${probeFailureType} 失败，已暂停后续调用。`
               : "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
           };
           skippedChunks.push(skippedItem);
@@ -624,14 +660,18 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
               draft,
               skipped,
               "跳过",
-              abortedByProbeFailure
+              providerProtocolMismatch
+                ? "skippedDueToProviderProtocolMismatch：Provider 协议不匹配，已停止后续调用。"
+                : abortedByProbeFailure
                 ? `skippedDueToProbeFailure：第一集探针 ${probeFailureType} 失败，已暂停后续调用。`
                 : "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
             );
           }
           draft.warnings = [
             ...(draft.warnings || []),
-            abortedByProbeFailure
+            providerProtocolMismatch
+              ? "Provider 协议不匹配，已停止后续调用。"
+              : abortedByProbeFailure
               ? probeFailureWarning(probeFailureType)
               : "连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。"
           ];
@@ -681,6 +721,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     finalAnalysis.sourceMeta.abortedByJsonFailure = abortedByJsonFailure;
     finalAnalysis.sourceMeta.abortedByProbeFailure = abortedByProbeFailure;
     finalAnalysis.sourceMeta.probeFailureType = probeFailureType;
+    finalAnalysis.sourceMeta.abortedByProviderProtocolMismatch = probeFailureType === "provider_protocol_mismatch";
     finalAnalysis.sourceMeta.aggregateSkipped = true;
     finalAnalysis.sourceMeta.skippedChunks = skippedChunks;
     finalAnalysis.sourceMeta.schemaRepairedChunks = schemaRepairedChunkIds.length > 0;
@@ -691,7 +732,9 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     finalAnalysis.sourceMeta.warnings = [
       ...(finalAnalysis.sourceMeta.warnings || []),
       abortedByProbeFailure
-        ? "分集 JSON 探针失败，已停止后续分集调用。"
+        ? probeFailureType === "provider_protocol_mismatch"
+          ? "Provider 协议不匹配，已停止后续调用。"
+          : "分集 JSON 探针失败，已停止后续分集调用。"
         : "连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。"
     ];
     applyLongScriptGateFlags(finalAnalysis);
@@ -888,6 +931,9 @@ async function repairEpisodeChunkSchema({ originalResult, chunkInput, projectId 
 }
 
 function probeFailureWarning(type = "") {
+  if (type === "provider_protocol_mismatch") {
+    return "Provider 协议不匹配，已停止后续调用。当前接口不接受 OpenAI Chat Completions 请求体，请改为 gemini_native，或确认 Base URL 是真正的 OpenAI-compatible /chat/completions 地址。";
+  }
   if (type === "schema_validation" || type === "empty_model_structure") {
     return "分集 JSON 探针已成功解析 JSON，但模型返回结构不符合 EpisodeChunkAnalysis compact schema，已暂停后续分集调用。";
   }
@@ -895,6 +941,21 @@ function probeFailureWarning(type = "") {
     return "分集 JSON 探针缺少可命中原文的 sourceText，已暂停后续分集调用。";
   }
   return "分集 JSON 探针返回非 JSON，已暂停后续分集调用。";
+}
+
+function ensureLongScriptTaskRoutesReady(config = {}) {
+  if (config.mode !== "api") return { ready: true, warnings: [], requiredTasks: [] };
+  const requiredTasks = ["analyzeEpisodeChunk", "aggregateScriptAnalysis"];
+  const health = config.taskRouteHealth || {};
+  const missing = requiredTasks.filter((taskType) => !health[taskType]?.checks?.task_smoke?.success);
+  const warnings = missing.map((taskType) => `${taskType} task_smoke 未通过；analyzeScript 测试通过不能代替 ${taskType} 测试。`);
+  return {
+    ready: missing.length === 0,
+    requiredTasks,
+    missing,
+    warnings,
+    health: Object.fromEntries(requiredTasks.map((taskType) => [taskType, health[taskType] || null]))
+  };
 }
 
 function createChunkFailure(error, chunk) {
@@ -922,6 +983,7 @@ function createChunkFailure(error, chunk) {
 }
 
 function classifyChunkError(message = "") {
+  if (classifyProviderError(message) === "provider_protocol_mismatch") return "provider_protocol_mismatch";
   if (/JSON 解析失败|not valid JSON|未找到 JSON|Unexpected token/i.test(message)) return "json_parse";
   if (/结构空壳|compact 结构无效|有效内容不足/i.test(message)) return "empty_model_structure";
   if (/结构校验失败|schema/i.test(message)) return "schema_validation";
@@ -1339,29 +1401,49 @@ function addProviderTemplate(templateType) {
 }
 
 async function saveProvider(providerId) {
+  const current = store.getState();
+  const existingProvider = current.apiConfig.providers.find((provider) => provider.id === providerId);
+  const providerDraft = {
+    ...(existingProvider || {}),
+    name: readProviderField("name"),
+    providerType: readProviderField("providerType"),
+    requestFormat: readProviderField("requestFormat"),
+    baseUrl: readProviderField("baseUrl"),
+    apiKey: readProviderField("apiKey") || existingProvider?.apiKey || "",
+    enabled: document.querySelector('[data-provider-field="enabled"]')?.checked || false,
+    priority: Number(readProviderField("priority")) || 50,
+    timeoutMs: Number(readProviderField("timeoutMs")) || 60000,
+    rateLimit: readProviderField("rateLimit"),
+    notes: readProviderField("notes"),
+    updatedAt: new Date().toISOString()
+  };
+  const sampleModel = current.apiConfig.models.find((model) => model.providerId === providerId && model.enabled) ||
+    current.apiConfig.models.find((model) => model.providerId === providerId) ||
+    {};
+  const diagnostics = diagnoseProviderProtocol(providerDraft, sampleModel);
+  providerDraft.health = createProviderHealthPatch(
+    diagnostics.severity === "error" ? "protocol_error" : diagnostics.severity === "warning" ? "warning" : "unknown",
+    diagnostics,
+    {
+      lastErrorType: diagnostics.severity === "error" ? "provider_protocol_mismatch" : "",
+      message: diagnostics.issues.join("；")
+    }
+  );
   store.setState((state) => {
     state.apiConfig.providers = state.apiConfig.providers.map((provider) =>
       provider.id === providerId
-        ? {
-            ...provider,
-            name: readProviderField("name"),
-            providerType: readProviderField("providerType"),
-            requestFormat: readProviderField("requestFormat"),
-            baseUrl: readProviderField("baseUrl"),
-            apiKey: readProviderField("apiKey") || provider.apiKey,
-            enabled: document.querySelector('[data-provider-field="enabled"]')?.checked || false,
-            priority: Number(readProviderField("priority")) || 50,
-            timeoutMs: Number(readProviderField("timeoutMs")) || 60000,
-            rateLimit: readProviderField("rateLimit"),
-            notes: readProviderField("notes"),
-            updatedAt: new Date().toISOString()
-          }
+        ? providerDraft
         : provider
     );
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存 API Provider", { targetType: "settings", action: "edit", light: true });
-  await syncApiSettings();
+  await syncApiSettings({ show: false });
+  showToast(
+    diagnostics.severity === "error"
+      ? `Provider 已保存为草稿，但协议预检失败：${diagnostics.issues.join("；")}`
+      : "配置已同步到本地服务。"
+  );
 }
 
 async function testProvider(providerId) {
@@ -1388,6 +1470,27 @@ async function testProvider(providerId) {
     }
   }
   store.setState((state) => {
+    const diagnostics = result.diagnostics || diagnoseProviderProtocol(provider || {}, model || {}, { errorMessage: result.error || result.message || "" });
+    const errorType = result.errorType || classifyProviderError(result.error || result.message || "");
+    const healthStatus = provider?.providerType === "local"
+      ? "ok"
+      : result.ok
+        ? (diagnostics.severity === "warning" ? "warning" : "ok")
+        : errorType === "provider_protocol_mismatch"
+          ? "protocol_error"
+          : "warning";
+    state.apiConfig.providers = state.apiConfig.providers.map((item) =>
+      item.id === providerId
+        ? {
+            ...item,
+            health: createProviderHealthPatch(healthStatus, diagnostics, {
+              lastErrorType: result.ok ? "" : errorType,
+              suggestions: result.suggestions || suggestProviderFix(result.error || result.message || "", item, model || {}),
+              message: result.message || result.error || ""
+            })
+          }
+        : item
+    );
     state.apiConfig.lastTestResult = {
       providerId,
       success: Boolean(result.ok),
@@ -1398,6 +1501,9 @@ async function testProvider(providerId) {
       serverStatus: result.serverStatus || result.status || null,
       providerStatus: result.providerStatus || null,
       providerRawPreview: result.providerRawPreview || "",
+      errorType,
+      diagnostics,
+      suggestions: result.suggestions || suggestProviderFix(result.error || result.message || "", provider || {}, model || {}),
       settingsUpdatedAt: result.settingsUpdatedAt || null,
       providerUpdatedAt: result.providerUpdatedAt || null,
       modelUpdatedAt: result.modelUpdatedAt || null,
@@ -1406,6 +1512,50 @@ async function testProvider(providerId) {
     return state;
   }, "测试 Provider 配置", { targetType: "settings", action: "generate", light: true });
   showToast(result.ok ? (result.mode === "demo" ? "Demo Provider 测试完成，不代表真实 API 可用" : "Provider 测试通过") : `Provider 测试失败：${result.error || result.message || "未知错误"}`);
+}
+
+function diagnoseSelectedProvider(providerId) {
+  const current = store.getState();
+  const provider = current.apiConfig.providers.find((item) => item.id === providerId);
+  const model = current.apiConfig.models.find((item) => item.providerId === providerId && item.enabled) ||
+    current.apiConfig.models.find((item) => item.providerId === providerId) ||
+    {};
+  if (!provider) {
+    showToast("请先选择 Provider");
+    return;
+  }
+  const diagnostics = diagnoseProviderProtocol(provider, model);
+  store.setState((state) => {
+    state.apiConfig.providers = state.apiConfig.providers.map((item) =>
+      item.id === providerId
+        ? {
+            ...item,
+            health: createProviderHealthPatch(
+              diagnostics.severity === "error" ? "protocol_error" : diagnostics.severity === "warning" ? "warning" : "ok",
+              diagnostics,
+              {
+                lastErrorType: diagnostics.severity === "error" ? "provider_protocol_mismatch" : "",
+                message: diagnostics.issues.join("；") || "Provider 协议体检通过。"
+              }
+            )
+          }
+        : item
+    );
+    state.apiConfig.lastTestResult = {
+      providerId,
+      success: diagnostics.severity !== "error",
+      message: diagnostics.issues.join("；") || "Provider 协议体检通过。",
+      mode: provider.providerType === "local" ? "demo" : "api",
+      endpointType: provider.providerType === "local" ? "local_demo" : "server_proxy",
+      requestFormat: diagnostics.resolvedRequestFormat,
+      errorType: diagnostics.severity === "error" ? "provider_protocol_mismatch" : "",
+      diagnostics,
+      suggestions: diagnostics.suggestions || [],
+      createdAt: new Date().toISOString()
+    };
+    return state;
+  }, "诊断 Provider 协议", { targetType: "settings", action: "generate", light: true });
+  showToast(diagnostics.severity === "error" ? `Provider 协议不匹配：${diagnostics.issues.join("；")}` : "Provider 协议体检完成");
 }
 
 function hasUnsavedProviderFormChanges(provider) {
@@ -1434,35 +1584,59 @@ function addModel() {
 }
 
 async function saveModel(modelId) {
+  const current = store.getState();
+  const modelDraft = {
+    ...(current.apiConfig.models.find((model) => model.id === modelId) || {}),
+    displayName: readModelField("displayName"),
+    modelName: readModelField("modelName"),
+    providerId: readModelField("providerId"),
+    enabled: document.querySelector('[data-model-field="enabled"]')?.checked || false,
+    modelType: parseCsv(readModelField("modelType")),
+    contextWindow: Number(readModelField("contextWindow")) || 32000,
+    maxOutputTokens: Number(readModelField("maxOutputTokens")) || 4096,
+    supportsJsonMode: document.querySelector('[data-model-field="supportsJsonMode"]')?.checked || false,
+    supportsJsonModeExplicit: document.querySelector('[data-model-field="supportsJsonMode"]')?.checked || false,
+    supportsVision: document.querySelector('[data-model-field="supportsVision"]')?.checked || false,
+    supportsTools: document.querySelector('[data-model-field="supportsTools"]')?.checked || false,
+    supportsStreaming: document.querySelector('[data-model-field="supportsStreaming"]')?.checked || false,
+    costLevel: readModelField("costLevel"),
+    qualityLevel: readModelField("qualityLevel"),
+    recommendedTasks: parseCsv(readModelField("recommendedTasks")),
+    notes: readModelField("notes"),
+    updatedAt: new Date().toISOString()
+  };
+  const provider = current.apiConfig.providers.find((item) => item.id === modelDraft.providerId) || {};
+  const diagnostics = diagnoseProviderProtocol(provider, modelDraft);
   store.setState((state) => {
     state.apiConfig.models = state.apiConfig.models.map((model) =>
       model.id === modelId
-        ? {
-            ...model,
-            displayName: readModelField("displayName"),
-            modelName: readModelField("modelName"),
-            providerId: readModelField("providerId"),
-            enabled: document.querySelector('[data-model-field="enabled"]')?.checked || false,
-            modelType: parseCsv(readModelField("modelType")),
-            contextWindow: Number(readModelField("contextWindow")) || 32000,
-            maxOutputTokens: Number(readModelField("maxOutputTokens")) || 4096,
-            supportsJsonMode: document.querySelector('[data-model-field="supportsJsonMode"]')?.checked || false,
-            supportsJsonModeExplicit: document.querySelector('[data-model-field="supportsJsonMode"]')?.checked || false,
-            supportsVision: document.querySelector('[data-model-field="supportsVision"]')?.checked || false,
-            supportsTools: document.querySelector('[data-model-field="supportsTools"]')?.checked || false,
-            supportsStreaming: document.querySelector('[data-model-field="supportsStreaming"]')?.checked || false,
-            costLevel: readModelField("costLevel"),
-            qualityLevel: readModelField("qualityLevel"),
-            recommendedTasks: parseCsv(readModelField("recommendedTasks")),
-            notes: readModelField("notes"),
-            updatedAt: new Date().toISOString()
-          }
+        ? modelDraft
         : model
+    );
+    state.apiConfig.providers = state.apiConfig.providers.map((item) =>
+      item.id === modelDraft.providerId
+        ? {
+            ...item,
+            health: createProviderHealthPatch(
+              diagnostics.severity === "error" ? "protocol_error" : diagnostics.severity === "warning" ? "warning" : item.health?.status || "unknown",
+              diagnostics,
+              {
+                lastErrorType: diagnostics.severity === "error" ? "provider_protocol_mismatch" : item.health?.lastErrorType || "",
+                message: diagnostics.issues.join("；")
+              }
+            )
+          }
+        : item
     );
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存模型配置", { targetType: "settings", action: "edit", light: true });
-  await syncApiSettings();
+  await syncApiSettings({ show: false });
+  showToast(
+    diagnostics.severity === "error"
+      ? `模型已保存，但 Provider 协议预检失败：${diagnostics.issues.join("；")}`
+      : "配置已同步到本地服务。"
+  );
 }
 
 async function testCurrentTaskRoute() {
@@ -1506,6 +1680,318 @@ async function testCurrentTaskRoute() {
   showToast(result.success ? "当前任务路由轻量测试完成" : `当前任务路由测试失败：${result.error || "未知错误"}`);
 }
 
+async function testCurrentTaskChain() {
+  const selectedTask = document.querySelector("#route-test-task")?.value || store.getState().apiConfig.routeTestTaskType || "analyzeScript";
+  const tasks = selectedTask === "analyzeScript"
+    ? ["analyzeScript", "analyzeEpisodeChunk", "aggregateScriptAnalysis"]
+    : [selectedTask];
+  busyAction = "完整测试当前任务链路";
+  render();
+  await syncApiSettings({ successMessage: "测试前已同步配置到本地服务。", show: false });
+  const current = readOpenInputs(store.getState());
+  const results = [];
+  for (const taskType of tasks) {
+    results.push(await runTaskRouteHealthCheck(taskType, current));
+  }
+  store.setState((state) => {
+    state.apiConfig.routeTestTaskType = selectedTask;
+    state.apiConfig.lastTaskChainTest = {
+      selectedTask,
+      tasks,
+      success: results.every((item) => item.success),
+      results,
+      warnings: selectedTask === "analyzeScript"
+        ? ["长剧本分析依赖 analyzeEpisodeChunk 和 aggregateScriptAnalysis，请分别测试。"]
+        : [],
+      createdAt: new Date().toISOString()
+    };
+    state.apiConfig.taskRouteHealth = {
+      ...(state.apiConfig.taskRouteHealth || {}),
+      ...Object.fromEntries(results.map((item) => [item.taskType, item]))
+    };
+    for (const item of results) {
+      if (!item.providerId) continue;
+      state.apiConfig.providers = state.apiConfig.providers.map((provider) =>
+        provider.id === item.providerId
+          ? {
+              ...provider,
+              health: createProviderHealthPatch(item.providerHealthStatus, item.diagnostics || {}, {
+                lastErrorType: item.errorType || "",
+                checks: item.checks,
+                suggestions: item.suggestions || [],
+                message: item.message || item.errorMessage || ""
+              })
+            }
+          : provider
+      );
+    }
+    return state;
+  }, "完整测试当前任务链路", { targetType: "settings", action: "generate", light: true });
+  busyAction = null;
+  showToast(results.every((item) => item.success) ? "完整任务链路测试通过" : "完整任务链路测试未通过：路由连通通过不代表该模型可用于长剧本分集 JSON 分析。");
+}
+
+async function runTaskRouteHealthCheck(taskType, current) {
+  const bundle = resolveTaskRouteBundle(current.apiConfig, taskType);
+  const checks = {
+    provider_ping: createCheck("provider_ping"),
+    chat_smoke: createCheck("chat_smoke"),
+    json_smoke: createCheck("json_smoke"),
+    task_smoke: createCheck("task_smoke")
+  };
+  const diagnostics = diagnoseProviderProtocol(bundle.provider || {}, bundle.model || {});
+  const startedAt = performance.now();
+  let errorType = "";
+  let errorMessage = "";
+  let suggestions = [...(diagnostics.suggestions || [])];
+
+  if (!bundle.provider || !bundle.model) {
+    errorType = "provider_auth_failed";
+    errorMessage = "未找到当前任务路由的 Provider 或 Model。";
+    checks.provider_ping = { ...checks.provider_ping, success: false, error: errorMessage };
+    return finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorType, errorMessage, suggestions, startedAt });
+  }
+  if (diagnostics.severity === "error") {
+    errorType = "provider_protocol_mismatch";
+    errorMessage = diagnostics.issues.join("；") || "Provider 协议预检失败。";
+    checks.provider_ping = { ...checks.provider_ping, success: false, error: errorMessage };
+    return finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorType, errorMessage, suggestions, startedAt });
+  }
+
+  if (bundle.provider.providerType === "local" || current.apiConfig.mode === "demo") {
+    checks.provider_ping = { ...checks.provider_ping, success: true, detail: "Demo Provider" };
+    checks.chat_smoke = { ...checks.chat_smoke, success: true, detail: "Demo Provider" };
+    checks.json_smoke = { ...checks.json_smoke, success: true, detail: "Demo Provider" };
+    const taskResult = await callModel({
+      taskType,
+      featureArea: featureAreaForTaskType(taskType),
+      projectId: current.currentProject.id,
+      inputMeta: createTaskSmokeInput(taskType, current),
+      schema: true,
+      state: current
+    });
+    checks.task_smoke = { ...checks.task_smoke, success: Boolean(taskResult.success), error: taskResult.error || "", rawOutputPreview: taskResult.rawOutputPreview || "" };
+    return finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorType: taskResult.errorType || "", errorMessage: taskResult.error || "", suggestions, startedAt });
+  }
+
+  try {
+    const ping = await fetch("/api/test-provider", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ providerId: bundle.provider.id, modelId: bundle.model.id, taskType, routeId: bundle.route?.id || null })
+    }).then((response) => response.json());
+    checks.provider_ping = {
+      ...checks.provider_ping,
+      success: Boolean(ping.ok),
+      error: ping.error || ping.errorMessage || "",
+      requestFormat: ping.requestFormat,
+      providerStatus: ping.providerStatus || null
+    };
+    if (!ping.ok) throw Object.assign(new Error(ping.error || ping.errorMessage || "provider_ping failed"), { payload: ping });
+  } catch (error) {
+    const payload = error.payload || {};
+    errorType = payload.errorType || classifyProviderError(error.message);
+    errorMessage = payload.error || payload.errorMessage || error.message;
+    suggestions = payload.suggestions || suggestProviderFix(errorMessage, bundle.provider, bundle.model);
+    checks.provider_ping = { ...checks.provider_ping, success: false, error: errorMessage };
+    return finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics: payload.diagnostics || diagnostics, errorType, errorMessage, suggestions, startedAt });
+  }
+
+  try {
+    const chat = await callServerModelSmoke({
+      bundle,
+      taskType,
+      messages: [
+        { role: "system", content: "你是模型连通性测试探针。" },
+        { role: "user", content: "请只回复 ROUTE_OK，不要解释。" }
+      ],
+      options: { maxOutputTokens: 32, temperature: 0, jsonModeRequired: false, timeoutMs: Math.min(bundle.route?.timeoutMs || bundle.provider.timeoutMs || 30000, 30000) }
+    });
+    checks.chat_smoke = { ...checks.chat_smoke, success: true, rawOutputPreview: String(chat.outputText || "").slice(0, 120), requestFormat: chat.requestFormat };
+  } catch (error) {
+    const payload = error.payload || {};
+    errorType = payload.errorType || classifyProviderError(error.message);
+    errorMessage = payload.error || payload.errorMessage || error.message;
+    suggestions = payload.suggestions || suggestProviderFix(errorMessage, bundle.provider, bundle.model);
+    checks.chat_smoke = { ...checks.chat_smoke, success: false, error: errorMessage };
+    return finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics: payload.diagnostics || diagnostics, errorType, errorMessage, suggestions, startedAt });
+  }
+
+  try {
+    const json = await callServerModelSmoke({
+      bundle,
+      taskType,
+      messages: [
+        { role: "system", content: "你是严格 JSON 生成器，只能输出 JSON。" },
+        { role: "user", content: "只输出 {\"ok\":true}，不要解释，不要 Markdown。" }
+      ],
+      options: { maxOutputTokens: 64, temperature: 0, jsonModeRequired: false, timeoutMs: Math.min(bundle.route?.timeoutMs || bundle.provider.timeoutMs || 30000, 30000) }
+    });
+    const parsed = parseTinyJson(json.outputText);
+    checks.json_smoke = { ...checks.json_smoke, success: parsed?.ok === true, rawOutputPreview: String(json.outputText || "").slice(0, 120), requestFormat: json.requestFormat };
+    if (parsed?.ok !== true) throw new Error("json_smoke 未返回 {\"ok\":true}");
+  } catch (error) {
+    const payload = error.payload || {};
+    errorType = payload.errorType || classifyProviderError(error.message);
+    errorMessage = payload.error || payload.errorMessage || error.message;
+    suggestions = payload.suggestions || suggestProviderFix(errorMessage, bundle.provider, bundle.model);
+    checks.json_smoke = { ...checks.json_smoke, success: false, error: errorMessage };
+    return finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics: payload.diagnostics || diagnostics, errorType, errorMessage, suggestions, startedAt });
+  }
+
+  const taskResult = await callModel({
+    taskType,
+    featureArea: featureAreaForTaskType(taskType),
+    projectId: current.currentProject.id,
+    inputMeta: createTaskSmokeInput(taskType, current),
+    schema: true,
+    state: current
+  });
+  checks.task_smoke = {
+    ...checks.task_smoke,
+    success: Boolean(taskResult.success),
+    error: taskResult.error || "",
+    errorType: taskResult.errorType || "",
+    rawOutputPreview: taskResult.rawOutputPreview || ""
+  };
+  errorType = taskResult.errorType || "";
+  errorMessage = taskResult.error || "";
+  suggestions = taskResult.success ? suggestions : suggestProviderFix(errorMessage, bundle.provider, bundle.model);
+  return finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorType, errorMessage, suggestions, startedAt, log: taskResult.log });
+}
+
+function createCheck(name) {
+  return { name, success: false, error: "", detail: "" };
+}
+
+function finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorType = "", errorMessage = "", suggestions = [], startedAt, log = null }) {
+  const success = Boolean(checks.provider_ping.success && checks.chat_smoke.success && checks.json_smoke.success && checks.task_smoke.success);
+  return {
+    taskType,
+    routeId: bundle.route?.id || null,
+    providerId: bundle.provider?.id || null,
+    providerName: bundle.provider?.name || "未选择",
+    modelId: bundle.model?.id || null,
+    modelName: bundle.model?.displayName || bundle.model?.modelName || "未选择",
+    requestFormat: diagnostics.resolvedRequestFormat || bundle.provider?.requestFormat || "auto",
+    resolvedRequestFormat: diagnostics.resolvedRequestFormat || "",
+    baseUrlType: diagnostics.protocolGuess || "unknown",
+    checks,
+    success,
+    message: success ? `该模型可用于 ${taskType}。` : "路由连通通过，但该模型暂不可用于长剧本分集 JSON 分析。",
+    errorType,
+    errorMessage,
+    diagnostics,
+    suggestions,
+    providerHealthStatus: success ? "ok" : errorType === "provider_protocol_mismatch" ? "protocol_error" : "task_json_failed",
+    log,
+    latencyMs: Math.round(performance.now() - startedAt),
+    createdAt: new Date().toISOString()
+  };
+}
+
+async function callServerModelSmoke({ bundle, taskType, messages, options }) {
+  const response = await fetch("/api/model-call", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      providerId: bundle.provider.id,
+      modelId: bundle.model.id,
+      routeId: bundle.route?.id || null,
+      taskType,
+      messages,
+      options,
+      requestFormat: bundle.provider.requestFormat || "auto"
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) {
+    const error = new Error(data.errorMessage || data.error || `server proxy smoke failed: ${response.status}`);
+    error.payload = data;
+    throw error;
+  }
+  return data;
+}
+
+function parseTinyJson(text = "") {
+  const raw = String(text || "").trim();
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(raw.slice(start, end + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function createTaskSmokeInput(taskType, current) {
+  if (taskType === "analyzeEpisodeChunk" || taskType === "schemaRepairAnalyzeEpisodeChunk") {
+    return {
+      projectTitle: current.scriptInput.title || "分集 JSON 测试",
+      genre: current.scriptInput.genre || "测试",
+      episodeNo: 1,
+      episodeTitle: "第一集",
+      episodeText: "第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。",
+      globalContextSummary: "分集 JSON 输出测试",
+      outputRequirements: ["只返回最小 EpisodeChunkAnalysis JSON 对象。"]
+    };
+  }
+  if (taskType === "aggregateScriptAnalysis") {
+    return {
+      projectMeta: { projectId: current.currentProject.id, title: "任务烟测", genre: "测试", episodeCount: 1 },
+      originalInput: { title: "任务烟测", genre: "测试", episodeCount: 1, text: "第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。" },
+      coverage: detectScriptCoverage("第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。", 1),
+      episodeChunkAnalyses: [
+        {
+          episodeNo: 1,
+          title: "第一集",
+          evidenceLedger: {
+            hookEvidence: [{ id: "E001", sourceText: "火车上，林清韵忽然吐血。", summary: "火车突发吐血危机", evidenceType: "hook", relatedBeatIds: ["B001"], confidence: 0.8 }],
+            conflictBeats: [],
+            suspenseEvidence: [],
+            episodeEvidence: [{ episodeNo: 1, beatIds: ["B001"], openingHookBeatIds: ["B001"], cliffhangerBeatIds: [], evidenceCompleteness: 0.8 }]
+          },
+          episodeBeatLedger: [{ beatId: "B001", episodeNo: 1, sourceText: "火车上，林清韵忽然吐血。", beatSummary: "林清韵在火车上忽然吐血", characters: ["林清韵"], audienceEmotion: ["危机"], suspenseQuestion: "她为什么吐血？", structureFunction: "开头钩子", confidence: 0.8 }],
+          episodeFunctionAnalysis: { episodeNo: 1, summary: "火车危机引出主角判断。", openingHook: "林清韵吐血", mainConflict: "突发蛊毒危机", coolMoment: "孙大为看出蛊毒", informationGain: "存在蛊毒", characterFunction: "引出孙大为能力", cliffhanger: "蛊毒来源待查", evidenceBeatIds: ["B001"], inferenceLevel: "原文明确", confidence: 0.8, riskNotes: [] },
+          reusablePatterns: [],
+          openQuestions: [],
+          continuityNotes: [],
+          confidence: 0.8,
+          needsReview: false,
+          sourceMeta: { evidenceValidation: { checkedCount: 1, validCount: 1, invalidEvidenceRatio: 0 } }
+        }
+      ],
+      failedChunks: [],
+      missingChunks: [],
+      skippedChunks: [],
+      expectedChunkCount: 1,
+      detectedChunkCount: 1
+    };
+  }
+  return { project: current.currentProject, text: "第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。", title: "任务烟测", genre: "测试", episodeCount: 1 };
+}
+
+function resolveTaskRouteBundle(config, taskType) {
+  const route =
+    config.routes.find((item) => item.enabled && item.taskType === taskType) ||
+    config.routes.find((item) => item.enabled && item.id === config.selectedRouteId) ||
+    null;
+  const model =
+    config.models.find((item) => item.id === route?.primaryModelId) ||
+    config.models.find((item) => item.id === config.selectedModelId) ||
+    config.models.find((item) => item.id === config.globalDefaultModelId) ||
+    null;
+  const provider = config.providers.find((item) => item.id === model?.providerId) || null;
+  return { route, model, provider };
+}
+
 async function testEpisodeChunkJsonOutput() {
   busyAction = "测试分集 JSON 输出";
   render();
@@ -1540,6 +2026,25 @@ async function testEpisodeChunkJsonOutput() {
   const validation = result.parsedJson?.sourceMeta?.evidenceValidation || null;
   const suspectedLegacyStructure = hasLegacyEpisodeChunkStructure(originalTestResult.parsedJson || originalTestResult.invalidParsedJson || result.parsedJson);
   store.setState((state) => {
+    const bundle = resolveTaskRouteBundle(state.apiConfig, "analyzeEpisodeChunk");
+    const diagnostics = diagnoseProviderProtocol(bundle.provider || {}, bundle.model || {}, { errorMessage: result.error || "" });
+    const errorType = result.errorType || classifyProviderError(result.error || "");
+    const health = finalizeTaskRouteHealth({
+      taskType: "analyzeEpisodeChunk",
+      bundle,
+      checks: {
+        provider_ping: { name: "provider_ping", success: result.mode === "demo" || !result.error?.includes("Provider") },
+        chat_smoke: { name: "chat_smoke", success: result.mode === "demo" || !result.error?.includes("Provider") },
+        json_smoke: { name: "json_smoke", success: Boolean(result.parsedJson || result.invalidParsedJson), error: result.error || "" },
+        task_smoke: { name: "task_smoke", success: Boolean(result.success), error: result.error || "", errorType }
+      },
+      diagnostics,
+      errorType,
+      errorMessage: result.error || "",
+      suggestions: suggestProviderFix(result.error || "", bundle.provider || {}, bundle.model || {}),
+      startedAt: performance.now() - (result.latencyMs || 0),
+      log: result.log
+    });
     state.apiConfig.lastEpisodeJsonTest = {
       success: result.success,
       jsonParseSuccess: Boolean(result.parsedJson || result.invalidParsedJson || result.outputText),
@@ -1557,6 +2062,25 @@ async function testEpisodeChunkJsonOutput() {
       warnings: result.warnings || [],
       createdAt: new Date().toISOString()
     };
+    state.apiConfig.taskRouteHealth = {
+      ...(state.apiConfig.taskRouteHealth || {}),
+      analyzeEpisodeChunk: health
+    };
+    if (bundle.provider?.id) {
+      state.apiConfig.providers = state.apiConfig.providers.map((provider) =>
+        provider.id === bundle.provider.id
+          ? {
+              ...provider,
+              health: createProviderHealthPatch(health.providerHealthStatus, diagnostics, {
+                lastErrorType: errorType,
+                checks: health.checks,
+                suggestions: health.suggestions,
+                message: health.message
+              })
+            }
+          : provider
+      );
+    }
     if (result.log) state.modelLogs = [result.log, ...state.modelLogs].slice(0, 80);
     return state;
   }, "测试 analyzeEpisodeChunk JSON 输出", { targetType: "settings", action: "generate", light: true });
@@ -1928,6 +2452,7 @@ function renderLongScriptProgress(progress) {
         <span>缺失：${(progress.missingChunks || []).length}</span>
         <span>跳过：${(progress.skippedChunks || []).length}</span>
       </div>
+      ${progress.routeReadiness ? renderLongScriptRouteReadiness(progress.routeReadiness) : ""}
       ${
         progress.abortedByProbeFailure
           ? `<div class="warning-list strong-warning"><p>${escapeHtml(probeFailureWarning(progress.probeFailureType || ""))}</p></div>`
@@ -2000,6 +2525,7 @@ function summarizeLongFailureStats(progress = {}) {
   const counts = new Map([
     ["JSON 解析失败", 0],
     ["schema 校验失败", 0],
+    ["Provider 协议不匹配", 0],
     ["Provider/API 失败", 0],
     ["sourceText 校验失败", 0],
     ["已跳过", (progress.skippedChunks || []).length]
@@ -2008,10 +2534,26 @@ function summarizeLongFailureStats(progress = {}) {
     const type = item.errorType || classifyChunkError(item.error || "");
     if (type === "json_parse") counts.set("JSON 解析失败", counts.get("JSON 解析失败") + 1);
     else if (type === "schema_validation") counts.set("schema 校验失败", counts.get("schema 校验失败") + 1);
+    else if (type === "provider_protocol_mismatch") counts.set("Provider 协议不匹配", counts.get("Provider 协议不匹配") + 1);
     else if (type === "source_text_validation") counts.set("sourceText 校验失败", counts.get("sourceText 校验失败") + 1);
     else if (type === "provider_api") counts.set("Provider/API 失败", counts.get("Provider/API 失败") + 1);
   }
   return [...counts.entries()].filter(([, count]) => count > 0).map(([label, count]) => ({ label, count }));
+}
+
+function renderLongScriptRouteReadiness(readiness = {}) {
+  return `
+    <div class="warning-list">
+      <p>长剧本任务门禁：${readiness.ready ? "通过" : "未通过"}</p>
+      ${(readiness.requiredTasks || ["analyzeEpisodeChunk", "aggregateScriptAnalysis"])
+        .map((taskType) => {
+          const item = readiness.health?.[taskType];
+          return `<p>${escapeHtml(taskType)}：task_smoke ${item?.checks?.task_smoke?.success ? "通过" : "未通过"}${item?.errorMessage ? `｜${escapeHtml(item.errorMessage)}` : ""}</p>`;
+        })
+        .join("")}
+      ${(readiness.warnings || []).map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
+    </div>
+  `;
 }
 
 function failureStageLabel(item = {}) {
@@ -2528,13 +3070,17 @@ function renderApiStatus(state) {
         </div>
         <div class="panel-actions">
           <button class="secondary-button" data-action="test-task-route">轻量测试当前任务路由</button>
+          <button class="secondary-button" data-action="test-task-chain">完整测试当前任务链路</button>
           <button class="secondary-button" data-action="test-episode-json">测试 analyzeEpisodeChunk JSON 输出</button>
           <button class="primary-button" data-action="switch-core-routes">一键切换核心任务到当前真实模型</button>
         </div>
+        <p class="muted">长剧本分析依赖 analyzeEpisodeChunk 和 aggregateScriptAnalysis，请分别测试；analyzeScript 测试通过不能代替分集/聚合任务。</p>
         ${renderRouteTestResult(config.lastRouteTestResult)}
+        ${renderTaskChainTestResult(config.lastTaskChainTest)}
         ${renderEpisodeJsonTestResult(config.lastEpisodeJsonTest)}
       </div>
     </section>
+    ${renderProviderHealthPanel(config)}
     <section class="panel notice-panel">
       <strong>${config.mode === "api" ? "真实 API Mode" : "Demo Mode"}</strong>
       <p>${config.mode === "api" ? "真实 API 调用失败时不会静默切到 Demo；任务路由仍指向 Demo 时默认阻断，只有手动允许 Demo 兜底才会继续生成。" : "当前使用 DemoRuleEngine-v1，所有结果来自本地规则引擎演示，不冒充真实 API。"}</p>
@@ -2622,6 +3168,69 @@ function renderEpisodeJsonTestResult(result) {
   `;
 }
 
+function renderTaskChainTestResult(result) {
+  if (!result) return "";
+  return `
+    <div class="suggestion-box ${result.success ? "" : "has-warning"}">
+      <h3>最近完整任务链路测试</h3>
+      ${(result.warnings || []).map((item) => `<p class="warning-text">${escapeHtml(item)}</p>`).join("")}
+      <div class="compact-list">
+        ${(result.results || [])
+          .map((item) => `
+            <div class="${item.success ? "" : "has-warning"}">
+              <strong>${escapeHtml(item.taskType)}</strong>
+              <span>${escapeHtml(item.message || "")}</span>
+              <small>provider_ping ${item.checks?.provider_ping?.success ? "通过" : "失败"}｜chat_smoke ${item.checks?.chat_smoke?.success ? "通过" : "失败"}｜json_smoke ${item.checks?.json_smoke?.success ? "通过" : "失败"}｜task_smoke ${item.checks?.task_smoke?.success ? "通过" : "失败"}</small>
+              ${item.errorMessage ? `<small class="warning-text">${escapeHtml(item.errorMessage)}</small>` : ""}
+              ${(item.suggestions || []).length ? `<small>建议：${escapeHtml(item.suggestions.join("；"))}</small>` : ""}
+            </div>
+          `)
+          .join("")}
+      </div>
+      <p class="${result.success ? "sync-ok" : "warning-text"}">${result.success ? "该模型可用于所测任务。" : "路由连通通过，但该模型暂不可用于长剧本分集 JSON 分析。"}</p>
+    </div>
+  `;
+}
+
+function renderProviderHealthPanel(config) {
+  const routeHealth = config.taskRouteHealth || {};
+  return `
+    <section class="panel">
+      <h2>Provider 健康状态</h2>
+      <div class="log-table health-table">
+        ${config.providers
+          .map((provider) => {
+            const models = config.models.filter((model) => model.providerId === provider.id);
+            const health = provider.health || {};
+            const diagnostics = health.diagnostics || diagnoseProviderProtocol(provider, models[0] || {});
+            const taskEpisode = Object.values(routeHealth).find((item) => item.providerId === provider.id && item.taskType === "analyzeEpisodeChunk");
+            const taskAggregate = Object.values(routeHealth).find((item) => item.providerId === provider.id && item.taskType === "aggregateScriptAnalysis");
+            const statusClass = health.status === "ok" ? "" : health.status === "warning" ? "has-warning" : health.status === "unknown" ? "" : "has-warning";
+            return `<div class="${statusClass}">
+              <strong>${escapeHtml(provider.name)}</strong>
+              <span>${escapeHtml(models.map((model) => model.displayName).join("、") || "未绑定模型")}</span>
+              <span>${escapeHtml(provider.requestFormat || "auto")} → ${escapeHtml(diagnostics.resolvedRequestFormat || "未知")}</span>
+              <span>Base URL：${escapeHtml(diagnostics.protocolGuess || "unknown")}</span>
+              <span>provider_ping：${renderHealthCheck(health.checks?.provider_ping)}</span>
+              <span>chat_smoke：${renderHealthCheck(health.checks?.chat_smoke)}</span>
+              <span>json_smoke：${renderHealthCheck(health.checks?.json_smoke)}</span>
+              <span>task_smoke analyzeEpisodeChunk：${taskEpisode?.checks?.task_smoke?.success ? "通过" : "未通过"}</span>
+              <span>task_smoke aggregateScriptAnalysis：${taskAggregate?.checks?.task_smoke?.success ? "通过" : "未通过"}</span>
+              <span>最近错误：${escapeHtml(health.lastErrorType || health.message || "无")}</span>
+              <span>修复建议：${escapeHtml((health.suggestions || diagnostics.suggestions || []).join("；") || "无")}</span>
+            </div>`;
+          })
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderHealthCheck(check) {
+  if (!check) return "未测试";
+  return check.success ? "通过" : "失败";
+}
+
 function renderProviderSettings(config) {
   const selected = config.providers.find((provider) => provider.id === config.selectedProviderId) || config.providers[0];
   return `
@@ -2632,11 +3241,11 @@ function renderProviderSettings(config) {
           <button class="secondary-button" data-action="add-provider-template" data-template="deepseek">DeepSeek 官方模板</button>
           <button class="secondary-button" data-action="add-provider-template" data-template="openai_proxy">OpenAI 代理模板</button>
         </div>
-        ${config.providers.map((provider) => `<button class="list-row ${selected?.id === provider.id ? "active" : ""}" data-action="select-provider" data-id="${provider.id}"><strong>${escapeHtml(provider.name)}</strong><span>${provider.providerType}｜${provider.requestFormat || "auto"}｜${provider.enabled ? "启用" : "停用"}｜Key ${maskApiKey(provider.apiKey)}</span></button>`).join("")}
+        ${config.providers.map((provider) => `<button class="list-row ${selected?.id === provider.id ? "active" : ""}" data-action="select-provider" data-id="${provider.id}"><strong>${escapeHtml(provider.name)}</strong><span>${provider.providerType}｜${provider.requestFormat || "auto"}｜${provider.enabled ? "启用" : "停用"}｜健康 ${provider.health?.status || "unknown"}｜Key ${maskApiKey(provider.apiKey)}</span></button>`).join("")}
       </div>
       <div class="panel">
         ${selected ? renderProviderForm(selected) : emptyState("暂无 Provider", "新增 Provider 后可配置 Base URL 与 API Key。")}
-        ${config.lastTestResult ? `<div class="suggestion-box ${config.lastTestResult.mode === "demo" ? "has-warning" : ""}"><h3>最近测试</h3>${keyValueGrid([["结果", config.lastTestResult.success ? "成功" : "失败"], ["模式", config.lastTestResult.mode || "未记录"], ["端点", config.lastTestResult.endpointType || "未记录"], ["请求格式", config.lastTestResult.requestFormat || "auto"], ["服务端状态", config.lastTestResult.serverStatus || "未记录"], ["Provider 状态", config.lastTestResult.providerStatus || "未记录"], ["说明", config.lastTestResult.message], ["Provider 原始预览", config.lastTestResult.providerRawPreview || "未记录"], ["设置同步时间", formatDate(config.lastTestResult.settingsUpdatedAt)], ["时间", formatDate(config.lastTestResult.createdAt)]])}${config.lastTestResult.mode === "demo" ? `<p class="warning-text">这是 Demo Provider 测试，不代表真实 API 可用。</p>` : ""}</div>` : ""}
+        ${config.lastTestResult ? `<div class="suggestion-box ${config.lastTestResult.mode === "demo" || !config.lastTestResult.success ? "has-warning" : ""}"><h3>最近测试</h3>${keyValueGrid([["结果", config.lastTestResult.success ? "成功" : "失败"], ["模式", config.lastTestResult.mode || "未记录"], ["端点", config.lastTestResult.endpointType || "未记录"], ["请求格式", config.lastTestResult.requestFormat || "auto"], ["错误归因", config.lastTestResult.errorType || "无"], ["服务端状态", config.lastTestResult.serverStatus || "未记录"], ["Provider 状态", config.lastTestResult.providerStatus || "未记录"], ["说明", config.lastTestResult.message], ["修复建议", (config.lastTestResult.suggestions || []).join("；") || "无"], ["Provider 原始预览", config.lastTestResult.providerRawPreview || "未记录"], ["设置同步时间", formatDate(config.lastTestResult.settingsUpdatedAt)], ["时间", formatDate(config.lastTestResult.createdAt)]])}${config.lastTestResult.mode === "demo" ? `<p class="warning-text">这是 Demo Provider 测试，不代表真实 API 可用。</p>` : ""}</div>` : ""}
       </div>
     </section>
   `;
@@ -2664,6 +3273,7 @@ function renderProviderForm(provider) {
     <p class="muted">OpenAI 代理、DeepSeek、OpenRouter、OneAPI/NewAPI 请用 openai_chat。只有官方 Gemini API 或明确 generateContent 接口才用 gemini_native。</p>
     <div class="panel-actions">
       <button class="primary-button" data-action="save-provider" data-id="${provider.id}">保存 Provider</button>
+      <button class="secondary-button" data-action="diagnose-provider" data-id="${provider.id}">诊断 Provider 协议</button>
       <button class="secondary-button" data-action="test-provider" data-id="${provider.id}">测试连接</button>
     </div>
   `;

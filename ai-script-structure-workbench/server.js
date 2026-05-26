@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeApiConfig } from "./src/model-config.js";
 import { resolveRequestFormat } from "./src/request-format.js";
+import { classifyProviderError, diagnoseProviderProtocol, suggestProviderFix } from "./src/provider-diagnostics.js";
 import { callGemini } from "./src/provider-adapters/gemini.js";
 import { callOpenAICompatible } from "./src/provider-adapters/openai-compatible.js";
 
@@ -126,10 +127,11 @@ async function handleApi(req, res, url) {
     let model = null;
     let settingsUpdatedAt = null;
     try {
-      const resolved = await resolveProviderModel(body, { requireCurrentProviderModel: true });
+      const resolved = await resolveProviderModel(body, { requireCurrentProviderModel: true, allowProtocolError: true });
       provider = resolved.provider;
       model = resolved.model;
       settingsUpdatedAt = resolved.settings.updatedAt || null;
+      const diagnostics = diagnoseProviderProtocol(provider, model);
       if (provider.providerType === "local") {
         const responseBody = {
           ok: true,
@@ -163,6 +165,34 @@ async function handleApi(req, res, url) {
         sendJson(res, 400, { ok: false, error: "缺少 Base URL 或 API Key。" });
         return true;
       }
+      if (diagnostics.severity === "error") {
+        const responseBody = {
+          ok: false,
+          endpointType: "server_proxy",
+          taskType: body.taskType || "testProvider",
+          routeId: body.routeId || null,
+          providerId: provider.id || null,
+          providerName: provider.name || "",
+          modelId: model.id || null,
+          modelName: model.displayName || model.modelName || "",
+          requestFormat: resolveRequestFormat({ provider, model }),
+          serverStatus: 400,
+          providerStatus: null,
+          providerRawPreview: "",
+          settingsUpdatedAt,
+          providerUpdatedAt: provider.updatedAt || null,
+          modelUpdatedAt: model.updatedAt || null,
+          latencyMs: Math.round(performance.now() - startedAt),
+          errorType: "provider_protocol_mismatch",
+          diagnostics,
+          suggestions: diagnostics.suggestions || [],
+          error: diagnostics.issues.join("；") || "Provider 协议预检失败。",
+          errorMessage: diagnostics.issues.join("；") || "Provider 协议预检失败。"
+        };
+        await appendServerProxyLog({ ...responseBody, source: "test-provider", success: false });
+        sendJson(res, 400, responseBody);
+        return true;
+      }
       const adapterResult = await performProviderCall({
         provider,
         model,
@@ -188,13 +218,15 @@ async function handleApi(req, res, url) {
         settingsUpdatedAt,
         providerUpdatedAt: provider.updatedAt || null,
         modelUpdatedAt: model.updatedAt || null,
+        diagnostics,
+        suggestions: diagnostics.suggestions || [],
         latencyMs: Math.round(performance.now() - startedAt),
         preview: adapterResult.outputText.slice(0, 300)
       };
       await appendServerProxyLog({ ...responseBody, source: "test-provider", success: true });
       sendJson(res, 200, responseBody);
     } catch (error) {
-      const normalized = normalizeProviderError(error);
+      const normalized = normalizeProviderError(error, provider, model);
       const responseBody = {
         ok: false,
         endpointType: "server_proxy",
@@ -211,6 +243,9 @@ async function handleApi(req, res, url) {
         settingsUpdatedAt,
         providerUpdatedAt: provider?.updatedAt || null,
         modelUpdatedAt: model?.updatedAt || null,
+        errorType: normalized.errorType,
+        diagnostics: normalized.diagnostics,
+        suggestions: normalized.suggestions,
         latencyMs: Math.round(performance.now() - startedAt),
         error: normalized.message,
         errorMessage: normalized.message
@@ -234,6 +269,13 @@ async function handleApi(req, res, url) {
       model = resolved.model;
       requestFormat = body.requestFormat || resolved.provider.requestFormat || "auto";
       provider = { ...resolved.provider, requestFormat };
+      const diagnostics = diagnoseProviderProtocol(provider, model);
+      if (diagnostics.severity === "error") {
+        const message = diagnostics.issues.join("；") || "Provider 协议预检失败。";
+        const protocolError = new Error(message);
+        protocolError.diagnostics = diagnostics;
+        throw protocolError;
+      }
       const adapterResult = await performProviderCall({
         provider,
         model,
@@ -265,7 +307,7 @@ async function handleApi(req, res, url) {
       await appendServerProxyLog({ ...responseBody, success: true });
       sendJson(res, 200, responseBody);
     } catch (error) {
-      const normalized = normalizeProviderError(error);
+      const normalized = normalizeProviderError(error, provider, model);
       const responseBody = {
         ok: false,
         endpointType: "server_proxy",
@@ -283,6 +325,9 @@ async function handleApi(req, res, url) {
         settingsUpdatedAt,
         providerUpdatedAt: provider?.updatedAt || null,
         modelUpdatedAt: model?.updatedAt || null,
+        errorType: normalized.errorType,
+        diagnostics: normalized.diagnostics,
+        suggestions: normalized.suggestions,
         error: normalized.message,
         errorMessage: normalized.message,
         latencyMs: Math.round(performance.now() - startedAt)
@@ -336,6 +381,9 @@ async function resolveProviderModel(body = {}, options = {}) {
   let model = settings.models.find((item) => item.id === modelId);
 
   if (!provider) throw new Error("未找到 Provider 配置。请先保存 Provider，再测试或调用。");
+  if (!options.allowProtocolError && provider.health?.status === "protocol_error") {
+    throw new Error("Provider 当前为 protocol_error，不能被任务路由选为 active model。请先修复 requestFormat / Base URL 并重新测试。");
+  }
 
   if (options.requireCurrentProviderModel) {
     const providerModels = settings.models.filter((item) => item.providerId === provider.id && item.enabled);
@@ -377,28 +425,40 @@ function previewProviderRaw(raw) {
   }
 }
 
-function normalizeProviderError(error) {
+function normalizeProviderError(error, provider = null, model = null) {
   const raw = error?.message || String(error || "未知错误");
+  const errorType = classifyProviderError(raw);
+  const diagnostics = provider && model ? diagnoseProviderProtocol(provider, model, { errorMessage: raw }) : null;
+  const suggestions = suggestProviderFix(raw, provider || {}, model || {});
   if (raw.includes("当前接口不接受 OpenAI Chat Completions 格式") || raw.includes("请求被中止") || raw.includes("服务端请求外部 Provider 失败")) {
-    return { message: raw };
+    return { message: raw, errorType, diagnostics, suggestions };
   }
   if (/Unknown name "messages"|Unknown name "max_tokens"|Unknown name "temperature"|Cannot find field/i.test(raw)) {
     return {
       message:
-        `${raw}。当前接口不接受 OpenAI Chat Completions 格式。若你使用 OpenAI 代理/DeepSeek，请将 requestFormat 改为 openai_chat，并确认 Base URL 是 OpenAI-compatible 地址；若你使用官方 Gemini API，请改为 gemini_native。`
+        `${raw}。当前接口不接受 OpenAI Chat Completions 请求体。你可能把 Gemini native 接口配置成了 OpenAI-compatible，或 Base URL 不是 /chat/completions 兼容地址。`,
+      errorType,
+      diagnostics,
+      suggestions
     };
   }
   if (/Failed to fetch|fetch failed/i.test(raw)) {
     return {
-      message: `${raw}。服务端请求外部 Provider 失败，请确认 Base URL、requestFormat、网络代理和服务商状态；浏览器侧真实任务已经通过本地 server proxy 转发。`
+      message: `${raw}。服务端请求外部 Provider 失败，请确认 Base URL、requestFormat、网络代理和服务商状态；浏览器侧真实任务已经通过本地 server proxy 转发。`,
+      errorType,
+      diagnostics,
+      suggestions
     };
   }
   if (/The user aborted a request|signal is aborted|AbortError|aborted/i.test(raw)) {
     return {
-      message: `${raw}。请求被中止，可能是超时、重复触发或页面状态切换。请查看 timeoutMs 和是否重复点击。`
+      message: `${raw}。请求被中止，可能是超时、重复触发或页面状态切换。请查看 timeoutMs 和是否重复点击。`,
+      errorType,
+      diagnostics,
+      suggestions
     };
   }
-  return { message: raw };
+  return { message: raw, errorType, diagnostics, suggestions };
 }
 
 function redactSecrets(value) {
