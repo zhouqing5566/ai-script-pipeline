@@ -1,25 +1,53 @@
-export async function parseJsonWithRepair(text, options = {}) {
-  const attempts = [
-    () => JSON.parse(text),
-    () => JSON.parse(extractJsonFence(text)),
-    () => JSON.parse(extractObjectBody(text))
-  ];
+import { extractJsonCandidate } from "./json-extractor.js";
 
+export async function parseJsonWithRepair(text, options = {}) {
+  const extracted = extractJsonCandidate(text);
+  const candidate = extracted.candidate || String(text || "");
   const errors = [];
-  for (const attempt of attempts) {
-    try {
-      return { ok: true, value: attempt(), repaired: false, error: null };
-    } catch (error) {
-      errors.push(error.message);
-    }
+  try {
+    return {
+      ok: true,
+      value: JSON.parse(candidate),
+      repaired: false,
+      error: null,
+      extractionMethod: extracted.extractionMethod,
+      extractionWarnings: extracted.warnings,
+      jsonRepairAttempted: false,
+      jsonRepairError: null,
+      parseErrorPosition: null
+    };
+  } catch (error) {
+    errors.push(error.message);
   }
 
   if (typeof options.repairFn === "function") {
     try {
-      const repairedText = await options.repairFn(text, errors);
-      return { ok: true, value: JSON.parse(repairedText), repaired: true, error: null };
+      const repairedText = await options.repairFn(candidate || text, errors);
+      const repairedExtraction = extractJsonCandidate(repairedText);
+      return {
+        ok: true,
+        value: JSON.parse(repairedExtraction.candidate || repairedText),
+        repaired: true,
+        error: null,
+        extractionMethod: repairedExtraction.extractionMethod === "none" ? extracted.extractionMethod : repairedExtraction.extractionMethod,
+        extractionWarnings: [...extracted.warnings, ...repairedExtraction.warnings],
+        jsonRepairAttempted: true,
+        jsonRepairError: null,
+        parseErrorPosition: parseErrorPosition(errors[0])
+      };
     } catch (error) {
       errors.push(error.message);
+      return {
+        ok: false,
+        value: null,
+        repaired: false,
+        error: `JSON 解析失败：${errors.join("；")}`,
+        extractionMethod: extracted.extractionMethod,
+        extractionWarnings: extracted.warnings,
+        jsonRepairAttempted: true,
+        jsonRepairError: error.message,
+        parseErrorPosition: parseErrorPosition(errors[0])
+      };
     }
   }
 
@@ -27,7 +55,12 @@ export async function parseJsonWithRepair(text, options = {}) {
     ok: false,
     value: null,
     repaired: false,
-    error: `JSON 解析失败：${errors.join("；")}`
+    error: `JSON 解析失败：${errors.join("；")}${extracted.warnings.length ? `；${extracted.warnings.join("；")}` : ""}`,
+    extractionMethod: extracted.extractionMethod,
+    extractionWarnings: extracted.warnings,
+    jsonRepairAttempted: false,
+    jsonRepairError: null,
+    parseErrorPosition: parseErrorPosition(errors[0])
   };
 }
 
@@ -43,4 +76,9 @@ export function extractObjectBody(text = "") {
   const end = source.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("未找到 JSON 对象边界");
   return source.slice(start, end + 1);
+}
+
+function parseErrorPosition(message = "") {
+  const match = String(message).match(/position\s+(\d+)/i);
+  return match ? Number(match[1]) : null;
 }

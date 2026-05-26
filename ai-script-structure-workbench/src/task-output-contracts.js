@@ -349,6 +349,53 @@ const contracts = {
   "confidence": 0.8,
   "needsReview": false
 }`,
+  analyzeEpisodeChunkCompact: `必须返回一个可直接 JSON.parse 的 EpisodeChunkAnalysis 根对象。只返回 JSON，不要解释。
+只分析当前 episodeText，不推断后续全剧结局，不补写未输入集数。
+所有 sourceText 必须来自当前集文本，不得编造。
+长剧本分集默认使用 compact 合同，coverage / characterMentions / goldfingerEvidence / suspenseEvidence 可由本地 normalize 补齐。
+根对象结构：
+{
+  "episodeNo": 1,
+  "title": "",
+  "evidenceLedger": {
+    "hookEvidence": [],
+    "conflictBeats": [],
+    "suspenseEvidence": [],
+    "episodeEvidence": []
+  },
+  "episodeBeatLedger": [
+    {
+      "beatId": "B001",
+      "episodeNo": 1,
+      "sourceText": "必须来自当前集原文",
+      "beatSummary": "",
+      "characters": [],
+      "audienceEmotion": [],
+      "suspenseQuestion": "",
+      "structureFunction": "",
+      "confidence": 0.8
+    }
+  ],
+  "episodeFunctionAnalysis": {
+    "episodeNo": 1,
+    "summary": "",
+    "openingHook": "",
+    "mainConflict": "",
+    "coolMoment": "",
+    "informationGain": "",
+    "characterFunction": "",
+    "cliffhanger": "",
+    "evidenceBeatIds": [],
+    "inferenceLevel": "原文明确",
+    "confidence": 0.8,
+    "riskNotes": []
+  },
+  "reusablePatterns": [],
+  "openQuestions": [],
+  "continuityNotes": [],
+  "confidence": 0.8,
+  "needsReview": false
+}`,
   aggregateScriptAnalysis: `必须返回标准 analyzeScript 根对象。
 只基于 episodeChunkAnalyses 的 evidenceLedger、episodeBeatLedger、episodeFunctionAnalysis 做聚合。
 不要重新编造原文证据；全剧主题/主线/人物/结局必须引用已有 evidenceIds / beatIds。
@@ -358,7 +405,8 @@ const contracts = {
   mergeEvidenceLedAnalysis: `合并 evidence-led 分析结果，要求与 aggregateScriptAnalysis 相同。`
 };
 
-export function getTaskOutputContract(taskType) {
+export function getTaskOutputContract(taskType, options = {}) {
+  if ((taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk") && options.compact) return contracts.analyzeEpisodeChunkCompact;
   if (taskType === "analyzeScriptChunk") return contracts.analyzeEpisodeChunk;
   if (taskType === "mergeEvidenceLedAnalysis") return contracts.aggregateScriptAnalysis;
   if (taskType === "schemaRepairAnalyzeScript") {

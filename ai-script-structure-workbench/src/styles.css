@@ -1704,7 +1704,7 @@ pre {
 
 .long-progress-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(110px, 1fr));
+  grid-template-columns: repeat(6, minmax(110px, 1fr));
   gap: 8px;
   margin: 10px 0;
 }
@@ -1756,13 +1756,38 @@ pre {
 
 .failed-chunk-list div {
   display: grid;
-  grid-template-columns: 150px minmax(120px, 1fr) minmax(0, 2fr);
+  grid-template-columns: 150px minmax(120px, 1fr) 120px minmax(0, 2fr);
   gap: 8px;
   align-items: center;
 }
 
+.failed-chunk-list p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .failed-chunk-list em {
   font-style: normal;
+}
+
+.failure-stat-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 13px;
+}
+
+.failure-stat-list span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #ffedd5;
 }
 
 .chunk-progress-row {

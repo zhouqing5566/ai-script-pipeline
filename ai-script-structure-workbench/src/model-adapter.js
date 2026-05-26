@@ -76,6 +76,12 @@ export async function callModel({
   let endpointType = null;
   let providerStatus = null;
   let providerRawPreview = null;
+  let rawOutputPreview = null;
+  let jsonExtractionMethod = null;
+  let jsonRepairAttempted = false;
+  let jsonRepairError = null;
+  let parseErrorPosition = null;
+  let errorType = null;
   let serverStatus = null;
   let settingsUpdatedAt = null;
   let providerUpdatedAt = null;
@@ -126,6 +132,12 @@ export async function callModel({
       endpointType = response.endpointType;
       providerStatus = response.providerStatus || response.status || null;
       providerRawPreview = response.providerRawPreview || null;
+      rawOutputPreview = response.rawOutputPreview || null;
+      jsonExtractionMethod = response.jsonExtractionMethod || null;
+      jsonRepairAttempted = Boolean(response.jsonRepairAttempted);
+      jsonRepairError = response.jsonRepairError || null;
+      parseErrorPosition = response.parseErrorPosition ?? null;
+      errorType = response.errorType || null;
       serverStatus = response.serverStatus || response.status || null;
       settingsUpdatedAt = response.settingsUpdatedAt || null;
       providerUpdatedAt = response.providerUpdatedAt || null;
@@ -145,6 +157,14 @@ export async function callModel({
       providerUpdatedAt = mainMeta.providerUpdatedAt || providerUpdatedAt;
       modelUpdatedAt = mainMeta.modelUpdatedAt || modelUpdatedAt;
     }
+    copyJsonErrorMeta(providerError, {
+      setRawOutputPreview: (value) => (rawOutputPreview = value || rawOutputPreview),
+      setJsonExtractionMethod: (value) => (jsonExtractionMethod = value || jsonExtractionMethod),
+      setJsonRepairAttempted: (value) => (jsonRepairAttempted = jsonRepairAttempted || Boolean(value)),
+      setJsonRepairError: (value) => (jsonRepairError = value || jsonRepairError),
+      setParseErrorPosition: (value) => (parseErrorPosition = value ?? parseErrorPosition),
+      setErrorType: (value) => (errorType = value || errorType)
+    });
     if (!attemptErrors.length) attemptErrors.push(`主模型失败：${providerError.message}`);
     if (selection.mode === "api") {
       const fallback = selectFallbackModel({
@@ -181,6 +201,12 @@ export async function callModel({
           endpointType = response.endpointType;
           providerStatus = response.providerStatus || response.status || null;
           providerRawPreview = response.providerRawPreview || null;
+          rawOutputPreview = response.rawOutputPreview || null;
+          jsonExtractionMethod = response.jsonExtractionMethod || null;
+          jsonRepairAttempted = Boolean(response.jsonRepairAttempted);
+          jsonRepairError = response.jsonRepairError || null;
+          parseErrorPosition = response.parseErrorPosition ?? null;
+          errorType = response.errorType || null;
           serverStatus = response.serverStatus || response.status || null;
           settingsUpdatedAt = response.settingsUpdatedAt || null;
           providerUpdatedAt = response.providerUpdatedAt || null;
@@ -199,6 +225,14 @@ export async function callModel({
             providerUpdatedAt = fallbackMeta.providerUpdatedAt || providerUpdatedAt;
             modelUpdatedAt = fallbackMeta.modelUpdatedAt || modelUpdatedAt;
           }
+          copyJsonErrorMeta(fallbackError, {
+            setRawOutputPreview: (value) => (rawOutputPreview = value || rawOutputPreview),
+            setJsonExtractionMethod: (value) => (jsonExtractionMethod = value || jsonExtractionMethod),
+            setJsonRepairAttempted: (value) => (jsonRepairAttempted = jsonRepairAttempted || Boolean(value)),
+            setJsonRepairError: (value) => (jsonRepairError = value || jsonRepairError),
+            setParseErrorPosition: (value) => (parseErrorPosition = value ?? parseErrorPosition),
+            setErrorType: (value) => (errorType = value || errorType)
+          });
           if (!attemptErrors.some((item) => item.includes("备用模型"))) attemptErrors.push(`备用模型失败：${fallbackError.message}`);
           error = attemptErrors.join("；");
         }
@@ -240,6 +274,12 @@ export async function callModel({
     serverStatus,
     providerStatus,
     providerRawPreview,
+    rawOutputPreview,
+    jsonExtractionMethod,
+    jsonRepairAttempted,
+    jsonRepairError,
+    parseErrorPosition,
+    errorType,
     settingsUpdatedAt,
     providerUpdatedAt,
     modelUpdatedAt,
@@ -272,6 +312,12 @@ export async function callModel({
     providerStatus,
     serverStatus,
     providerRawPreview,
+    rawOutputPreview,
+    jsonExtractionMethod,
+    jsonRepairAttempted,
+    jsonRepairError,
+    parseErrorPosition,
+    errorType,
     modelId: result.modelId,
     modelName: model?.displayName || model?.modelName || "未选择",
     skillVersion: matchedSkills.map((skill) => `${skill.name} ${skill.version}`).join("；") || "未匹配",
@@ -579,6 +625,22 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
     warnings.push(`模型返回包含 ${unwrapped.unwrapPath.join(".")} 外层，已自动展开为任务根对象。`);
   }
 
+  if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk") {
+    const normalized = coerceEpisodeChunkOutput(unwrapped.value, inputMeta);
+    warnings.push(...normalized.warnings);
+    return {
+      value: normalized.value,
+      warnings,
+      meta: {
+        unwrapped: unwrapped.changed,
+        unwrapPath: unwrapped.unwrapPath,
+        ...(normalized.value.sourceMeta || {}),
+        usableForLearning: !normalized.value.needsReview,
+        usableForProduction: !normalized.value.needsReview
+      }
+    };
+  }
+
   if (!isAnalyzeRootTask(taskType)) {
     return {
       value: unwrapped.value,
@@ -606,6 +668,34 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
       : "真实模型输出的剧本分析结构不完整，已按标准分析档案补齐缺失字段；请查看质量备注并按需重新生成。"
   );
   return { value: normalized, warnings, meta };
+}
+
+function coerceEpisodeChunkOutput(value, inputMeta = {}) {
+  const base = analyzeEpisodeChunk(inputMeta);
+  const source = isPlainObject(value) ? value : {};
+  const merged = deepMerge(base, source);
+  const warnings = [];
+  merged.episodeNo = Number(source.episodeNo) || Number(inputMeta.episodeNo) || base.episodeNo || null;
+  merged.title = source.title || inputMeta.episodeTitle || base.title || `第${merged.episodeNo || "?"}集`;
+  merged.coverage = isPlainObject(source.coverage) ? source.coverage : base.coverage;
+  merged.evidenceLedger = isPlainObject(source.evidenceLedger) ? deepMerge(base.evidenceLedger, source.evidenceLedger) : base.evidenceLedger;
+  merged.episodeBeatLedger = Array.isArray(source.episodeBeatLedger) && source.episodeBeatLedger.length ? source.episodeBeatLedger : base.episodeBeatLedger;
+  merged.episodeFunctionAnalysis = isPlainObject(source.episodeFunctionAnalysis)
+    ? ensureEpisodeAnalysisContract(source.episodeFunctionAnalysis, base.episodeFunctionAnalysis)
+    : base.episodeFunctionAnalysis;
+  merged.reusablePatterns = Array.isArray(source.reusablePatterns) ? source.reusablePatterns : [];
+  merged.openQuestions = Array.isArray(source.openQuestions) && source.openQuestions.length ? source.openQuestions : ["本集后续悬念待复核。"];
+  merged.continuityNotes = Array.isArray(source.continuityNotes) && source.continuityNotes.length ? source.continuityNotes : ["本集未发现明确连续性备注。"];
+  merged.confidence = Number(source.confidence ?? base.confidence ?? 0.55);
+  merged.needsReview = Boolean(source.needsReview ?? base.needsReview);
+  merged.sourceMeta = { ...(source.sourceMeta || {}), normalizedEpisodeChunk: true };
+  applyEvidenceValidationToAnalysis(merged, inputMeta.episodeText || inputMeta.text || "");
+  const validation = merged.sourceMeta.evidenceValidation || {};
+  if ((validation.invalidEvidenceRatio || 0) > 0.5 || (validation.checkedCount || 0) === 0) {
+    merged.needsReview = true;
+    warnings.push("分集 evidence/sourceText 校验不足，需复核或重试。");
+  }
+  return { value: merged, warnings };
 }
 
 function unwrapTaskPayload(value, taskType) {
@@ -925,8 +1015,40 @@ function uniqueList(items = []) {
   return [...new Set(items.filter(Boolean))];
 }
 
+function attachJsonErrorMeta(error, response = {}, errorType = "json_parse") {
+  error.rawOutputPreview = response.rawOutputPreview || createRawOutputPreview(response.outputText);
+  error.jsonExtractionMethod = response.jsonExtractionMethod || "none";
+  error.jsonRepairAttempted = Boolean(response.jsonRepairAttempted);
+  error.jsonRepairError = response.jsonRepairError || null;
+  error.parseErrorPosition = response.parseErrorPosition ?? null;
+  error.errorType = errorType;
+  return error;
+}
+
+function copyJsonErrorMeta(error, setters = {}) {
+  if (!error) return;
+  setters.setRawOutputPreview?.(error.rawOutputPreview);
+  setters.setJsonExtractionMethod?.(error.jsonExtractionMethod);
+  setters.setJsonRepairAttempted?.(error.jsonRepairAttempted);
+  setters.setJsonRepairError?.(error.jsonRepairError);
+  setters.setParseErrorPosition?.(error.parseErrorPosition);
+  setters.setErrorType?.(error.errorType);
+}
+
+function createRawOutputPreview(text = "", limit = 500) {
+  return redactPreview(String(text || "").slice(0, limit));
+}
+
+function redactPreview(text = "") {
+  return String(text)
+    .replace(/(api[_-]?key|authorization|x-goog-api-key)(["'\s:=]+)([^"'\s,}]+)/gi, "$1$2[已脱敏]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer [已脱敏]")
+    .replace(/sk-[A-Za-z0-9._-]{12,}/g, "sk-[已脱敏]");
+}
+
 async function executeApiAttempt({ taskType, projectId, skillIds, provider, model, messages, options, schema, state, project, inputMeta, route }) {
   const response = await callProvider({ provider, model, messages, options, taskType, route });
+  response.rawOutputPreview = createRawOutputPreview(response.outputText);
   let parsedJson = null;
   if (schema || options.jsonModeRequired) {
     const repaired = await parseJsonWithRepair(response.outputText, {
@@ -948,12 +1070,29 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
               return repairResult.outputText;
             }
     });
-    if (!repaired.ok) throw new Error(repaired.error);
+    response.jsonExtractionMethod = repaired.extractionMethod || "none";
+    response.jsonRepairAttempted = Boolean(repaired.jsonRepairAttempted);
+    response.jsonRepairError = repaired.jsonRepairError || null;
+    response.parseErrorPosition = repaired.parseErrorPosition ?? null;
+    response.schemaWarnings = [
+      ...(response.schemaWarnings || []),
+      ...(repaired.extractionWarnings || []),
+      repaired.extractionMethod && repaired.extractionMethod !== "direct" ? "模型输出包含非 JSON 前后缀，已自动提取 JSON 主体。" : ""
+    ].filter(Boolean);
+    if (!repaired.ok) {
+      const error = new Error(repaired.error);
+      attachJsonErrorMeta(error, response, "json_parse");
+      throw error;
+    }
     const normalized = normalizeParsedOutputForTask(taskType, repaired.value, inputMeta || { project });
     parsedJson = normalized.value;
     const shape = validateTaskOutput(taskType, parsedJson);
-    if (!shape.ok) throw new Error(schemaValidationMessage(taskType, shape.issues));
-    response.schemaWarnings = normalized.warnings;
+    if (!shape.ok) {
+      const error = new Error(schemaValidationMessage(taskType, shape.issues));
+      attachJsonErrorMeta(error, response, "schema_validation");
+      throw error;
+    }
+    response.schemaWarnings = [...(response.schemaWarnings || []), ...(normalized.warnings || [])];
     response.schemaMeta = normalized.meta || null;
   }
   return {
@@ -966,6 +1105,12 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
     serverStatus: response.serverStatus,
     providerStatus: response.providerStatus,
     providerRawPreview: response.providerRawPreview,
+    rawOutputPreview: response.rawOutputPreview,
+    jsonExtractionMethod: response.jsonExtractionMethod || "none",
+    jsonRepairAttempted: Boolean(response.jsonRepairAttempted),
+    jsonRepairError: response.jsonRepairError || null,
+    parseErrorPosition: response.parseErrorPosition ?? null,
+    errorType: response.errorType || null,
     settingsUpdatedAt: response.settingsUpdatedAt,
     providerUpdatedAt: response.providerUpdatedAt,
     modelUpdatedAt: response.modelUpdatedAt,
@@ -1131,7 +1276,7 @@ function normalizeClientProviderError(message = "") {
 
 export function shouldRetryModelError(error) {
   const message = error?.message || String(error || "");
-  if (/结构校验失败|当前接口不接受 OpenAI Chat Completions 格式|缺少 Base URL|缺少 API Key|模型不属于当前 Provider|未找到 Provider 配置|未找到模型配置|400\b/i.test(message)) {
+  if (/JSON 解析失败|not valid JSON|未找到 JSON|结构校验失败|当前接口不接受 OpenAI Chat Completions 格式|缺少 Base URL|缺少 API Key|模型不属于当前 Provider|未找到 Provider 配置|未找到模型配置|400\b/i.test(message)) {
     return false;
   }
   if (/Failed to fetch|fetch failed|timeout|timed out|超时|aborted|AbortError|请求被中止|429\b|500\b|502\b|503\b|504\b|empty response|空响应/i.test(message)) {
@@ -1142,6 +1287,7 @@ export function shouldRetryModelError(error) {
 
 export function modelErrorRetryBlockReason(error) {
   const message = error?.message || String(error || "");
+  if (/JSON 解析失败|not valid JSON|未找到 JSON/i.test(message)) return "模型返回非 JSON，重试同一 Prompt 通常会重复消耗 token，请先执行分集 JSON 输出测试、调整 Prompt 或更换模型。";
   if (/结构校验失败/i.test(message)) return "结构校验失败，重试会重复消耗 token，请先修复输出 schema 或 Prompt。";
   if (/当前接口不接受 OpenAI Chat Completions 格式|Unknown name "messages"|Unknown name "max_tokens"|Unknown name "temperature"|Cannot find field/i.test(message)) return "400 请求格式错误或 requestFormat 不匹配，请修正 Provider 请求格式。";
   if (/缺少 Base URL/i.test(message)) return "缺少 Base URL，请先保存 Provider 配置。";

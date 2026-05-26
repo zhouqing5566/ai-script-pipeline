@@ -60,6 +60,7 @@ import {
 import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, shouldUseGeminiNative } from "../src/provider-adapters/gemini.js";
 import { buildOpenAIChatRequestBody } from "../src/provider-adapters/openai-compatible.js";
 import { labelForKey } from "../src/schemas.js";
+import { extractJsonCandidate } from "../src/json-extractor.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -243,6 +244,11 @@ assert.equal(localFallbackGate.sourceMeta.needsReview, true);
 assert.equal(localFallbackGate.sourceMeta.usableForSkillLearning, false);
 assert.equal(localFallbackGate.sourceMeta.usableForProduction, false);
 assert.equal(localFallbackGate.sourceMeta.usableForFullScriptCase, false);
+const skippedGate = { coverage: { inputType: "full_script" }, sourceMeta: { skippedChunks: [{ episodeNo: 4, skippedDueToJsonFailure: true }], failedChunks: [], missingChunks: [], evidenceValidation: { invalidEvidenceRatio: 0 } } };
+applyLongScriptGateFlags(skippedGate);
+assert.equal(skippedGate.sourceMeta.needsReview, true);
+assert.equal(skippedGate.sourceMeta.usableForSkillLearning, false);
+assert.equal(skippedGate.sourceMeta.completeAggregation, false);
 const signatureA = createLongScriptInputSignature({ text: "第一集\n内容", episodeCount: 1, userConfirmedFullScript: false });
 const signatureB = createLongScriptInputSignature({ text: "第一集\n内容", episodeCount: 1, userConfirmedFullScript: false });
 const signatureC = createLongScriptInputSignature({ text: "第一集\n内容已改", episodeCount: 1, userConfirmedFullScript: false });
@@ -444,6 +450,12 @@ const geminiBody = messagesToGeminiRequestBody(
 assert.equal(geminiBody.systemInstruction.parts[0].text, "系统原则");
 assert.equal(geminiBody.contents[0].parts[0].text, "请返回 JSON");
 assert.equal(geminiBody.generationConfig.responseMimeType, "application/json");
+const prefixedJson = extractJsonCandidate('作为剧本结构顾问，我先说明：{"ok":true,"items":[1,2]}谢谢。');
+assert.equal(prefixedJson.extractionMethod, "brace_match");
+assert.deepEqual(JSON.parse(prefixedJson.candidate), { ok: true, items: [1, 2] });
+const fencedJson = extractJsonCandidate("```json\n{\"ok\":true}\n```");
+assert.equal(fencedJson.extractionMethod, "fenced_json");
+assert.deepEqual(JSON.parse(fencedJson.candidate), { ok: true });
 
 const deepSeekTemplate = createDeepSeekTemplate();
 assert.equal(deepSeekTemplate.provider.providerType, "deepseek");
@@ -566,6 +578,87 @@ assert.equal(wrappedCompleteAnalysisResult.parsedJson.basicInfo.userGenreNote, "
 assert.equal(wrappedCompleteAnalysisResult.parsedJson.basicInfo.episodeCount, 24);
 assert.deepEqual(wrappedCompleteAnalysisResult.schemaMeta.unwrapPath, ["result", "scriptAnalysis"]);
 assert.ok(wrappedCompleteAnalysisResult.warnings.some((warning) => warning.includes("result.scriptAnalysis")));
+delete globalThis.__MODEL_CALL_PROXY__;
+
+const episodeJsonCalls = [];
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
+  episodeJsonCalls.push(payload);
+  return {
+    outputText:
+      "作为剧本结构顾问，我先给出结果：" +
+      JSON.stringify({
+        episodeNo: 1,
+        title: "第一集",
+        evidenceLedger: {
+          hookEvidence: [
+            {
+              id: "E001",
+              episodeNo: 1,
+              sourceText: "火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。",
+              summary: "火车危机与蛊毒识别",
+              evidenceType: "hook",
+              relatedBeatIds: ["B001"],
+              confidence: 0.8
+            }
+          ]
+        },
+        episodeBeatLedger: [
+          {
+            beatId: "B001",
+            episodeNo: 1,
+            sourceText: "火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。",
+            beatSummary: "林清韵吐血，孙大为识别蛊毒",
+            characters: ["林清韵", "孙大为"],
+            audienceEmotion: ["危机", "好奇"],
+            suspenseQuestion: "孙大为如何救人？",
+            structureFunction: "开头钩子",
+            confidence: 0.85
+          }
+        ],
+        episodeFunctionAnalysis: {
+          episodeNo: 1,
+          summary: "火车突发蛊毒危机",
+          openingHook: "公共空间突发危机",
+          mainConflict: "病危与识毒",
+          coolMoment: "孙大为看出蛊毒",
+          informationGain: "主角懂蛊",
+          characterFunction: "展示主角能力",
+          cliffhanger: "蛊毒来源待查",
+          evidenceBeatIds: ["B001"],
+          inferenceLevel: "原文明确",
+          confidence: 0.85,
+          riskNotes: []
+        },
+        reusablePatterns: [],
+        openQuestions: ["谁下的蛊？"],
+        continuityNotes: [],
+        confidence: 0.85,
+        needsReview: false
+      }),
+    tokenUsage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+    requestFormat: payload.requestFormat,
+    endpointType: "server_proxy",
+    status: 200
+  };
+};
+const episodeJsonResult = await callModel({
+  taskType: "analyzeEpisodeChunk",
+  featureArea: "剧本分析中心",
+  inputMeta: {
+    projectTitle: "分集 JSON 测试",
+    episodeNo: 1,
+    episodeTitle: "第一集",
+    episodeText: "第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。"
+  },
+  schema: true,
+  state: apiSuccessState
+});
+assert.equal(episodeJsonResult.success, true);
+assert.equal(episodeJsonResult.jsonExtractionMethod, "brace_match");
+assert.ok(episodeJsonResult.warnings.some((warning) => warning.includes("已自动提取 JSON 主体")));
+assert.equal(episodeJsonResult.parsedJson.episodeNo, 1);
+assert.ok((episodeJsonResult.parsedJson.sourceMeta.evidenceValidation.validCount || 0) >= 1);
+assert.equal(episodeJsonCalls.length, 1);
 delete globalThis.__MODEL_CALL_PROXY__;
 
 const wrappedAnalysisCalls = [];
@@ -804,6 +897,7 @@ assert.equal(shouldRetryModelError(new Error("Failed to fetch")), true);
 assert.equal(shouldRetryModelError(new Error("Provider 请求失败：429 rate limited")), true);
 assert.equal(shouldRetryModelError(new Error("Provider 请求失败：503 unavailable")), true);
 assert.equal(shouldRetryModelError(new Error("结构校验失败：缺少 directionCandidates")), false);
+assert.equal(shouldRetryModelError(new Error("JSON 解析失败：Unexpected token 作")), false);
 assert.equal(shouldRetryModelError(new Error("Provider 请求失败：400 Unknown name \"messages\"")), false);
 delete globalThis.__MODEL_CALL_PROXY__;
 
@@ -939,6 +1033,14 @@ assert.ok(appSource.includes("当前剧本文本已变化，旧分集结果可�
 assert.ok(appSource.includes("failureStage"));
 assert.ok(appSource.includes("失败阶段："));
 assert.ok(appSource.includes("分集结果已保留，可只重试全剧聚合。"));
+assert.ok(appSource.includes("测试 analyzeEpisodeChunk JSON 输出"));
+assert.ok(appSource.includes("分集 JSON 探针中"));
+assert.ok(appSource.includes("assertProbeChunkUsable"));
+assert.ok(appSource.includes("jsonFailureStreak >= 3"));
+assert.ok(appSource.includes("skippedDueToJsonFailure"));
+assert.ok(appSource.includes("连续 3 个分集返回非 JSON，已暂停长剧本分析"));
+assert.ok(appSource.includes("rawOutputPreview"));
+assert.ok(appSource.includes('draft.steps[3].status = aggregateSkipped || aggregateFailed ? "跳过" : "成功"'));
 assert.ok(appSource.includes("chunkResults[chunkKey]"));
 assert.ok(appSource.includes("Object.values(chunkResults)"));
 assert.ok(appSource.includes("missingChunks"));
@@ -960,7 +1062,12 @@ const coverageSource = await fs.readFile(new URL("../src/script-coverage.js", im
 const splitterSource = await fs.readFile(new URL("../src/script-splitter.js", import.meta.url), "utf8");
 const longAnalysisSource = await fs.readFile(new URL("../src/long-script-analysis.js", import.meta.url), "utf8");
 const evidenceValidatorSource = await fs.readFile(new URL("../src/evidence-validator.js", import.meta.url), "utf8");
+const jsonExtractorSource = await fs.readFile(new URL("../src/json-extractor.js", import.meta.url), "utf8");
 assert.ok(promptBuilderSource.includes("getTaskOutputContract"));
+assert.ok(promptBuilderSource.includes("你是严格 JSON 生成器，不是聊天助手"));
+assert.ok(promptBuilderSource.includes("只返回 EpisodeChunkAnalysis JSON 对象"));
+assert.ok(promptBuilderSource.includes("analyzeEpisodeChunk"));
+assert.ok(taskContractSource.includes("analyzeEpisodeChunkCompact"));
 assert.ok(taskContractSource.includes("不得包在 scriptAnalysis"));
 assert.ok(taskContractSource.includes("episodeBeatLedger"));
 assert.ok(taskContractSource.includes("evidenceLedger"));
@@ -983,6 +1090,10 @@ assert.ok(longAnalysisSource.includes("chunkedAnalysis"));
 assert.ok(longAnalysisSource.includes("localAggregateFallback"));
 assert.ok(longAnalysisSource.includes("createLongScriptInputSignature"));
 assert.ok(longAnalysisSource.includes("sameLongScriptInputSignature"));
+assert.ok(longAnalysisSource.includes("skippedChunks"));
+assert.ok(jsonExtractorSource.includes("extractJsonCandidate"));
+assert.ok(jsonExtractorSource.includes("brace_match"));
+assert.ok(jsonExtractorSource.includes("fenced_json"));
 assert.ok(evidenceValidatorSource.includes("validateEvidenceSourceText"));
 assert.ok(evidenceValidatorSource.includes("invalidEvidenceRatio"));
 assert.ok(evidenceValidatorSource.includes("missingSourceText"));
@@ -996,6 +1107,12 @@ assert.ok(modelAdapterSource.includes("isWrapperPayload"));
 assert.ok(modelAdapterSource.includes("usableForLearning"));
 assert.ok(modelAdapterSource.includes("createDemoSchemaRepairDraft"));
 assert.ok(modelAdapterSource.includes("applyEvidenceValidationToAnalysis"));
+assert.ok(modelAdapterSource.includes("parseJsonWithRepair"));
+assert.ok(modelAdapterSource.includes("jsonExtractionMethod"));
+assert.ok(modelAdapterSource.includes("jsonRepairAttempted"));
+assert.ok(modelAdapterSource.includes("rawOutputPreview"));
+assert.ok(modelAdapterSource.includes("coerceEpisodeChunkOutput"));
+assert.ok(modelAdapterSource.includes("模型返回非 JSON"));
 assert.ok(modelAdapterSource.includes("meta.usableForLearning = meta.usableForSkillLearning"));
 assert.ok(!modelAdapterSource.includes("sourceMeta.usableForLearning = !sourceMeta.blockedSave"));
 

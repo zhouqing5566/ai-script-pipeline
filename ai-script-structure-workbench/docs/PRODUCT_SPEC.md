@@ -466,11 +466,21 @@ src/json-repair.js
 
 ```text
 直接 JSON.parse
-→ 提取 JSON 代码块
-→ 截取第一个 { 到最后一个 }
+→ robust JSON extraction：纯 JSON / fenced_json / fenced_code / brace_match / bracket_match
 → 调用 jsonRepair 任务
 → 明确报错
 ```
+
+所有 JSON 任务的 system prompt 前置硬约束：
+
+```text
+你是严格 JSON 生成器，不是聊天助手。
+只能输出一个 JSON 对象或 JSON 数组。
+禁止解释、前言、Markdown、```json 代码块和“作为剧本结构顾问”等自然语言开头。
+输出必须能被 JSON.parse 直接解析。
+```
+
+如果模型仍返回说明性文字，`extractJsonCandidate(text)` 会优先提取可解析的最长 JSON 主体，并记录 `jsonExtractionMethod`。解析失败时，调用日志和 chunk failure 必须记录 `rawOutputPreview`、`jsonRepairAttempted`、`jsonRepairError` 和 `parseErrorPosition`。
 
 ## 长剧本分集分析
 
@@ -499,6 +509,7 @@ mergeEvidenceLedAnalysis
 ```text
 detectScriptCoverage
 → splitScriptIntoEpisodes
+→ analyzeEpisodeChunk JSON probe
 → analyzeEpisodeChunk
 → aggregateScriptAnalysis
 → mergeEvidenceLedAnalysis / evidence validation
@@ -527,6 +538,30 @@ detectScriptCoverage
 }
 ```
 
+长剧本分集默认使用 compact contract，减少真实模型输出说明文字或偏离 schema：
+
+```js
+{
+  episodeNo,
+  title,
+  evidenceLedger: {
+    hookEvidence: [],
+    conflictBeats: [],
+    suspenseEvidence: [],
+    episodeEvidence: []
+  },
+  episodeBeatLedger,
+  episodeFunctionAnalysis,
+  reusablePatterns,
+  openQuestions,
+  continuityNotes,
+  confidence,
+  needsReview
+}
+```
+
+`coverage`、`characterMentions`、`goldfingerEvidence` 和 `suspenseEvidence` 允许由本地 normalize 补齐。
+
 `aggregateScriptAnalysis` 只基于分集分析结果聚合，不重新编造原文证据。最终 `sourceMeta` 必须包含：
 
 ```js
@@ -539,6 +574,8 @@ detectScriptCoverage
   participatingChunks,
   failedChunks,
   missingChunks,
+  skippedChunks,
+  abortedByJsonFailure,
   completeAggregation,
   needsReview,
   usableForFullScriptCase,
@@ -580,13 +617,31 @@ sourceMeta.usableForSkillLearning = false
 failureStage: "episode_chunk" | "aggregate"
 ```
 
+分集 JSON 探针规则：
+
+```text
+正式分析 50 集前，先取第一个 chunk 调用 analyzeEpisodeChunk。
+如果 JSON parse / schema validate / sourceText validate 任一失败，停止后续 chunk。
+探针成功结果写入 chunkResults，不重复调用第一集。
+```
+
+连续 JSON 失败熔断：
+
+```text
+连续 3 个 episode_chunk 失败，且错误类型为 json_parse / not valid JSON / 未找到 JSON：
+progress.aborted = true
+sourceMeta.abortedByJsonFailure = true
+剩余 chunk 标记 skippedDueToJsonFailure
+UI 提示：连续 3 个分集返回非 JSON，已暂停长剧本分析。
+```
+
 所有路径（真实模型聚合成功、本地聚合兜底、聚合失败后兜底）都必须调用统一门禁：
 
 ```js
 applyLongScriptGateFlags(finalAnalysis)
 ```
 
-如果存在 `failedChunks`、`missingChunks` 或大量 primitive evidence 标准化，只能保存为待复核完整案例草稿，不允许进入正式完整案例、完整主线骨架、生产交付或 Skill 学习沉淀。
+如果存在 `failedChunks`、`missingChunks`、`skippedChunks`、JSON 熔断或大量 primitive evidence 标准化，只能保存为待复核完整案例草稿，不允许进入正式完整案例、完整主线骨架、生产交付或 Skill 学习沉淀。
 
 如果 `sourceMeta.localAggregateFallback=true` 或 `sourceMeta.aggregateSource="local_fallback"`，也必须视为待复核草稿，不允许进入正式完整案例、生产交付或 Skill 学习沉淀。
 

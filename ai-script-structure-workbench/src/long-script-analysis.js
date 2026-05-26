@@ -136,6 +136,7 @@ export function aggregateScriptAnalysis(input = {}) {
   const chunks = Array.isArray(input.episodeChunkAnalyses) ? input.episodeChunkAnalyses : [];
   const failedChunks = Array.isArray(input.failedChunks) ? input.failedChunks : [];
   const missingChunks = Array.isArray(input.missingChunks) ? input.missingChunks : [];
+  const skippedChunks = Array.isArray(input.skippedChunks) ? input.skippedChunks : [];
   const base = analyzeScript({ ...originalInput, userConfirmedFullScript: true });
   const mergedBeats = chunks.flatMap((chunk) => chunk.episodeBeatLedger || []);
   const mergedLedger = mergeEvidenceLedgers(chunks.map((chunk) => chunk.evidenceLedger || {}), coverage);
@@ -163,14 +164,16 @@ export function aggregateScriptAnalysis(input = {}) {
       successfulChunks: chunks.length,
       failedChunks,
       missingChunks,
+      skippedChunks,
       participatingChunks: chunks.length,
-      completeAggregation: failedChunks.length === 0 && missingChunks.length === 0,
-      needsReview: failedChunks.length > 0 || missingChunks.length > 0 || base.sourceMeta?.needsReview || false,
+      completeAggregation: failedChunks.length === 0 && missingChunks.length === 0 && skippedChunks.length === 0,
+      needsReview: failedChunks.length > 0 || missingChunks.length > 0 || skippedChunks.length > 0 || base.sourceMeta?.needsReview || false,
       blockedSave: base.sourceMeta?.blockedSave || false,
       warnings: uniqueList([
         ...(base.sourceMeta?.warnings || []),
         failedChunks.length ? `存在 ${failedChunks.length} 个失败分集/chunk，不能进入正式 Skill 沉淀。` : "",
         missingChunks.length ? `仅切出 ${chunks.length + failedChunks.length}/${input.expectedChunkCount || chunks.length + failedChunks.length + missingChunks.length} 个分集/chunk，不能视为完整剧本分析完成。` : "",
+        skippedChunks.length ? `存在 ${skippedChunks.length} 个因 JSON 输出失败跳过的分集，不能视为完整剧本分析完成。` : "",
         "全剧聚合使用本地合并兜底，部分全剧判断仍需主编复核。",
         "完整剧本已使用分集分析流程，而不是依赖单次超大输出。"
       ])
@@ -247,24 +250,28 @@ export function applyLongScriptGateFlags(analysis) {
   const meta = (analysis.sourceMeta ||= {});
   const invalidRatio = meta.evidenceValidation?.invalidEvidenceRatio || 0;
   const hasFailedChunks = (meta.failedChunks || []).length > 0;
+  const hasSkippedChunks = (meta.skippedChunks || []).length > 0 || meta.abortedByJsonFailure === true || meta.aggregateSkipped === true;
   const hasDeclaredCoverageGap = Number(meta.expectedChunks || 0) > Number(meta.detectedChunks || meta.successfulChunks || 0);
   const hasMissingChunks = (meta.missingChunks || []).length > 0 || hasDeclaredCoverageGap;
   const hasPrimitiveNormalization = (meta.normalizedEvidenceEntries || 0) > 0 || (meta.normalizedBeatEntries || 0) > 0;
   const hasLocalAggregateFallback = meta.localAggregateFallback === true || meta.aggregateSource === "local_fallback";
   const isFullScript = analysis.coverage?.inputType === "full_script";
   meta.participatingChunks = meta.participatingChunks ?? meta.successfulChunks ?? 0;
-  meta.completeAggregation = !hasFailedChunks && !hasMissingChunks;
+  meta.completeAggregation = !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks;
   if (hasDeclaredCoverageGap && !(meta.missingChunks || []).length) {
     meta.warnings = uniqueList([...(meta.warnings || []), `系统仅切出 ${meta.detectedChunks || meta.successfulChunks || 0}/${meta.expectedChunks} 个分集/chunk，不能视为完整剧本分析完成。`]);
   }
   meta.usableForCaseSave = !meta.blockedSave;
-  meta.usableForFullScriptCase = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasLocalAggregateFallback && !meta.blockedSave && invalidRatio === 0;
-  meta.usableForPatternExtraction = !hasFailedChunks && !hasMissingChunks && !hasLocalAggregateFallback && !meta.blockedSave && invalidRatio === 0;
-  meta.usableForProduction = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasLocalAggregateFallback && !meta.blockedSave;
-  meta.usableForSkillLearning = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasLocalAggregateFallback && !hasPrimitiveNormalization && !meta.blockedSave && !meta.needsReview && invalidRatio === 0;
+  meta.usableForFullScriptCase = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !meta.blockedSave && invalidRatio === 0;
+  meta.usableForPatternExtraction = !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !meta.blockedSave && invalidRatio === 0;
+  meta.usableForProduction = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !meta.blockedSave;
+  meta.usableForSkillLearning = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !hasPrimitiveNormalization && !meta.blockedSave && !meta.needsReview && invalidRatio === 0;
   meta.usableForLearning = meta.usableForSkillLearning;
-  if (hasFailedChunks || hasMissingChunks || hasPrimitiveNormalization || hasLocalAggregateFallback) {
+  if (hasFailedChunks || hasMissingChunks || hasSkippedChunks || hasPrimitiveNormalization || hasLocalAggregateFallback) {
     meta.needsReview = true;
+    if (hasSkippedChunks) {
+      meta.warnings = uniqueList([...(meta.warnings || []), "存在因 JSON 输出失败而跳过的分集，不能进入正式完整案例或 Skill 学习沉淀。"]);
+    }
     if (hasLocalAggregateFallback) {
       meta.warnings = uniqueList([...(meta.warnings || []), "本地聚合兜底结果不能进入正式完整案例或 Skill 学习沉淀。"]);
     }

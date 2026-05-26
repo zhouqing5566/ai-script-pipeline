@@ -178,17 +178,22 @@ coverage.inputType = full_script 且用户声明集数 >= 5
 ```text
 detectScriptCoverage
 → splitScriptIntoEpisodes
+→ analyzeEpisodeChunk JSON 探针
 → analyzeEpisodeChunk 逐集/逐 chunk 分析
 → aggregateScriptAnalysis 全剧聚合
 → evidence/sourceText 校验
 → 标准 analyzeScript 分析档案
 ```
 
-分析页会显示“长剧本分析进度”，包括覆盖检测、剧本切分、每集状态、token 估算、失败原因、“重试失败分集”和“重试全剧聚合”。系统会同时显示声明/预期 chunk、系统实际切出 chunk、成功分析 chunk、失败 chunk、缺失分集和参与聚合数量。
+分析页会显示“长剧本分析进度”，包括覆盖检测、剧本切分、每集状态、token 估算、失败原因统计、“重试失败分集”和“重试全剧聚合”。系统会同时显示声明/预期 chunk、系统实际切出 chunk、成功分析 chunk、失败 chunk、缺失分集、跳过 chunk 和参与聚合数量。
+
+正式跑 50 集前会先用第一集执行 `analyzeEpisodeChunk` JSON 探针。探针必须通过 `JSON.parse`、schema 校验和 sourceText 命中校验；失败时系统会显示“分集 JSON 探针失败”，停止后续分集调用，避免连续浪费 49 次真实 API。
 
 失败 chunk 不会被静默跳过；成功 chunk 会保存到 `longScriptAnalysisProgress.chunkResults`，所以点击“重试失败分集”时不会丢失上一轮已经成功的分集结果。如果当前没有失败分集，系统不会误把“重试失败分集”降级成全量重跑；如果只是聚合失败，可以只重跑 `aggregateScriptAnalysis`。重试会校验 `inputSignature`，如果用户改过原文、集数或完整剧本确认状态，会提示重新开始长剧本分析，避免用旧 chunkResults 聚合新文本。如果用户声明 50 集但系统只切出 1 集，`sourceMeta.missingChunks` 会记录缺失分集，并提示“仅切出 1/50 集，不能视为完整剧本分析完成”。
 
-最终结果会写入 `sourceMeta.failedChunks` / `sourceMeta.missingChunks`，并统一通过 `applyLongScriptGateFlags` 重算 `usableForFullScriptCase`、`usableForProduction`、`usableForPatternExtraction`、`usableForSkillLearning`。只要存在失败 chunk、缺失分集、primitive evidence 标准化或本地聚合兜底，结果只能保存为待复核草稿，不允许进入正式完整案例或 Skill 学习沉淀。
+如果连续 3 个分集返回非 JSON、无法提取 JSON 主体或 schema 不通过，系统会熔断长剧本分析，标记 `sourceMeta.abortedByJsonFailure=true` 和 `progress.aborted=true`。后续未调用分集会标为 `skippedDueToJsonFailure`，不会被记成 Provider/API 失败。失败详情会显示 `rawOutputPreview`、`jsonExtractionMethod`、`jsonRepairAttempted` 和错误类型。
+
+最终结果会写入 `sourceMeta.failedChunks` / `sourceMeta.missingChunks` / `sourceMeta.skippedChunks`，并统一通过 `applyLongScriptGateFlags` 重算 `usableForFullScriptCase`、`usableForProduction`、`usableForPatternExtraction`、`usableForSkillLearning`。只要存在失败 chunk、缺失分集、跳过分集、primitive evidence 标准化或本地聚合兜底，结果只能保存为待复核草稿，不允许进入正式完整案例或 Skill 学习沉淀。
 
 ## 配置 OpenAI-compatible API
 

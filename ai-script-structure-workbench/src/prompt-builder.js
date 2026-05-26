@@ -27,14 +27,47 @@ const prohibitions = [
   "不要编造 sourceText；sourceText 必须能在用户输入中找到。"
 ];
 
+const strictJsonTaskTypes = new Set([
+  "analyzeScript",
+  "analyzeEpisodeChunk",
+  "analyzeScriptChunk",
+  "aggregateScriptAnalysis",
+  "mergeEvidenceLedAnalysis",
+  "schemaRepairAnalyzeScript",
+  "jsonRepair"
+]);
+
+const strictJsonOnlyPrompt = [
+  "你是严格 JSON 生成器，不是聊天助手。",
+  "你只能输出一个 JSON 对象或 JSON 数组。",
+  "禁止输出任何解释、前言、总结、道歉。",
+  "禁止输出 Markdown。",
+  "禁止输出 ```json 代码块。",
+  "禁止输出“作为剧本结构顾问”等自然语言开头。",
+  "如果任务要求对象，第一个字符必须是 {，最后一个字符必须是 }。",
+  "如果任务要求数组，第一个字符必须是 [，最后一个字符必须是 ]。",
+  "输出必须能被 JSON.parse 直接解析。"
+];
+
 export function buildPrompt({ taskType, project, input, matchedSkills = [], outputSchema }) {
   const lockedAnchors = describeLockedAnchors(project);
   const skillBlock = matchedSkills.length
     ? matchedSkills.map(summarizeSkillForPrompt).join("\n\n")
     : "未匹配到专用 Skill，仅使用通用系统原则。";
-  const schemaBlock = outputSchema ? JSON.stringify(outputSchema, null, 2) : getTaskOutputContract(taskType) || "请返回符合任务要求的 JSON 对象。";
+  const compactContract = taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk";
+  const schemaBlock = outputSchema ? JSON.stringify(outputSchema, null, 2) : getTaskOutputContract(taskType, { compact: compactContract }) || "请返回符合任务要求的 JSON 对象。";
+  const jsonOnlyBlock = strictJsonTaskTypes.has(taskType)
+    ? [
+        "JSON-only 硬约束：",
+        ...strictJsonOnlyPrompt.map((item, index) => `${index + 1}. ${item}`),
+        taskType === "analyzeEpisodeChunk" ? "10. 只返回 EpisodeChunkAnalysis JSON 对象；不要输出全剧分析；不要输出“下面是分析结果”。" : ""
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "";
   const user = [
     `当前任务：${taskType}`,
+    jsonOnlyBlock ? `\n${jsonOnlyBlock}` : "",
     "",
     "已锁定创作锚点：",
     lockedAnchors,
@@ -51,11 +84,16 @@ export function buildPrompt({ taskType, project, input, matchedSkills = [], outp
     "禁止事项：",
     prohibitions.map((item, index) => `${index + 1}. ${item}`).join("\n")
   ].join("\n");
+  const system = [
+    ...(strictJsonTaskTypes.has(taskType) ? strictJsonOnlyPrompt : []),
+    ...(taskType === "analyzeEpisodeChunk" ? ["只返回 EpisodeChunkAnalysis JSON 对象；不要输出全剧分析；不要输出“下面是分析结果”。"] : []),
+    ...systemPrinciples
+  ].join("\n");
   return {
-    system: systemPrinciples.join("\n"),
+    system,
     user,
     messages: [
-      { role: "system", content: systemPrinciples.join("\n") },
+      { role: "system", content: system },
       { role: "user", content: user }
     ]
   };
