@@ -480,9 +480,11 @@ src/json-repair.js
 输出必须能被 JSON.parse 直接解析。
 ```
 
-如果模型仍返回说明性文字，`extractJsonCandidate(text)` 会优先提取可解析的 JSON 主体，并记录 `jsonExtractionMethod`。当同一输出里存在多个 JSON 候选时，`extractTaskJsonCandidate(text, taskType)` 会按任务结构评分选择最匹配的候选；例如 `analyzeEpisodeChunk` 优先选择包含 `evidenceLedger`、非空 `episodeBeatLedger` 和 `episodeFunctionAnalysis` 的 JSON，而不是误选更长的示例 JSON。
+如果模型仍返回说明性文字，`extractJsonCandidate(text)` 会优先提取可解析的 JSON 主体，并记录 `jsonExtractionMethod`。当同一输出里存在多个 JSON 候选时，`extractTaskJsonCandidate(text, taskType)` 会按任务结构评分选择最匹配的候选；例如 `analyzeEpisodeChunk` 优先选择包含有效 beat、有效 evidence 和可链接 `episodeFunctionAnalysis.evidenceBeatIds` 的 JSON，而不是误选更长的示例 JSON。
 
-`analyzeEpisodeChunk` 不允许用本地补齐掩盖模型结构失败。若真实模型只返回 `{}`、`{"ok":true}` 或缺少 compact contract 的关键字段，本地 normalize 只能生成待复核草稿，同时返回 `schema_validation` 失败；该 chunk 不得进入成功分析数量，也不得作为 Skill 学习沉淀。解析失败时，调用日志和 chunk failure 必须记录 `rawOutputPreview`、`jsonRepairAttempted`、`jsonRepairError` 和 `parseErrorPosition`。
+`analyzeEpisodeChunk` 不允许用本地补齐掩盖模型结构失败。若真实模型只返回 `{}`、`{"ok":true}`、`{"episodeBeatLedger":[{}]}` 或缺少 compact contract 的有效内容，本地 normalize 只能生成待复核草稿，同时返回 `schema_validation` 失败；该 chunk 不得进入成功分析数量，也不得作为 Skill 学习沉淀。解析失败时，调用日志和 chunk failure 必须记录 `rawOutputPreview`、`jsonRepairAttempted`、`jsonRepairError` 和 `parseErrorPosition`。
+
+若模型返回的是合法 JSON 但结构为旧版 `episodeAnalysis` / `structuralAnalysis`，系统先尝试 `schemaRepairAnalyzeEpisodeChunk`。修复成功的 chunk 可以参与聚合，但必须标记 `sourceMeta.schemaRepaired=true`、`sourceMeta.needsReview=true`、`usableForSkillLearning=false`；修复失败则触发 probe schema 失败，不继续调用后续分集。
 
 ## 长剧本分集分析
 
@@ -624,6 +626,9 @@ failureStage: "episode_chunk" | "aggregate"
 ```text
 正式分析 50 集前，先取第一个 chunk 调用 analyzeEpisodeChunk。
 如果 JSON parse / schema validate / sourceText validate 任一失败，停止后续 chunk。
+如果 schema validate 失败但 JSON 合法，先尝试 schemaRepairAnalyzeEpisodeChunk。
+schema repair 成功：chunk 状态为 成功（结构修复），可参与聚合，但全剧需复核且不能直接进入 Skill 学习。
+schema repair 失败：progress.abortedByProbeFailure=true，probeFailureType=schema_validation。
 探针成功结果写入 chunkResults，不重复调用第一集。
 ```
 
@@ -635,6 +640,14 @@ progress.aborted = true
 sourceMeta.abortedByJsonFailure = true
 剩余 chunk 标记 skippedDueToJsonFailure
 UI 提示：连续 3 个分集返回非 JSON，已暂停长剧本分析。
+```
+
+probe schema/sourceText 失败不应显示“连续 3 个分集返回非 JSON”。这类失败应写入：
+
+```text
+progress.abortedByProbeFailure = true
+progress.probeFailureType = schema_validation | source_text_validation | empty_model_structure
+剩余 chunk 标记 skippedDueToProbeFailure
 ```
 
 所有路径（真实模型聚合成功、本地聚合兜底、聚合失败后兜底）都必须调用统一门禁：

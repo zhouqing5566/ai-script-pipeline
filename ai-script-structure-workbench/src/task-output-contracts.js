@@ -353,12 +353,24 @@ const contracts = {
 只分析当前 episodeText，不推断后续全剧结局，不补写未输入集数。
 所有 sourceText 必须来自当前集文本，不得编造。
 长剧本分集默认使用 compact 合同，coverage / characterMentions / goldfingerEvidence / suspenseEvidence 可由本地 normalize 补齐。
+禁止输出旧结构或外层包裹字段：episodeAnalysis、structuralAnalysis、narrativeAnalysis、result、data、output。
+禁止把结果包在数组里。根对象必须直接是 EpisodeChunkAnalysis。
+必须输出字段名：episodeNo、title、evidenceLedger、episodeBeatLedger、episodeFunctionAnalysis、reusablePatterns、openQuestions、continuityNotes、confidence、needsReview。
 根对象结构：
 {
   "episodeNo": 1,
-  "title": "",
+  "title": "第一集",
   "evidenceLedger": {
-    "hookEvidence": [],
+    "hookEvidence": [
+      {
+        "id": "E001",
+        "sourceText": "必须来自当前集原文",
+        "summary": "证据摘要",
+        "evidenceType": "hook",
+        "relatedBeatIds": ["B001"],
+        "confidence": 0.8
+      }
+    ],
     "conflictBeats": [],
     "suspenseEvidence": [],
     "episodeEvidence": []
@@ -385,7 +397,7 @@ const contracts = {
     "informationGain": "",
     "characterFunction": "",
     "cliffhanger": "",
-    "evidenceBeatIds": [],
+    "evidenceBeatIds": ["B001"],
     "inferenceLevel": "原文明确",
     "confidence": 0.8,
     "riskNotes": []
@@ -414,6 +426,14 @@ export function getTaskOutputContract(taskType, options = {}) {
       "这是 analyzeScript 的结构修复任务。只允许根据原始模型输出和原剧本文本整理为标准结构，不允许编造没有依据的分析。",
       "不确定字段请填 unknown、空数组，或在 riskNotes / sourceMeta.needsManualReview 中标记需要人工复核。",
       contracts.analyzeScript
+    ].join("\n\n");
+  }
+  if (taskType === "schemaRepairAnalyzeEpisodeChunk") {
+    return [
+      "这是 analyzeEpisodeChunk 的 schema repair 任务。只允许基于 episodeText 和 rawModelJson 修复结构，不允许补写原文之外的 sourceText。",
+      "禁止返回 episodeAnalysis、structuralAnalysis、narrativeAnalysis、result、data、output；根对象必须直接是 EpisodeChunkAnalysis。",
+      "sourceText 必须来自 episodeText；episodeFunctionAnalysis.evidenceBeatIds 必须引用 episodeBeatLedger 中的 beatId。",
+      contracts.analyzeEpisodeChunkCompact
     ].join("\n\n");
   }
   return contracts[taskType] || "";

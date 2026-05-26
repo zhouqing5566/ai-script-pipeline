@@ -1,3 +1,5 @@
+import { evaluateEpisodeChunkCompactShape } from "./episode-chunk-shape.js";
+
 const taskShapeRules = {
   analyzeScript: {
     type: "object",
@@ -22,11 +24,13 @@ const taskShapeRules = {
   },
   analyzeScriptChunk: {
     type: "object",
-    required: ["episodeNo", "title", "coverage", "evidenceLedger", "episodeBeatLedger", "episodeFunctionAnalysis", "openQuestions", "continuityNotes", "confidence", "needsReview"]
+    required: ["episodeNo", "title", "coverage", "evidenceLedger", "episodeBeatLedger", "episodeFunctionAnalysis", "openQuestions", "continuityNotes", "confidence", "needsReview"],
+    allowEmptyArrays: ["openQuestions", "continuityNotes"]
   },
   analyzeEpisodeChunk: {
     type: "object",
-    required: ["episodeNo", "title", "coverage", "evidenceLedger", "episodeBeatLedger", "episodeFunctionAnalysis", "openQuestions", "continuityNotes", "confidence", "needsReview"]
+    required: ["episodeNo", "title", "coverage", "evidenceLedger", "episodeBeatLedger", "episodeFunctionAnalysis", "openQuestions", "continuityNotes", "confidence", "needsReview"],
+    allowEmptyArrays: ["openQuestions", "continuityNotes"]
   },
   aggregateScriptAnalysis: {
     type: "object",
@@ -90,6 +94,11 @@ const taskShapeRules = {
       "episodeFunctionAnalysis",
       "reusablePatterns"
     ]
+  },
+  schemaRepairAnalyzeEpisodeChunk: {
+    type: "object",
+    required: ["episodeNo", "title", "evidenceLedger", "episodeBeatLedger", "episodeFunctionAnalysis", "reusablePatterns", "openQuestions", "continuityNotes", "confidence", "needsReview"],
+    allowEmptyArrays: ["reusablePatterns", "openQuestions", "continuityNotes"]
   },
   evaluateIdea: {
     type: "object",
@@ -170,12 +179,12 @@ export function validateTaskOutput(taskType, value) {
       issues.push(`任务 ${taskType} 需要返回对象。`);
       return { ok: false, issues };
     }
-    issues.push(...missingFields(value, rule.required || []).map((field) => `缺少 ${field}`));
+    issues.push(...missingFields(value, rule.required || [], rule.allowEmptyArrays || []).map((field) => `缺少 ${field}`));
   }
   if (taskType === "analyzeScript" || taskType === "schemaRepairAnalyzeScript" || taskType === "aggregateScriptAnalysis" || taskType === "mergeEvidenceLedAnalysis") {
     issues.push(...validateAnalyzeScriptContract(value));
   }
-  if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk") {
+  if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk" || taskType === "schemaRepairAnalyzeEpisodeChunk") {
     issues.push(...validateEpisodeChunkContract(value));
   }
   return { ok: issues.length === 0, issues };
@@ -185,10 +194,10 @@ export function schemaValidationMessage(taskType, issues = []) {
   return `结构校验失败：${issues.join("；")}。建议执行 JSON/schema 修复，或检查该任务路由模型的输出约束。`;
 }
 
-function missingFields(value, fields) {
+function missingFields(value, fields, allowEmptyArrays = []) {
   return fields.filter((field) => {
     const item = value?.[field];
-    if (Array.isArray(item)) return item.length === 0;
+    if (Array.isArray(item)) return !allowEmptyArrays.includes(field) && item.length === 0;
     return item === null || item === undefined || item === "";
   });
 }
@@ -254,6 +263,10 @@ function validateAnalyzeScriptContract(value) {
 function validateEpisodeChunkContract(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   const issues = [];
+  const compactShape = evaluateEpisodeChunkCompactShape(value);
+  if (!compactShape.valid) {
+    issues.push(...compactShape.issues.map((issue) => `analyzeEpisodeChunk compact 结构无效：${issue}`));
+  }
   const beats = Array.isArray(value.episodeBeatLedger) ? value.episodeBeatLedger : [];
   beats.slice(0, 8).forEach((beat, index) => {
     for (const field of ["beatId", "sourceText", "beatSummary", "confidence"]) {

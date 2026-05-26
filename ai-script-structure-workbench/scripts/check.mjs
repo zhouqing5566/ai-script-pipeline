@@ -61,6 +61,7 @@ import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, shouldUseGe
 import { buildOpenAIChatRequestBody } from "../src/provider-adapters/openai-compatible.js";
 import { labelForKey } from "../src/schemas.js";
 import { extractJsonCandidate, extractJsonCandidates, extractTaskJsonCandidate } from "../src/json-extractor.js";
+import { evaluateEpisodeChunkCompactShape, scoreEpisodeChunkCandidate } from "../src/episode-chunk-shape.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -460,14 +461,24 @@ const multiJsonText =
   `示例：${JSON.stringify({ ok: true, notes: Array(20).fill("wrong") })}\n` +
   `正式结果：${JSON.stringify({
     episodeNo: 1,
-    evidenceLedger: { hookEvidence: [] },
+    evidenceLedger: {
+      hookEvidence: [{ id: "E001", sourceText: "火车上，林清韵忽然吐血。", summary: "危机", relatedBeatIds: ["B001"] }]
+    },
     episodeBeatLedger: [{ beatId: "B001", sourceText: "火车上，林清韵忽然吐血。", beatSummary: "火车危机" }],
-    episodeFunctionAnalysis: { episodeNo: 1, summary: "火车危机" }
+    episodeFunctionAnalysis: { episodeNo: 1, summary: "火车危机", openingHook: "吐血", evidenceBeatIds: ["B001"] }
   })}`;
 assert.ok(extractJsonCandidates(multiJsonText).length >= 2);
 const taskAwareJson = extractTaskJsonCandidate(multiJsonText, "analyzeEpisodeChunk");
 assert.equal(JSON.parse(taskAwareJson.candidate).episodeNo, 1);
 assert.ok(Array.isArray(JSON.parse(taskAwareJson.candidate).episodeBeatLedger));
+const emptyCompactShell = { episodeNo: 1, evidenceLedger: {}, episodeBeatLedger: [{}], episodeFunctionAnalysis: {} };
+const validCompactShape = JSON.parse(taskAwareJson.candidate);
+assert.equal(evaluateEpisodeChunkCompactShape(emptyCompactShell, { episodeText: "火车上，林清韵忽然吐血。" }).valid, false);
+assert.equal(validateTaskOutput("analyzeEpisodeChunk", emptyCompactShell).ok, false);
+assert.ok(scoreEpisodeChunkCandidate(validCompactShape) > scoreEpisodeChunkCandidate(emptyCompactShell));
+const pseudoThenRealText = `候选：${JSON.stringify(emptyCompactShell)}\n正式：${JSON.stringify(validCompactShape)}`;
+const pseudoSelected = extractTaskJsonCandidate(pseudoThenRealText, "analyzeEpisodeChunk");
+assert.equal(JSON.parse(pseudoSelected.candidate).episodeBeatLedger[0].beatId, "B001");
 
 const deepSeekTemplate = createDeepSeekTemplate();
 assert.equal(deepSeekTemplate.provider.providerType, "deepseek");
@@ -771,6 +782,140 @@ const invalidEpisodeShapeResult = await callModel({
 assert.equal(invalidEpisodeShapeResult.success, false);
 assert.equal(invalidEpisodeShapeResult.errorType, "schema_validation");
 assert.ok(invalidEpisodeShapeResult.error.includes("不能用本地补齐结果冒充真实分集分析"));
+delete globalThis.__MODEL_CALL_PROXY__;
+
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => ({
+  outputText: JSON.stringify({ episodeNo: 1, evidenceLedger: {}, episodeBeatLedger: [{}], episodeFunctionAnalysis: {} }),
+  tokenUsage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+  requestFormat: payload.requestFormat,
+  endpointType: "server_proxy",
+  status: 200
+});
+const emptyEpisodeShellResult = await callModel({
+  taskType: "analyzeEpisodeChunk",
+  featureArea: "剧本分析中心",
+  inputMeta: {
+    projectTitle: "分集 JSON 测试",
+    episodeNo: 1,
+    episodeTitle: "第一集",
+    episodeText: "第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。"
+  },
+  schema: true,
+  state: apiSuccessState
+});
+assert.equal(emptyEpisodeShellResult.success, false);
+assert.equal(emptyEpisodeShellResult.errorType, "schema_validation");
+assert.ok(emptyEpisodeShellResult.error.includes("结构空壳") || emptyEpisodeShellResult.error.includes("有效 beat"));
+assert.ok(emptyEpisodeShellResult.parsedJson?.episodeAnalysis === undefined);
+delete globalThis.__MODEL_CALL_PROXY__;
+
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => ({
+  outputText: JSON.stringify({
+    episodeAnalysis: [
+      {
+        episodeNo: 1,
+        structuralAnalysis: {
+          openingHook: "林清韵忽然吐血",
+          conflictProgression: "危机与识毒",
+          pacing: "开场直接进入危机"
+        }
+      }
+    ]
+  }),
+  tokenUsage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+  requestFormat: payload.requestFormat,
+  endpointType: "server_proxy",
+  status: 200
+});
+const legacyEpisodeShapeResult = await callModel({
+  taskType: "analyzeEpisodeChunk",
+  featureArea: "剧本分析中心",
+  inputMeta: {
+    projectTitle: "分集 JSON 测试",
+    episodeNo: 1,
+    episodeTitle: "第一集",
+    episodeText: "第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。"
+  },
+  schema: true,
+  state: apiSuccessState
+});
+assert.equal(legacyEpisodeShapeResult.success, false);
+assert.equal(legacyEpisodeShapeResult.errorType, "schema_validation");
+assert.ok(legacyEpisodeShapeResult.parsedJson?.episodeAnalysis || legacyEpisodeShapeResult.parsedJson?.structuralAnalysis);
+assert.ok(legacyEpisodeShapeResult.schemaIssues.length > 0);
+delete globalThis.__MODEL_CALL_PROXY__;
+
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => ({
+  outputText: JSON.stringify({
+    episodeNo: 1,
+    title: "第一集",
+    evidenceLedger: {
+      hookEvidence: [
+        {
+          id: "E001",
+          sourceText: "火车上，林清韵忽然吐血。",
+          summary: "火车突发危机",
+          evidenceType: "hook",
+          relatedBeatIds: ["B001"],
+          confidence: 0.85
+        }
+      ],
+      conflictBeats: [],
+      suspenseEvidence: [],
+      episodeEvidence: []
+    },
+    episodeBeatLedger: [
+      {
+        beatId: "B001",
+        episodeNo: 1,
+        sourceText: "火车上，林清韵忽然吐血。",
+        beatSummary: "火车危机",
+        characters: ["林清韵", "孙大为"],
+        audienceEmotion: ["紧张"],
+        suspenseQuestion: "她为何吐血？",
+        structureFunction: "开头钩子",
+        confidence: 0.85
+      }
+    ],
+    episodeFunctionAnalysis: {
+      episodeNo: 1,
+      summary: "火车危机",
+      openingHook: "林清韵吐血",
+      mainConflict: "中蛊危机与识别能力",
+      informationGain: "孙大为懂蛊毒",
+      characterFunction: "展示主角能力",
+      evidenceBeatIds: ["B001"],
+      inferenceLevel: "原文明确",
+      confidence: 0.85,
+      riskNotes: []
+    },
+    reusablePatterns: [],
+    openQuestions: [],
+    continuityNotes: [],
+    confidence: 0.85,
+    needsReview: false
+  }),
+  tokenUsage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+  requestFormat: payload.requestFormat,
+  endpointType: "server_proxy",
+  status: 200
+});
+const episodeRepairResult = await callModel({
+  taskType: "schemaRepairAnalyzeEpisodeChunk",
+  featureArea: "JSON 修复",
+  inputMeta: {
+    projectTitle: "分集 JSON 测试",
+    episodeNo: 1,
+    episodeTitle: "第一集",
+    episodeText: "第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。",
+    rawModelJson: legacyEpisodeShapeResult.parsedJson,
+    schemaIssues: legacyEpisodeShapeResult.schemaIssues
+  },
+  schema: true,
+  state: apiSuccessState
+});
+assert.equal(episodeRepairResult.success, true);
+assert.equal(episodeRepairResult.parsedJson.episodeFunctionAnalysis.evidenceBeatIds[0], "B001");
 delete globalThis.__MODEL_CALL_PROXY__;
 
 const wrappedAnalysisCalls = [];
@@ -1150,6 +1295,14 @@ assert.ok(appSource.includes("分集 JSON 探针中"));
 assert.ok(appSource.includes("assertProbeChunkUsable"));
 assert.ok(appSource.includes("jsonFailureStreak >= 3"));
 assert.ok(appSource.includes("skippedDueToJsonFailure"));
+assert.ok(appSource.includes("skippedDueToProbeFailure"));
+assert.ok(appSource.includes("probeFailureType"));
+assert.ok(appSource.includes("schemaRepairAnalyzeEpisodeChunk"));
+assert.ok(appSource.includes("成功（结构修复）"));
+assert.ok(appSource.includes("模型返回字段："));
+assert.ok(appSource.includes("系统期望字段："));
+assert.ok(appSource.includes("JSON，但模型返回结构不符合 EpisodeChunkAnalysis compact schema"));
+assert.ok(!appSource.includes("abortedByJsonFailure = true;\\n        abortedByJsonFailure = true"));
 assert.ok(appSource.includes("连续 3 个分集返回非 JSON，已暂停长剧本分析"));
 assert.ok(appSource.includes("rawOutputPreview"));
 assert.ok(appSource.includes('draft.steps[3].status = aggregateSkipped || aggregateFailed ? "跳过" : "成功"'));
@@ -1180,6 +1333,9 @@ assert.ok(promptBuilderSource.includes("你是严格 JSON 生成器，不是聊�
 assert.ok(promptBuilderSource.includes("只返回 EpisodeChunkAnalysis JSON 对象"));
 assert.ok(promptBuilderSource.includes("analyzeEpisodeChunk"));
 assert.ok(taskContractSource.includes("analyzeEpisodeChunkCompact"));
+assert.ok(taskContractSource.includes("禁止输出旧结构或外层包裹字段"));
+assert.ok(taskContractSource.includes("episodeAnalysis"));
+assert.ok(taskContractSource.includes("schemaRepairAnalyzeEpisodeChunk"));
 assert.ok(taskContractSource.includes("不得包在 scriptAnalysis"));
 assert.ok(taskContractSource.includes("episodeBeatLedger"));
 assert.ok(taskContractSource.includes("evidenceLedger"));

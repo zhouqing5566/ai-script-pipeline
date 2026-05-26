@@ -40,6 +40,7 @@ export const coreRouteTaskTypes = [
   "analyzeScript",
   "analyzeEpisodeChunk",
   "aggregateScriptAnalysis",
+  "schemaRepairAnalyzeEpisodeChunk",
   "generateMacroOutline",
   "generateStageOutline",
   "generateEpisodeOutline",
@@ -91,6 +92,7 @@ export const modelTaskTypes = [
   "auditDraft",
   "jsonRepair",
   "schemaRepairAnalyzeScript",
+  "schemaRepairAnalyzeEpisodeChunk",
   "summarizeLongText",
   "classifyTags"
 ];
@@ -298,6 +300,25 @@ export function createDefaultRoutes() {
       allowFallback: false,
       enabled: true,
       notes: "只修复 JSON，不扩写内容。"
+    },
+    {
+      id: "route-schema-repair-analyze-episode-chunk",
+      featureArea: "JSON 修复",
+      taskType: "schemaRepairAnalyzeEpisodeChunk",
+      primaryModelId: "model-demo-rule-engine",
+      fallbackModelIds: [],
+      requiredCapabilities: ["json"],
+      maxInputTokens: 18000,
+      maxOutputTokens: 6000,
+      temperature: 0,
+      topP: 1,
+      jsonModeRequired: true,
+      streamingEnabled: false,
+      retryCount: 0,
+      timeoutMs: 60000,
+      allowFallback: false,
+      enabled: true,
+      notes: "把旧结构 episodeAnalysis/structuralAnalysis 重排为 EpisodeChunkAnalysis compact 根对象。"
     },
     {
       id: "route-schema-repair-analyze-script",
@@ -600,6 +621,7 @@ export function featureAreaForTaskType(taskType) {
     auditDraft: "成稿中心",
     jsonRepair: "JSON 修复",
     schemaRepairAnalyzeScript: "JSON 修复",
+    schemaRepairAnalyzeEpisodeChunk: "JSON 修复",
     summarizeLongText: "长文本总结",
     classifyTags: "分类与标签"
   };
@@ -631,12 +653,14 @@ function defaultTimeoutForTask(taskType) {
   if (taskType === "aggregateScriptAnalysis") return 90000;
   if (taskType === "generateEpisodeOutline") return 90000;
   if (taskType === "schemaRepairAnalyzeScript") return 60000;
+  if (taskType === "schemaRepairAnalyzeEpisodeChunk") return 60000;
   if (taskType === "jsonRepair") return 30000;
   return 60000;
 }
 
 function defaultMaxOutputForTask(taskType) {
   if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk") return 6000;
+  if (taskType === "schemaRepairAnalyzeEpisodeChunk") return 6000;
   if (taskType === "aggregateScriptAnalysis" || taskType === "mergeEvidenceLedAnalysis") return 12000;
   if (taskType === "analyzeScript") return 12000;
   if (taskType === "generateEpisodeOutline") return 16000;

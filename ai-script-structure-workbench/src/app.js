@@ -528,6 +528,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   let jsonFailureStreak = 0;
   let abortedByJsonFailure = false;
   let abortedByProbeFailure = false;
+  let probeFailureType = "";
   const skippedChunks = [];
   for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
     const chunk = chunks[chunkIndex];
@@ -544,7 +545,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       globalContextSummary: `${input.title || "未命名剧本"}｜${input.genre || ""}｜用户声明 ${input.episodeCount || "未填"} 集`
     });
     try {
-      const result = await callModel({
+      let result = await callModel({
         taskType: "analyzeEpisodeChunk",
         featureArea: "剧本分析中心",
         projectId: current.currentProject.id,
@@ -553,6 +554,15 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
         state: store.getState()
       });
       logs.unshift(result.log);
+      if (!result.success && shouldAttemptEpisodeSchemaRepair(result)) {
+        const repairResult = await repairEpisodeChunkSchema({
+          originalResult: result,
+          chunkInput,
+          projectId: current.currentProject.id
+        });
+        if (repairResult.log) logs.unshift(repairResult.log);
+        result = repairResult;
+      }
       if (!result.success) throw Object.assign(new Error(result.error || "分集分析失败"), { result });
       if (isProbeChunk) {
         assertProbeChunkUsable(result);
@@ -560,7 +570,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       chunkResults[chunkKey] = result.parsedJson || result.outputText;
       updateLongProgress((draft) => {
         draft.chunkResults = { ...(draft.chunkResults || {}), [chunkKey]: chunkResults[chunkKey] };
-        markChunkStatus(draft, chunk, "成功", "");
+        markChunkStatus(draft, chunk, result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired ? "成功（结构修复）" : "成功", "");
       });
       jsonFailureStreak = 0;
     } catch (error) {
@@ -574,37 +584,56 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       });
       if (isJsonChunkFailure(failed)) jsonFailureStreak += 1;
       else jsonFailureStreak = 0;
-      if (isProbeChunk && ["json_parse", "schema_validation", "source_text_validation"].includes(failed.errorType)) {
+      if (isProbeChunk && ["json_parse", "schema_validation", "source_text_validation", "empty_model_structure"].includes(failed.errorType)) {
         abortedByProbeFailure = true;
-        abortedByJsonFailure = true;
+        probeFailureType = failed.errorType;
+        abortedByJsonFailure = failed.errorType === "json_parse";
       } else if (jsonFailureStreak >= 3) {
         abortedByJsonFailure = true;
       }
       if (abortedByJsonFailure || abortedByProbeFailure) {
         const remaining = chunks.slice(chunkIndex + 1);
         for (const skipped of remaining) {
+          const skippedDueToProbeFailure = Boolean(abortedByProbeFailure);
           const skippedItem = {
             failureStage: "episode_chunk",
             chunkKey: getChunkKey(skipped),
             episodeNo: skipped.episodeNo,
             title: skipped.title,
             detectedBy: skipped.detectedBy,
-            errorType: "skipped_due_to_json_failure",
-            skippedDueToJsonFailure: true,
-            error: "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
+            errorType: skippedDueToProbeFailure ? "skipped_due_to_probe_failure" : "skipped_due_to_json_failure",
+            skippedDueToProbeFailure,
+            probeFailureType: skippedDueToProbeFailure ? probeFailureType : "",
+            skippedDueToJsonFailure: !skippedDueToProbeFailure,
+            error: skippedDueToProbeFailure
+              ? `skippedDueToProbeFailure：第一集探针 ${probeFailureType} 失败，已暂停后续调用。`
+              : "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
           };
           skippedChunks.push(skippedItem);
         }
         updateLongProgress((draft) => {
           draft.aborted = true;
-          draft.abortedByJsonFailure = true;
+          draft.abortedByJsonFailure = abortedByJsonFailure;
+          draft.abortedByProbeFailure = abortedByProbeFailure;
+          draft.probeFailureType = probeFailureType;
           draft.currentStep = isProbeChunk ? "分集 JSON 探针失败，已暂停" : "连续 3 个分集返回非 JSON，已暂停";
           draft.skippedChunks = skippedChunks;
           draft.failedChunks = failedChunks;
-          for (const skipped of remaining) markChunkStatus(draft, skipped, "跳过", "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。");
+          for (const skipped of remaining) {
+            markChunkStatus(
+              draft,
+              skipped,
+              "跳过",
+              abortedByProbeFailure
+                ? `skippedDueToProbeFailure：第一集探针 ${probeFailureType} 失败，已暂停后续调用。`
+                : "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
+            );
+          }
           draft.warnings = [
             ...(draft.warnings || []),
-            "连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。"
+            abortedByProbeFailure
+              ? probeFailureWarning(probeFailureType)
+              : "连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。"
           ];
         });
         break;
@@ -643,13 +672,19 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     expectedChunkCount: split.expectedChunkCount || allChunks.length,
     detectedChunkCount: split.detectedChunkCount || allChunks.length
   };
+  const schemaRepairedChunkIds = episodeChunkAnalyses
+    .filter((item) => item.sourceMeta?.schemaRepaired)
+    .map((item) => item.episodeNo || item.title || "unknown");
   let aggregateSkipped = abortedByJsonFailure || abortedByProbeFailure;
   if (aggregateSkipped) {
     finalAnalysis = aggregateScriptAnalysis({ ...aggregateInput, failedChunks, skippedChunks });
     finalAnalysis.sourceMeta.abortedByJsonFailure = abortedByJsonFailure;
     finalAnalysis.sourceMeta.abortedByProbeFailure = abortedByProbeFailure;
+    finalAnalysis.sourceMeta.probeFailureType = probeFailureType;
     finalAnalysis.sourceMeta.aggregateSkipped = true;
     finalAnalysis.sourceMeta.skippedChunks = skippedChunks;
+    finalAnalysis.sourceMeta.schemaRepairedChunks = schemaRepairedChunkIds.length > 0;
+    finalAnalysis.sourceMeta.schemaRepairedChunkIds = schemaRepairedChunkIds;
     finalAnalysis.sourceMeta.needsReview = true;
     finalAnalysis.sourceMeta.usableForSkillLearning = false;
     finalAnalysis.sourceMeta.usableForLearning = false;
@@ -687,9 +722,12 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     finalAnalysis.sourceMeta.missingChunks = missingChunks;
     finalAnalysis.sourceMeta.participatingChunks = episodeChunkAnalyses.length;
     finalAnalysis.sourceMeta.completeAggregation = failedChunks.length === 0 && missingChunks.length === 0;
+    finalAnalysis.sourceMeta.schemaRepairedChunks = schemaRepairedChunkIds.length > 0;
+    finalAnalysis.sourceMeta.schemaRepairedChunkIds = schemaRepairedChunkIds;
     finalAnalysis.sourceMeta.warnings = [
       ...(finalAnalysis.sourceMeta.warnings || []),
-      missingChunks.length ? `仅切出 ${allChunks.length}/${split.expectedChunkCount || allChunks.length} 个分集/chunk，不能视为完整剧本分析完成。` : ""
+      missingChunks.length ? `仅切出 ${allChunks.length}/${split.expectedChunkCount || allChunks.length} 个分集/chunk，不能视为完整剧本分析完成。` : "",
+      schemaRepairedChunkIds.length ? "存在 schema repair 成功的分集，全剧结果需复核，不可直接进入 Skill 学习沉淀。" : ""
     ].filter(Boolean);
     applyLongScriptGateFlags(finalAnalysis);
     } catch (error) {
@@ -699,6 +737,8 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       finalAnalysis.sourceMeta.aggregateFailed = true;
       finalAnalysis.sourceMeta.aggregateSource = "local_fallback";
       finalAnalysis.sourceMeta.localAggregateFallback = true;
+      finalAnalysis.sourceMeta.schemaRepairedChunks = schemaRepairedChunkIds.length > 0;
+      finalAnalysis.sourceMeta.schemaRepairedChunkIds = schemaRepairedChunkIds;
       finalAnalysis.sourceMeta.needsReview = true;
       finalAnalysis.sourceMeta.usableForSkillLearning = false;
       finalAnalysis.sourceMeta.usableForLearning = false;
@@ -714,6 +754,8 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     draft.steps[3].status = aggregateSkipped || aggregateFailed ? "跳过" : "成功";
     draft.aborted = abortedByJsonFailure || abortedByProbeFailure;
     draft.abortedByJsonFailure = abortedByJsonFailure;
+    draft.abortedByProbeFailure = abortedByProbeFailure;
+    draft.probeFailureType = probeFailureType;
     draft.failedChunks = failedChunks;
     draft.missingChunks = missingChunks;
     draft.skippedChunks = skippedChunks;
@@ -730,18 +772,28 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     state.longScriptAnalysisProgress = {
       ...(state.longScriptAnalysisProgress || progress),
       active: false,
-      currentStep: abortedByJsonFailure ? "已暂停，等待 JSON 输出修复" : "完成",
+      currentStep: abortedByProbeFailure ? "分集 JSON 探针失败，已暂停" : abortedByJsonFailure ? "已暂停，等待 JSON 输出修复" : "完成",
       failedChunks,
       missingChunks,
       skippedChunks,
       aborted: abortedByJsonFailure || abortedByProbeFailure,
       abortedByJsonFailure,
+      abortedByProbeFailure,
+      probeFailureType,
       chunkResults,
       inputSignature
     };
     return state;
   }, failedChunks.length ? "完成长剧本分集分析（需复核失败分集）" : "完成长剧本分集分析", { targetType: "analysis", action: "generate" });
-  showToast(abortedByJsonFailure ? "连续分集返回非 JSON，已暂停长剧本分析。请先测试 analyzeEpisodeChunk JSON 输出。" : failedChunks.length || missingChunks.length ? `长剧本分析完成，但有 ${failedChunks.length} 个失败 chunk、${missingChunks.length} 个缺失分集，需复核。` : "完成长剧本分集分析");
+  showToast(
+    abortedByProbeFailure
+      ? probeFailureWarning(probeFailureType)
+      : abortedByJsonFailure
+        ? "连续分集返回非 JSON，已暂停长剧本分析。请先测试 analyzeEpisodeChunk JSON 输出。"
+        : failedChunks.length || missingChunks.length
+          ? `长剧本分析完成，但有 ${failedChunks.length} 个失败 chunk、${missingChunks.length} 个缺失分集，需复核。`
+          : "完成长剧本分集分析"
+  );
 }
 
 function updateLongProgress(mutator) {
@@ -774,10 +826,82 @@ function assertProbeChunkUsable(result) {
   }
 }
 
+function shouldAttemptEpisodeSchemaRepair(result = {}) {
+  if (!result || result.success) return false;
+  if (!["schema_validation", "empty_model_structure"].includes(result.errorType)) return false;
+  if (!result.parsedJson && !result.invalidParsedJson && !result.outputText) return false;
+  return true;
+}
+
+async function repairEpisodeChunkSchema({ originalResult, chunkInput, projectId }) {
+  const repairInput = {
+    ...chunkInput,
+    rawModelJson: originalResult.parsedJson || originalResult.invalidParsedJson || null,
+    rawOutputPreview: originalResult.rawOutputPreview || originalResult.log?.rawOutputPreview || "",
+    schemaIssues: originalResult.schemaIssues || originalResult.log?.schemaIssues || originalResult.schemaMeta?.modelStructureIssues || [],
+    compactContract: "EpisodeChunkAnalysis compact root：episodeNo/title/evidenceLedger/episodeBeatLedger/episodeFunctionAnalysis/reusablePatterns/openQuestions/continuityNotes/confidence/needsReview"
+  };
+  const repairResult = await callModel({
+    taskType: "schemaRepairAnalyzeEpisodeChunk",
+    featureArea: "JSON 修复",
+    projectId,
+    inputMeta: repairInput,
+    schema: true,
+    state: store.getState()
+  });
+  repairResult.schemaRepairAttempted = true;
+  if (!repairResult.success) {
+    repairResult.error = `schema repair 失败：${repairResult.error || "未知错误"}`;
+    return repairResult;
+  }
+  repairResult.schemaRepaired = true;
+  repairResult.compactSchemaAccepted = true;
+  repairResult.parsedJson ||= {};
+  repairResult.parsedJson.sourceMeta = {
+    ...(repairResult.parsedJson.sourceMeta || {}),
+    schemaRepaired: true,
+    schemaRepairSource: "model",
+    schemaRepairOriginalError: originalResult.error || "",
+    schemaRepairOriginalErrorType: originalResult.errorType || "schema_validation",
+    needsReview: true,
+    usableForSkillLearning: false,
+    usableForLearning: false,
+    usableForFullScriptCase: false
+  };
+  repairResult.parsedJson.needsReview = true;
+  repairResult.schemaMeta = {
+    ...(repairResult.schemaMeta || repairResult.parsedJson.sourceMeta || {}),
+    schemaRepaired: true,
+    needsReview: true,
+    usableForSkillLearning: false,
+    usableForLearning: false,
+    usableForProduction: false
+  };
+  repairResult.needsReview = true;
+  repairResult.usableForLearning = false;
+  repairResult.usableForProduction = false;
+  repairResult.warnings = [
+    ...(repairResult.warnings || []),
+    "原分集 JSON 已通过 schemaRepairAnalyzeEpisodeChunk 结构修复，需人工复核，不可直接用于 Skill 学习沉淀。"
+  ];
+  return repairResult;
+}
+
+function probeFailureWarning(type = "") {
+  if (type === "schema_validation" || type === "empty_model_structure") {
+    return "分集 JSON 探针已成功解析 JSON，但模型返回结构不符合 EpisodeChunkAnalysis compact schema，已暂停后续分集调用。";
+  }
+  if (type === "source_text_validation") {
+    return "分集 JSON 探针缺少可命中原文的 sourceText，已暂停后续分集调用。";
+  }
+  return "分集 JSON 探针返回非 JSON，已暂停后续分集调用。";
+}
+
 function createChunkFailure(error, chunk) {
   const result = error.result || {};
   const log = error.log || result.log || {};
   const errorType = error.errorType || result.errorType || log.errorType || classifyChunkError(error.message || result.error || "");
+  const returnedKeys = collectJsonKeyPaths(result.parsedJson || result.invalidParsedJson || log.invalidParsedJson || null);
   return {
     failureStage: "episode_chunk",
     chunkKey: getChunkKey(chunk),
@@ -790,12 +914,16 @@ function createChunkFailure(error, chunk) {
     jsonExtractionMethod: result.jsonExtractionMethod || log.jsonExtractionMethod || error.jsonExtractionMethod || "none",
     jsonRepairAttempted: Boolean(result.jsonRepairAttempted || log.jsonRepairAttempted || error.jsonRepairAttempted),
     jsonRepairError: result.jsonRepairError || log.jsonRepairError || error.jsonRepairError || "",
-    parseErrorPosition: result.parseErrorPosition ?? log.parseErrorPosition ?? error.parseErrorPosition ?? null
+    parseErrorPosition: result.parseErrorPosition ?? log.parseErrorPosition ?? error.parseErrorPosition ?? null,
+    schemaIssues: result.schemaIssues || log.schemaIssues || error.schemaIssues || [],
+    returnedKeys,
+    expectedKeys: errorType === "schema_validation" || errorType === "empty_model_structure" ? ["evidenceLedger", "episodeBeatLedger", "episodeFunctionAnalysis"] : []
   };
 }
 
 function classifyChunkError(message = "") {
   if (/JSON 解析失败|not valid JSON|未找到 JSON|Unexpected token/i.test(message)) return "json_parse";
+  if (/结构空壳|compact 结构无效|有效内容不足/i.test(message)) return "empty_model_structure";
   if (/结构校验失败|schema/i.test(message)) return "schema_validation";
   if (/sourceText 校验失败|原文未命中/i.test(message)) return "source_text_validation";
   if (/Provider|API|Failed to fetch|timeout|429|500|502|503|504|请求被中止/i.test(message)) return "provider_api";
@@ -804,6 +932,23 @@ function classifyChunkError(message = "") {
 
 function isJsonChunkFailure(failed = {}) {
   return failed.errorType === "json_parse" || /JSON 解析失败|not valid JSON|未找到 JSON|Unexpected token/i.test(failed.error || "");
+}
+
+function collectJsonKeyPaths(value, prefix = "", depth = 0) {
+  if (!value || typeof value !== "object" || depth > 3) return [];
+  if (Array.isArray(value)) {
+    const first = value[0];
+    return first && typeof first === "object" ? collectJsonKeyPaths(first, `${prefix}[0]`, depth + 1) : [];
+  }
+  const paths = [];
+  for (const [key, item] of Object.entries(value)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    paths.push(path);
+    if (item && typeof item === "object") {
+      paths.push(...collectJsonKeyPaths(item, path, depth + 1));
+    }
+  }
+  return paths.slice(0, 24);
 }
 
 async function executeTask(taskType, inputFactory, applyOutput, summary, options = {}) {
@@ -1375,7 +1520,7 @@ async function testEpisodeChunkJsonOutput() {
     globalContextSummary: "分集 JSON 输出测试",
     outputRequirements: ["只返回最小 EpisodeChunkAnalysis JSON 对象。"]
   };
-  const result = await callModel({
+  let result = await callModel({
     taskType: "analyzeEpisodeChunk",
     featureArea: "剧本分析中心",
     projectId: current.currentProject.id,
@@ -1383,13 +1528,27 @@ async function testEpisodeChunkJsonOutput() {
     schema: true,
     state: current
   });
+  const originalTestResult = result;
+  if (!result.success && shouldAttemptEpisodeSchemaRepair(result)) {
+    const repairResult = await repairEpisodeChunkSchema({
+      originalResult: result,
+      chunkInput: inputMeta,
+      projectId: current.currentProject.id
+    });
+    result = repairResult;
+  }
   const validation = result.parsedJson?.sourceMeta?.evidenceValidation || null;
+  const suspectedLegacyStructure = hasLegacyEpisodeChunkStructure(originalTestResult.parsedJson || originalTestResult.invalidParsedJson || result.parsedJson);
   store.setState((state) => {
     state.apiConfig.lastEpisodeJsonTest = {
       success: result.success,
-      jsonParseSuccess: result.success && Boolean(result.parsedJson),
+      jsonParseSuccess: Boolean(result.parsedJson || result.invalidParsedJson || result.outputText),
       extractionMethod: result.jsonExtractionMethod || result.log?.jsonExtractionMethod || "none",
       schemaOk: result.success && !result.errorType,
+      compactSchemaOk: result.success && !result.errorType,
+      suspectedLegacyStructure,
+      schemaRepairAttempted: Boolean(result.schemaRepairAttempted || result.schemaRepaired),
+      schemaRepairSuccess: result.success && Boolean(result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired),
       sourceTextOk: validation ? (validation.validCount || 0) > 0 && (validation.invalidEvidenceRatio || 0) <= 0.5 : false,
       requestFormat: result.requestFormat,
       modelName: result.log?.modelName || result.modelId || "未选择",
@@ -1403,6 +1562,17 @@ async function testEpisodeChunkJsonOutput() {
   }, "测试 analyzeEpisodeChunk JSON 输出", { targetType: "settings", action: "generate", light: true });
   busyAction = null;
   showToast(result.success ? "分集 JSON 输出测试通过" : "分集 JSON 输出测试失败：路由连通通过不代表复杂 JSON 输出可用，请更换模型、开启 JSON mode 或使用更严格 Prompt。");
+}
+
+function hasLegacyEpisodeChunkStructure(value = null) {
+  if (!value || typeof value !== "object") return false;
+  return Boolean(
+    Object.hasOwn(value, "episodeAnalysis") ||
+      Object.hasOwn(value, "structuralAnalysis") ||
+      value.episodeAnalysis?.[0]?.structuralAnalysis ||
+      value.data?.episodeAnalysis ||
+      value.result?.episodeAnalysis
+  );
 }
 
 async function switchCoreTasksToSelectedModel() {
@@ -1759,7 +1929,9 @@ function renderLongScriptProgress(progress) {
         <span>跳过：${(progress.skippedChunks || []).length}</span>
       </div>
       ${
-        progress.abortedByJsonFailure
+        progress.abortedByProbeFailure
+          ? `<div class="warning-list strong-warning"><p>${escapeHtml(probeFailureWarning(progress.probeFailureType || ""))}</p></div>`
+          : progress.abortedByJsonFailure
           ? `<div class="warning-list strong-warning"><p>连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。</p></div>`
           : ""
       }
@@ -1785,6 +1957,8 @@ function renderLongScriptProgress(progress) {
                   <span>${escapeHtml(item.errorType || "unknown")}</span>
                   <em>${escapeHtml(item.error || "未记录错误")}</em>
                   ${item.rawOutputPreview ? `<p>模型原始输出前 300 字：${escapeHtml(String(item.rawOutputPreview).slice(0, 300))}</p>` : ""}
+                  ${item.returnedKeys?.length ? `<p>模型返回字段：${item.returnedKeys.map((key) => escapeHtml(key)).join("；")}</p>` : ""}
+                  ${item.expectedKeys?.length ? `<p>系统期望字段：${item.expectedKeys.map((key) => escapeHtml(key)).join("；")}</p><p>模型返回了旧结构/错结构。可尝试 schema repair，或强化 analyzeEpisodeChunk Prompt。</p>` : ""}
                 </div>`
                 )
                 .join("")}
@@ -1815,7 +1989,7 @@ function renderLongScriptProgress(progress) {
 }
 
 function statusClass(status = "") {
-  if (status === "成功") return "ok";
+  if (status === "成功" || status.startsWith("成功")) return "ok";
   if (status === "失败") return "bad";
   if (status === "分析中") return "running";
   if (status === "待重试" || status === "跳过") return "warn";
@@ -2424,6 +2598,9 @@ function renderEpisodeJsonTestResult(result) {
         ["JSON.parse", result.jsonParseSuccess ? "成功" : "失败"],
         ["extractionMethod", result.extractionMethod || "none"],
         ["schema", result.schemaOk ? "通过" : "失败"],
+        ["compact schema", result.compactSchemaOk ? "通过" : "失败"],
+        ["疑似旧结构", result.suspectedLegacyStructure ? "是" : "否"],
+        ["schema repair", result.schemaRepairAttempted ? (result.schemaRepairSuccess ? "已执行并成功" : "已执行但失败") : "未执行"],
         ["sourceText", result.sourceTextOk ? "命中" : "未通过"],
         ["requestFormat", result.requestFormat || "未记录"],
         ["modelName", result.modelName || "未记录"],
@@ -2431,6 +2608,11 @@ function renderEpisodeJsonTestResult(result) {
         ["错误", result.errorMessage || "无"],
         ["时间", formatDate(result.createdAt)]
       ])}
+      ${
+        result.suspectedLegacyStructure
+          ? `<p class="warning-text">模型能返回 JSON，但未遵守 EpisodeChunkAnalysis 字段名。建议执行 schema repair 或更换模型/Prompt。</p>`
+          : ""
+      }
       ${
         result.success
           ? ""

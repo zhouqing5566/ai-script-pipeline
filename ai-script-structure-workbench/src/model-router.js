@@ -124,6 +124,7 @@ export function clampMaxOutputTokens(value, taskType = "") {
     aggregateScriptAnalysis: 12000,
     mergeEvidenceLedAnalysis: 12000,
     schemaRepairAnalyzeScript: 12000,
+    schemaRepairAnalyzeEpisodeChunk: 6000,
     generateEpisodeOutline: 16000,
     generateMacroOutline: 12000,
     generateStageOutline: 10000,

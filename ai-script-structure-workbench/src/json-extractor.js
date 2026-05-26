@@ -1,3 +1,5 @@
+import { scoreEpisodeChunkCandidate } from "./episode-chunk-shape.js";
+
 export function extractJsonCandidate(text = "") {
   const candidates = extractJsonCandidates(text);
   const source = String(text || "").trim();
@@ -86,12 +88,7 @@ function taskCandidateScore(value, taskType = "") {
 function directTaskCandidateScore(value, taskType = "") {
   if (!value || typeof value !== "object") return 0;
   if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk") {
-    return [
-      Array.isArray(value.episodeBeatLedger) && value.episodeBeatLedger.length ? 60 : 0,
-      value.episodeFunctionAnalysis && typeof value.episodeFunctionAnalysis === "object" ? 45 : 0,
-      value.evidenceLedger && typeof value.evidenceLedger === "object" ? 30 : 0,
-      value.episodeNo ? 10 : 0
-    ].reduce((sum, item) => sum + item, 0);
+    return scoreEpisodeChunkCandidate(value);
   }
   if (taskType === "analyzeScript" || taskType === "aggregateScriptAnalysis" || taskType === "mergeEvidenceLedAnalysis" || taskType === "schemaRepairAnalyzeScript") {
     return [

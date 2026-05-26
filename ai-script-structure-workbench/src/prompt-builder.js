@@ -34,6 +34,7 @@ const strictJsonTaskTypes = new Set([
   "aggregateScriptAnalysis",
   "mergeEvidenceLedAnalysis",
   "schemaRepairAnalyzeScript",
+  "schemaRepairAnalyzeEpisodeChunk",
   "jsonRepair"
 ]);
 
@@ -60,7 +61,7 @@ export function buildPrompt({ taskType, project, input, matchedSkills = [], outp
     ? [
         "JSON-only 硬约束：",
         ...strictJsonOnlyPrompt.map((item, index) => `${index + 1}. ${item}`),
-        taskType === "analyzeEpisodeChunk" ? "10. 只返回 EpisodeChunkAnalysis JSON 对象；不要输出全剧分析；不要输出“下面是分析结果”。" : ""
+        taskType === "analyzeEpisodeChunk" || taskType === "schemaRepairAnalyzeEpisodeChunk" ? "10. 只返回 EpisodeChunkAnalysis JSON 对象；不要输出全剧分析；不要输出“下面是分析结果”。" : ""
       ]
         .filter(Boolean)
         .join("\n")
@@ -86,7 +87,7 @@ export function buildPrompt({ taskType, project, input, matchedSkills = [], outp
   ].join("\n");
   const system = [
     ...(strictJsonTaskTypes.has(taskType) ? strictJsonOnlyPrompt : []),
-    ...(taskType === "analyzeEpisodeChunk" ? ["只返回 EpisodeChunkAnalysis JSON 对象；不要输出全剧分析；不要输出“下面是分析结果”。"] : []),
+    ...(taskType === "analyzeEpisodeChunk" || taskType === "schemaRepairAnalyzeEpisodeChunk" ? ["只返回 EpisodeChunkAnalysis JSON 对象；不要输出全剧分析；不要输出“下面是分析结果”。"] : []),
     ...systemPrinciples
   ].join("\n");
   return {

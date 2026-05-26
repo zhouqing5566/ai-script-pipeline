@@ -23,6 +23,7 @@ import { schemaValidationMessage, validateTaskOutput } from "./schema-validator.
 import { resolveRequestFormat } from "./request-format.js";
 import { applyEvidenceValidationToAnalysis } from "./evidence-validator.js";
 import { aggregateScriptAnalysis, analyzeEpisodeChunk, mergeEvidenceLedAnalysis } from "./long-script-analysis.js";
+import { evaluateEpisodeChunkCompactShape } from "./episode-chunk-shape.js";
 
 export async function callModel({
   taskType,
@@ -93,6 +94,9 @@ export async function callModel({
   const warnings = [];
   warnings.push(...(selection.optionWarnings || []));
   let schemaMeta = null;
+  let schemaIssues = [];
+  let compactSchemaAccepted = null;
+  let invalidParsedJson = null;
   const requestedMode = state?.apiConfig?.mode || "demo";
   const requiresRouteFix = requestedMode === "api" && selection.mode === "demo" && !state?.apiConfig?.allowDemoInApiMode;
   if (requestedMode === "api" && selection.mode === "demo") {
@@ -163,8 +167,13 @@ export async function callModel({
       setJsonRepairAttempted: (value) => (jsonRepairAttempted = jsonRepairAttempted || Boolean(value)),
       setJsonRepairError: (value) => (jsonRepairError = value || jsonRepairError),
       setParseErrorPosition: (value) => (parseErrorPosition = value ?? parseErrorPosition),
-      setErrorType: (value) => (errorType = value || errorType)
+      setErrorType: (value) => (errorType = value || errorType),
+      setOutputText: (value) => (outputText = value || outputText),
+      setInvalidParsedJson: (value) => (invalidParsedJson = value || invalidParsedJson),
+      setSchemaIssues: (value) => (schemaIssues = value || schemaIssues),
+      setCompactSchemaAccepted: (value) => (compactSchemaAccepted = value ?? compactSchemaAccepted)
     });
+    if (invalidParsedJson && !parsedJson) parsedJson = invalidParsedJson;
     if (!attemptErrors.length) attemptErrors.push(`主模型失败：${providerError.message}`);
     if (selection.mode === "api") {
       const fallback = selectFallbackModel({
@@ -231,8 +240,13 @@ export async function callModel({
             setJsonRepairAttempted: (value) => (jsonRepairAttempted = jsonRepairAttempted || Boolean(value)),
             setJsonRepairError: (value) => (jsonRepairError = value || jsonRepairError),
             setParseErrorPosition: (value) => (parseErrorPosition = value ?? parseErrorPosition),
-            setErrorType: (value) => (errorType = value || errorType)
+            setErrorType: (value) => (errorType = value || errorType),
+            setOutputText: (value) => (outputText = value || outputText),
+            setInvalidParsedJson: (value) => (invalidParsedJson = value || invalidParsedJson),
+            setSchemaIssues: (value) => (schemaIssues = value || schemaIssues),
+            setCompactSchemaAccepted: (value) => (compactSchemaAccepted = value ?? compactSchemaAccepted)
           });
+          if (invalidParsedJson && !parsedJson) parsedJson = invalidParsedJson;
           if (!attemptErrors.some((item) => item.includes("备用模型"))) attemptErrors.push(`备用模型失败：${fallbackError.message}`);
           error = attemptErrors.join("；");
         }
@@ -280,6 +294,9 @@ export async function callModel({
     jsonRepairError,
     parseErrorPosition,
     errorType,
+    schemaIssues,
+    compactSchemaAccepted,
+    invalidParsedJson,
     settingsUpdatedAt,
     providerUpdatedAt,
     modelUpdatedAt,
@@ -318,6 +335,8 @@ export async function callModel({
     jsonRepairError,
     parseErrorPosition,
     errorType,
+    schemaIssues,
+    compactSchemaAccepted,
     modelId: result.modelId,
     modelName: model?.displayName || model?.modelName || "未选择",
     skillVersion: matchedSkills.map((skill) => `${skill.name} ${skill.version}`).join("；") || "未匹配",
@@ -613,6 +632,8 @@ function dispatchTask(taskType, input, state) {
       return repairJsonText(input.brokenText);
     case "schemaRepairAnalyzeScript":
       return createDemoSchemaRepairDraft(input);
+    case "schemaRepairAnalyzeEpisodeChunk":
+      return createDemoEpisodeChunkSchemaRepair(input);
     default:
       throw new Error(`暂不支持的任务：${taskType}`);
   }
@@ -625,7 +646,7 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
     warnings.push(`模型返回包含 ${unwrapped.unwrapPath.join(".")} 外层，已自动展开为任务根对象。`);
   }
 
-  if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk") {
+  if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk" || taskType === "schemaRepairAnalyzeEpisodeChunk") {
     const normalized = coerceEpisodeChunkOutput(unwrapped.value, inputMeta);
     warnings.push(...normalized.warnings);
     return {
@@ -673,12 +694,10 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
 function coerceEpisodeChunkOutput(value, inputMeta = {}) {
   const base = analyzeEpisodeChunk(inputMeta);
   const source = isPlainObject(value) ? value : {};
+  const compactShape = evaluateEpisodeChunkCompactShape(source, { episodeText: inputMeta.episodeText || inputMeta.text || "" });
   const merged = deepMerge(base, source);
   const warnings = [];
-  const missingCompactFields = [];
-  if (!isPlainObject(source.evidenceLedger)) missingCompactFields.push("evidenceLedger");
-  if (!Array.isArray(source.episodeBeatLedger) || !source.episodeBeatLedger.length) missingCompactFields.push("episodeBeatLedger");
-  if (!isPlainObject(source.episodeFunctionAnalysis)) missingCompactFields.push("episodeFunctionAnalysis");
+  const missingCompactFields = compactShape.missingCompactFields || [];
   merged.episodeNo = Number(source.episodeNo) || Number(inputMeta.episodeNo) || base.episodeNo || null;
   merged.title = source.title || inputMeta.episodeTitle || base.title || `第${merged.episodeNo || "?"}集`;
   merged.coverage = isPlainObject(source.coverage) ? source.coverage : base.coverage;
@@ -695,12 +714,21 @@ function coerceEpisodeChunkOutput(value, inputMeta = {}) {
   merged.sourceMeta = {
     ...(source.sourceMeta || {}),
     normalizedEpisodeChunk: true,
-    modelStructureIncomplete: missingCompactFields.length > 0,
-    missingCompactFields
+    modelStructureIncomplete: !compactShape.valid,
+    modelStructureIssues: compactShape.issues,
+    missingCompactFields,
+    localFallbackSections: compactShape.localFallbackSections,
+    modelProvidedFields: compactShape.modelProvidedFields,
+    modelProvidedCompactScore: compactShape.score,
+    validModelBeatCount: compactShape.validBeatCount,
+    validModelEvidenceCount: compactShape.validEvidenceCount,
+    nonEmptyModelFunctionFields: compactShape.nonEmptyFunctionFields,
+    linkedModelBeatIds: compactShape.linkedBeatIds,
+    linkedModelEvidenceIds: compactShape.linkedEvidenceIds
   };
-  if (missingCompactFields.length) {
+  if (!compactShape.valid) {
     merged.needsReview = true;
-    warnings.push(`模型未返回 ${missingCompactFields.join("、")}，本地仅能补齐展示草稿，不能视为真实分集分析成功。`);
+    warnings.push(`模型返回的分集 compact 结构无效：${compactShape.issues.join("；")} 本地仅能补齐展示草稿，不能视为真实分集分析成功。`);
   }
   applyEvidenceValidationToAnalysis(merged, inputMeta.episodeText || inputMeta.text || "");
   const validation = merged.sourceMeta.evidenceValidation || {};
@@ -974,6 +1002,76 @@ function createDemoSchemaRepairDraft(input = {}) {
   return draft;
 }
 
+function createDemoEpisodeChunkSchemaRepair(input = {}) {
+  const draft = analyzeEpisodeChunk(input);
+  const sourceText = firstEpisodeSourceText(input.episodeText || input.text || "");
+  const structural = Array.isArray(input.rawModelJson?.episodeAnalysis)
+    ? input.rawModelJson.episodeAnalysis[0]?.structuralAnalysis || {}
+    : input.rawModelJson?.structuralAnalysis || {};
+  draft.evidenceLedger.hookEvidence = [
+    {
+      id: "E001",
+      episodeNo: draft.episodeNo,
+      sourceText,
+      summary: structural.openingHook || "根据原分集文本提取的开头证据。",
+      evidenceType: "hook",
+      relatedBeatIds: ["B001"],
+      confidence: 0.65
+    }
+  ];
+  draft.episodeBeatLedger = [
+    {
+      beatId: "B001",
+      episodeNo: draft.episodeNo,
+      sourceText,
+      beatSummary: structural.openingHook || "本集开头事件。",
+      characters: [],
+      audienceEmotion: ["紧张"],
+      suspenseQuestion: "",
+      structureFunction: "开头钩子",
+      confidence: 0.65
+    }
+  ];
+  draft.episodeFunctionAnalysis = ensureEpisodeAnalysisContract(
+    {
+      episodeNo: draft.episodeNo,
+      summary: structural.openingHook || "本集结构修复摘要。",
+      openingHook: structural.openingHook || "开头钩子待复核。",
+      mainConflict: structural.conflictProgression || "本集冲突待复核。",
+      informationGain: structural.pacing || "本集信息增量待复核。",
+      characterFunction: "结构修复生成，需人工复核。",
+      evidenceBeatIds: ["B001"],
+      inferenceLevel: "合理推断",
+      confidence: 0.55,
+      riskNotes: ["Demo 分集 schema repair 只用于流程演示，需复核。"],
+      needsReview: true
+    },
+    draft.episodeFunctionAnalysis
+  );
+  draft.sourceMeta = {
+    ...(draft.sourceMeta || {}),
+    schemaRepaired: true,
+    schemaRepairSource: "demo",
+    needsReview: true,
+    usableForSkillLearning: false,
+    usableForLearning: false,
+    usableForFullScriptCase: false,
+    warnings: ["Demo 分集 schema repair 不代表真实模型修复。"]
+  };
+  draft.needsReview = true;
+  draft.confidence = Math.min(Number(draft.confidence) || 0.55, 0.55);
+  applyEvidenceValidationToAnalysis(draft, input.episodeText || input.text || "");
+  return draft;
+}
+
+function firstEpisodeSourceText(text = "") {
+  const lines = String(text || "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^第\s*[一二三四五六七八九十\d]+\s*[集话]/.test(line));
+  return lines[0] || String(text || "").slice(0, 80);
+}
+
 function deepMerge(base, source) {
   if (Array.isArray(base)) return mergeArray(base, source);
   if (isPlainObject(base)) {
@@ -1046,6 +1144,10 @@ function copyJsonErrorMeta(error, setters = {}) {
   setters.setJsonRepairError?.(error.jsonRepairError);
   setters.setParseErrorPosition?.(error.parseErrorPosition);
   setters.setErrorType?.(error.errorType);
+  setters.setOutputText?.(error.outputText);
+  setters.setInvalidParsedJson?.(error.invalidParsedJson);
+  setters.setSchemaIssues?.(error.schemaIssues);
+  setters.setCompactSchemaAccepted?.(error.compactSchemaAccepted);
 }
 
 function createRawOutputPreview(text = "", limit = 500) {
@@ -1095,6 +1197,7 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
     ].filter(Boolean);
     if (!repaired.ok) {
       const error = new Error(repaired.error);
+      error.outputText = response.outputText;
       attachJsonErrorMeta(error, response, "json_parse");
       throw error;
     }
@@ -1103,10 +1206,21 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
     const shape = validateTaskOutput(taskType, parsedJson);
     if (!shape.ok || normalized.meta?.modelStructureIncomplete) {
       const missingFields = normalized.meta?.missingCompactFields || [];
+      const structureIssues = normalized.meta?.modelStructureIssues || [];
+      const issueDetails = [
+        missingFields.length ? `模型未返回 ${missingFields.join("、")}` : "",
+        structureIssues.length ? `模型返回结构空壳或错结构：${structureIssues.join("；")}` : ""
+      ]
+        .filter(Boolean)
+        .join("；");
       const message = normalized.meta?.modelStructureIncomplete
-        ? `分集结构校验失败：模型未返回 ${missingFields.join("、")}，不能用本地补齐结果冒充真实分集分析。`
+        ? `分集结构校验失败：${issueDetails || "模型返回分集 compact 结构无效"}，不能用本地补齐结果冒充真实分集分析。`
         : schemaValidationMessage(taskType, shape.issues);
       const error = new Error(message);
+      error.outputText = response.outputText;
+      error.invalidParsedJson = repaired.value;
+      error.schemaIssues = normalized.meta?.modelStructureIssues?.length ? normalized.meta.modelStructureIssues : shape.issues;
+      error.compactSchemaAccepted = false;
       attachJsonErrorMeta(error, response, "schema_validation");
       throw error;
     }
@@ -1238,6 +1352,7 @@ function featureAreaForTask(taskType) {
     auditDraft: "成稿中心",
     jsonRepair: "JSON 修复",
     schemaRepairAnalyzeScript: "JSON 修复",
+    schemaRepairAnalyzeEpisodeChunk: "JSON 修复",
     summarizeLongText: "长文本总结",
     classifyTags: "分类与标签"
   };
