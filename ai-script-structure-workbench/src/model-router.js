@@ -119,6 +119,7 @@ export function clampMaxOutputTokens(value, taskType = "") {
   const requested = Math.max(1, Number(value) || 4096);
   const caps = {
     analyzeScript: 12000,
+    schemaRepairAnalyzeScript: 12000,
     generateEpisodeOutline: 16000,
     generateMacroOutline: 12000,
     generateStageOutline: 10000,

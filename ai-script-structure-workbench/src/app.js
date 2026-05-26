@@ -63,11 +63,12 @@ root.addEventListener("click", (event) => {
   const target = event.target.closest("[data-action], [data-view]");
   if (!target || busyAction) return;
   if (target.dataset.view) {
-    const next = readOpenInputs(store.getState());
+    const next = commitOpenInputsBeforeAction(`切换到${target.textContent.trim()}`);
     next.view = target.dataset.view;
     store.setState(next, `切换到${target.textContent.trim()}`, { version: false });
     return;
   }
+  commitOpenInputsBeforeAction(target.dataset.action || "执行操作");
   void handleAction(target);
 });
 
@@ -429,8 +430,7 @@ async function syncApiSettings(options = {}) {
 }
 
 async function executeTask(taskType, inputFactory, applyOutput, summary, options = {}) {
-  const current = readOpenInputs(store.getState());
-  store.setState(current, "保存当前表单输入", { version: false });
+  const current = commitOpenInputsBeforeAction(taskLabels[taskType] || taskType);
   busyAction = taskLabels[taskType] || taskType;
   render();
   const { output, log, result } = await runModelTask(taskType, inputFactory(current), current);
@@ -438,6 +438,12 @@ async function executeTask(taskType, inputFactory, applyOutput, summary, options
   busyAction = null;
   store.setState(current, summary, options);
   showToast(result?.warnings?.length ? `${summary}。${result.warnings[0]}` : summary);
+}
+
+function commitOpenInputsBeforeAction(actionName = "执行操作") {
+  const next = readOpenInputs(store.getState());
+  store.setState(next, `保存当前输入：${actionName}`, { version: false });
+  return next;
 }
 
 function inputMetaForTask(state, taskType) {
@@ -483,6 +489,10 @@ function saveCurrentAnalysisAsCase() {
     showToast("请先完成剧本分析");
     return;
   }
+  if (analysis.sourceMeta?.blockedSave) {
+    showToast("该分析大量字段由本地规则补齐，不能作为真实模型分析案例入库。请重新分析或执行结构修复。");
+    return;
+  }
   store.setState((state) => {
     const item = {
       id: analysis.id,
@@ -498,7 +508,7 @@ function saveCurrentAnalysisAsCase() {
       ),
       createdAt: new Date().toISOString(),
       tags: ["结构分析", "可复用模式", analysis.basicInfo.format],
-      status: "待审核",
+      status: analysis.sourceMeta?.needsReview ? "待复核" : "待审核",
       summary: analysis.basicInfo.coreAppeal,
       analysis
     };
@@ -1227,6 +1237,7 @@ function renderAnalysis(state) {
         ${analysisTabs.map(([id, label]) => `<button class="${state.activeAnalysisTab === id ? "active" : ""}" data-action="set-analysis-tab" data-id="${id}">${label}</button>`).join("")}
       </section>
       <section class="panel result-panel">
+        ${renderAnalysisSourceAlert(analysis)}
         ${renderAnalysisTab(analysis, state.activeAnalysisTab)}
         <div class="panel-actions">
           <button class="secondary-button" data-action="save-case">${icon("archive")}加入案例库</button>
@@ -1235,6 +1246,28 @@ function renderAnalysis(state) {
       </section>`
         : emptyState("还没有分析结果", "粘贴或上传剧本后点击开始分析，系统会输出结构档案而不是剧情摘要。")
     }
+  `;
+}
+
+function renderAnalysisSourceAlert(analysis) {
+  const meta = analysis?.sourceMeta;
+  if (!meta?.needsReview && !meta?.blockedSave) return "";
+  const rows = [
+    meta.unwrapPath?.length ? `已展开 ${meta.unwrapPath.join(".")} 外层` : "",
+    meta.missingCoreSections?.length ? `真实模型缺少 ${meta.missingCoreSections.length} 个核心模块：${meta.missingCoreSections.join("、")}` : "",
+    meta.localFallbackSections?.length ? `${meta.localFallbackSections.length} 个模块由本地规则补齐` : "",
+    meta.modelCompletenessScore !== undefined ? `模型结构完整度：${meta.modelCompletenessScore}%` : ""
+  ].filter(Boolean);
+  return `
+    <div class="analysis-source-alert ${meta.blockedSave ? "blocked" : ""}">
+      <strong>${meta.blockedSave ? "该分析仅可作为待复核草稿" : "本次分析使用了结构修复/字段补齐"}</strong>
+      <p>${escapeHtml(rows.join("；") || "真实模型输出结构与标准档案不完全一致。")}</p>
+      ${
+        meta.blockedSave
+          ? `<p>已阻止直接加入正式案例库。请重新分析或执行结构修复后再沉淀为案例。</p>`
+          : `<p>建议主编复核后再加入案例库或提炼 Skill。</p>`
+      }
+    </div>
   `;
 }
 

@@ -84,6 +84,7 @@ export const modelTaskTypes = [
   "generateDraft",
   "auditDraft",
   "jsonRepair",
+  "schemaRepairAnalyzeScript",
   "summarizeLongText",
   "classifyTags"
 ];
@@ -253,6 +254,25 @@ export function createDefaultRoutes() {
       allowFallback: false,
       enabled: true,
       notes: "只修复 JSON，不扩写内容。"
+    },
+    {
+      id: "route-schema-repair-analyze-script",
+      featureArea: "JSON 修复",
+      taskType: "schemaRepairAnalyzeScript",
+      primaryModelId: "model-demo-rule-engine",
+      fallbackModelIds: [],
+      requiredCapabilities: ["json"],
+      maxInputTokens: 24000,
+      maxOutputTokens: 12000,
+      temperature: 0,
+      topP: 1,
+      jsonModeRequired: true,
+      streamingEnabled: false,
+      retryCount: 0,
+      timeoutMs: 60000,
+      allowFallback: false,
+      enabled: true,
+      notes: "把真实模型的剧本分析草稿重排为标准结构，不允许编造。"
     }
   ];
 }
@@ -531,6 +551,7 @@ export function featureAreaForTaskType(taskType) {
     generateDraft: "成稿中心",
     auditDraft: "成稿中心",
     jsonRepair: "JSON 修复",
+    schemaRepairAnalyzeScript: "JSON 修复",
     summarizeLongText: "长文本总结",
     classifyTags: "分类与标签"
   };
@@ -560,6 +581,7 @@ function createEmptyConfig() {
 
 function defaultTimeoutForTask(taskType) {
   if (taskType === "generateEpisodeOutline") return 90000;
+  if (taskType === "schemaRepairAnalyzeScript") return 60000;
   if (taskType === "jsonRepair") return 30000;
   return 60000;
 }
@@ -567,6 +589,7 @@ function defaultTimeoutForTask(taskType) {
 function defaultMaxOutputForTask(taskType) {
   if (taskType === "generateEpisodeOutline") return 16000;
   if (taskType === "generateDraft") return 12000;
+  if (taskType === "schemaRepairAnalyzeScript") return 12000;
   return 10000;
 }
 

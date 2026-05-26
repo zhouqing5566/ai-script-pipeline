@@ -84,6 +84,7 @@ export async function callModel({
   let mode = selection.mode;
   const warnings = [];
   warnings.push(...(selection.optionWarnings || []));
+  let schemaMeta = null;
   const requestedMode = state?.apiConfig?.mode || "demo";
   const requiresRouteFix = requestedMode === "api" && selection.mode === "demo" && !state?.apiConfig?.allowDemoInApiMode;
   if (requestedMode === "api" && selection.mode === "demo") {
@@ -129,6 +130,7 @@ export async function callModel({
       modelUpdatedAt = response.modelUpdatedAt || null;
       costEstimate = estimateCost(model, tokenUsage);
       warnings.push(...(response.schemaWarnings || []));
+      schemaMeta = response.schemaMeta || schemaMeta;
     }
   } catch (providerError) {
     const mainMeta = providerError.providerPayload || null;
@@ -183,6 +185,7 @@ export async function callModel({
           modelUpdatedAt = response.modelUpdatedAt || null;
           costEstimate = estimateCost(model, tokenUsage);
           warnings.push(...(response.schemaWarnings || []));
+          schemaMeta = response.schemaMeta || schemaMeta;
         } catch (fallbackError) {
           const fallbackMeta = fallbackError.providerPayload || null;
           if (fallbackMeta) {
@@ -224,6 +227,11 @@ export async function callModel({
     usedFallback,
     requiresRouteFix,
     apiModeDemoFallback,
+    needsReview: Boolean(schemaMeta?.needsReview),
+    blockedSave: Boolean(schemaMeta?.blockedSave),
+    modelCompletenessScore: schemaMeta?.modelCompletenessScore ?? null,
+    autoFilledFields: schemaMeta?.autoFilledFields || [],
+    autoFilledSections: schemaMeta?.autoFilledSections || [],
     serverStatus,
     providerStatus,
     providerRawPreview,
@@ -232,6 +240,7 @@ export async function callModel({
     modelUpdatedAt,
     matchedSkillIds,
     warnings,
+    schemaMeta,
     attemptErrors,
     outputText,
     parsedJson,
@@ -264,6 +273,10 @@ export async function callModel({
     matchedSkillIds,
     skillConflicts: conflicts,
     warnings,
+    schemaMeta,
+    needsReview: result.needsReview,
+    blockedSave: result.blockedSave,
+    modelCompletenessScore: result.modelCompletenessScore,
     apiModeDemoWarning: warnings.some((item) => item.includes("真实 API Mode")),
     apiModeDemoFallback,
     requiresRouteFix,
@@ -538,6 +551,8 @@ function dispatchTask(taskType, input, state) {
       };
     case "jsonRepair":
       return repairJsonText(input.brokenText);
+    case "schemaRepairAnalyzeScript":
+      return analyzeScript(input);
     default:
       throw new Error(`暂不支持的任务：${taskType}`);
   }
@@ -547,34 +562,99 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
   const unwrapped = unwrapTaskPayload(value, taskType);
   const warnings = [];
   if (unwrapped.changed) {
-    warnings.push(`模型返回包含 ${unwrapped.wrapperKey} 外层，已自动展开为任务根对象。`);
+    warnings.push(`模型返回包含 ${unwrapped.unwrapPath.join(".")} 外层，已自动展开为任务根对象。`);
   }
 
   if (taskType !== "analyzeScript") {
-    return { value: unwrapped.value, warnings };
+    return { value: unwrapped.value, warnings, meta: { unwrapped: unwrapped.changed, unwrapPath: unwrapped.unwrapPath } };
   }
 
   const shape = validateTaskOutput(taskType, unwrapped.value);
-  if (shape.ok) return { value: stabilizeAnalyzeScriptOutput(unwrapped.value, inputMeta), warnings };
+  if (shape.ok) {
+    const meta = createAnalyzeSourceMeta({ source: unwrapped.value, unwrapped, missingCoreSections: [] });
+    return { value: stabilizeAnalyzeScriptOutput(unwrapped.value, inputMeta, meta), warnings, meta };
+  }
 
-  const normalized = coerceAnalyzeScriptOutput(unwrapped.value, inputMeta, shape.issues);
-  warnings.push("真实模型输出的剧本分析结构不完整，已按标准分析档案补齐缺失字段；请查看质量备注并按需重新生成。");
-  return { value: normalized, warnings };
+  const meta = createAnalyzeSourceMeta({ source: unwrapped.value, unwrapped, issues: shape.issues });
+  const normalized = coerceAnalyzeScriptOutput(unwrapped.value, inputMeta, shape.issues, meta);
+  warnings.push(
+    meta.blockedSave
+      ? "真实模型输出缺少多个核心分析模块，已作为待复核草稿展示并阻止直接入库。请执行结构修复或重新分析。"
+      : "真实模型输出的剧本分析结构不完整，已按标准分析档案补齐缺失字段；请查看质量备注并按需重新生成。"
+  );
+  return { value: normalized, warnings, meta };
 }
 
 function unwrapTaskPayload(value, taskType) {
-  if (!isPlainObject(value)) return { value, changed: false, wrapperKey: null };
+  if (!isPlainObject(value)) return { value, changed: false, wrapperKey: null, unwrapPath: [] };
   const wrapperKeys = taskType === "analyzeScript" ? ["scriptAnalysis", "analysis", "result", "data", "output"] : ["result", "data", "output"];
-  for (const key of wrapperKeys) {
-    const inner = value[key];
-    if (inner && (isPlainObject(inner) || Array.isArray(inner))) {
-      return { value: inner, changed: true, wrapperKey: key };
-    }
+  let current = value;
+  const unwrapPath = [];
+  for (let depth = 0; depth < 5 && isPlainObject(current); depth += 1) {
+    const key = wrapperKeys.find((candidate) => current[candidate] && (isPlainObject(current[candidate]) || Array.isArray(current[candidate])));
+    if (!key) break;
+    const inner = current[key];
+    unwrapPath.push(key);
+    current = inner;
   }
-  return { value, changed: false, wrapperKey: null };
+  return {
+    value: current,
+    changed: unwrapPath.length > 0,
+    wrapperKey: unwrapPath.join(".") || null,
+    unwrapPath
+  };
 }
 
-function coerceAnalyzeScriptOutput(value, inputMeta = {}, issues = []) {
+const analyzeCoreSections = [
+  "basicInfo",
+  "hookAnalysis",
+  "audienceNeedAnalysis",
+  "themeAnalysis",
+  "characterAnalysis",
+  "mainlineStructure",
+  "episodeFunctionAnalysis",
+  "reusablePatterns"
+];
+
+function createAnalyzeSourceMeta({ source, unwrapped, issues = [] }) {
+  const modelProvidedSections = analyzeCoreSections.filter((section) => hasUsefulSection(source?.[section]));
+  const missingCoreSections = analyzeCoreSections.filter((section) => !modelProvidedSections.includes(section));
+  const localFallbackSections = [...missingCoreSections];
+  const autoFilledSections = [...missingCoreSections];
+  const modelCompletenessScore = Math.round((modelProvidedSections.length / analyzeCoreSections.length) * 100);
+  const blockedSave = missingCoreSections.length >= 3;
+  return {
+    unwrapped: Boolean(unwrapped.changed),
+    unwrapPath: unwrapped.unwrapPath || [],
+    autoFilledFields: issuesToFields(issues),
+    autoFilledSections,
+    missingCoreSections,
+    modelProvidedSections,
+    localFallbackSections,
+    userPreservedFields: ["basicInfo.title", "basicInfo.genre", "basicInfo.episodeCount"],
+    needsReview: Boolean(missingCoreSections.length),
+    blockedSave,
+    modelCompletenessScore,
+    warnings: []
+  };
+}
+
+function hasUsefulSection(value) {
+  if (Array.isArray(value)) return value.length > 0;
+  if (isPlainObject(value)) return Object.keys(value).length > 0;
+  return value !== null && value !== undefined && value !== "";
+}
+
+function issuesToFields(issues = []) {
+  return issues
+    .map((issue) => {
+      const match = String(issue).match(/缺少\s+([A-Za-z0-9_.]+)/);
+      return match?.[1] || "";
+    })
+    .filter(Boolean);
+}
+
+function coerceAnalyzeScriptOutput(value, inputMeta = {}, issues = [], sourceMeta = null) {
   const base = analyzeScript(inputMeta);
   const source = isPlainObject(value) ? value : {};
   const merged = deepMerge(base, source);
@@ -601,19 +681,21 @@ function coerceAnalyzeScriptOutput(value, inputMeta = {}, issues = []) {
     `模型结构缺项：${issues.join("；") || "字段层级不完整"}`
   ]);
   merged.analystNotes = [source.analystNotes, source.summary, merged.analystNotes].filter(Boolean).join("\n");
-  return stabilizeAnalyzeScriptOutput(merged, inputMeta);
+  return stabilizeAnalyzeScriptOutput(merged, inputMeta, sourceMeta);
 }
 
-function stabilizeAnalyzeScriptOutput(value, inputMeta = {}) {
+function stabilizeAnalyzeScriptOutput(value, inputMeta = {}, sourceMeta = null) {
   const base = analyzeScript(inputMeta);
   const merged = deepMerge(base, isPlainObject(value) ? value : {});
   const title = inputMeta.title || merged.basicInfo?.title || merged.title || "未命名剧本";
   merged.title = title;
   merged.basicInfo.title = title;
   const inputGenres = splitScope(inputMeta.genre);
+  const modelGenres = toStringArray(merged.classificationTags?.genre || merged.basicInfo?.genre);
   if (inputGenres.length) {
     merged.basicInfo.genre = inputGenres;
-    merged.classificationTags.genre = inputGenres;
+    merged.basicInfo.userGenreNote = inputMeta.genre;
+    merged.classificationTags.genre = uniqueList([...inputGenres, ...modelGenres]);
   } else {
     merged.basicInfo.genre = toStringArray(merged.basicInfo.genre);
     merged.classificationTags.genre = toStringArray(merged.classificationTags.genre || merged.basicInfo.genre);
@@ -625,6 +707,12 @@ function stabilizeAnalyzeScriptOutput(value, inputMeta = {}) {
   merged.classificationTags.hookTypes = toStringArray(merged.classificationTags.hookTypes || merged.hookAnalysis.hookTypes);
   merged.episodeFunctionAnalysis = Array.isArray(merged.episodeFunctionAnalysis) ? merged.episodeFunctionAnalysis : base.episodeFunctionAnalysis;
   merged.reusablePatterns = Array.isArray(merged.reusablePatterns) ? merged.reusablePatterns : base.reusablePatterns;
+  if (sourceMeta) {
+    merged.sourceMeta = sourceMeta;
+    if (sourceMeta.blockedSave) merged.confidence = Math.min(Number(merged.confidence) || 0.78, 0.35);
+    else if ((sourceMeta.localFallbackSections || []).length >= 3) merged.confidence = Math.min(Number(merged.confidence) || 0.78, 0.45);
+    else if (sourceMeta.unwrapped) merged.confidence = Math.min(Number(merged.confidence) || 0.78, 0.85);
+  }
   return merged;
 }
 
@@ -711,6 +799,7 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
     const shape = validateTaskOutput(taskType, parsedJson);
     if (!shape.ok) throw new Error(schemaValidationMessage(taskType, shape.issues));
     response.schemaWarnings = normalized.warnings;
+    response.schemaMeta = normalized.meta || null;
   }
   return {
     outputText: response.outputText,
@@ -725,7 +814,8 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
     settingsUpdatedAt: response.settingsUpdatedAt,
     providerUpdatedAt: response.providerUpdatedAt,
     modelUpdatedAt: response.modelUpdatedAt,
-    schemaWarnings: response.schemaWarnings || []
+    schemaWarnings: response.schemaWarnings || [],
+    schemaMeta: response.schemaMeta || null
   };
 }
 
@@ -825,6 +915,7 @@ function featureAreaForTask(taskType) {
     generateDraft: "成稿中心",
     auditDraft: "成稿中心",
     jsonRepair: "JSON 修复",
+    schemaRepairAnalyzeScript: "JSON 修复",
     summarizeLongText: "长文本总结",
     classifyTags: "分类与标签"
   };

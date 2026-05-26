@@ -214,5 +214,12 @@ const contracts = {
 };
 
 export function getTaskOutputContract(taskType) {
+  if (taskType === "schemaRepairAnalyzeScript") {
+    return [
+      "这是 analyzeScript 的结构修复任务。只允许根据原始模型输出和原剧本文本整理为标准结构，不允许编造没有依据的分析。",
+      "不确定字段请填 unknown、空数组，或在 riskNotes / sourceMeta.needsManualReview 中标记需要人工复核。",
+      contracts.analyzeScript
+    ].join("\n\n");
+  }
   return contracts[taskType] || "";
 }

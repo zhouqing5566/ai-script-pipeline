@@ -12,6 +12,19 @@ const taskShapeRules = {
       "reusablePatterns"
     ]
   },
+  schemaRepairAnalyzeScript: {
+    type: "object",
+    required: [
+      "basicInfo",
+      "hookAnalysis",
+      "audienceNeedAnalysis",
+      "themeAnalysis",
+      "characterAnalysis",
+      "mainlineStructure",
+      "episodeFunctionAnalysis",
+      "reusablePatterns"
+    ]
+  },
   evaluateIdea: {
     type: "object",
     required: ["logline", "coreHook", "potentialAudienceNeeds", "commercialPotentialScore", "risks", "suggestions"]

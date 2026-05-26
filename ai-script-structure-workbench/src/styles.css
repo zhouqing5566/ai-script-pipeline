@@ -628,6 +628,30 @@ textarea {
   margin-top: 10px;
 }
 
+.analysis-source-alert {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid #f5c16c;
+  border-radius: var(--radius);
+  background: #fff7e6;
+  color: #6f4b0f;
+}
+
+.analysis-source-alert.blocked {
+  border-color: #ef8f8f;
+  background: #fff0f0;
+  color: #842222;
+}
+
+.analysis-source-alert strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.analysis-source-alert p {
+  margin: 4px 0 0;
+}
+
 .card-grid,
 .candidate-grid {
   display: grid;

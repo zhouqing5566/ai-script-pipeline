@@ -36,6 +36,7 @@ export const taskLabels = {
   generateDraft: "成稿生成",
   auditDraft: "成稿审计",
   jsonRepair: "JSON 修复",
+  schemaRepairAnalyzeScript: "剧本分析结构修复",
   summarizeLongText: "长文本总结",
   classifyTags: "分类与标签"
 };
