@@ -35,6 +35,7 @@ export function createLongAnalysisProgress(chunks = [], meta = {}) {
     currentStep: "覆盖检测",
     expectedChunkCount: meta.expectedChunkCount || chunks.length,
     detectedChunkCount: meta.detectedChunkCount || chunks.length,
+    inputSignature: meta.inputSignature || null,
     missingChunks,
     chunkResults: {},
     steps: [
@@ -249,6 +250,7 @@ export function applyLongScriptGateFlags(analysis) {
   const hasDeclaredCoverageGap = Number(meta.expectedChunks || 0) > Number(meta.detectedChunks || meta.successfulChunks || 0);
   const hasMissingChunks = (meta.missingChunks || []).length > 0 || hasDeclaredCoverageGap;
   const hasPrimitiveNormalization = (meta.normalizedEvidenceEntries || 0) > 0 || (meta.normalizedBeatEntries || 0) > 0;
+  const hasLocalAggregateFallback = meta.localAggregateFallback === true || meta.aggregateSource === "local_fallback";
   const isFullScript = analysis.coverage?.inputType === "full_script";
   meta.participatingChunks = meta.participatingChunks ?? meta.successfulChunks ?? 0;
   meta.completeAggregation = !hasFailedChunks && !hasMissingChunks;
@@ -256,13 +258,16 @@ export function applyLongScriptGateFlags(analysis) {
     meta.warnings = uniqueList([...(meta.warnings || []), `系统仅切出 ${meta.detectedChunks || meta.successfulChunks || 0}/${meta.expectedChunks} 个分集/chunk，不能视为完整剧本分析完成。`]);
   }
   meta.usableForCaseSave = !meta.blockedSave;
-  meta.usableForFullScriptCase = isFullScript && !hasFailedChunks && !hasMissingChunks && !meta.blockedSave && invalidRatio === 0;
-  meta.usableForPatternExtraction = !hasFailedChunks && !hasMissingChunks && !meta.blockedSave && invalidRatio === 0;
-  meta.usableForProduction = isFullScript && !hasFailedChunks && !hasMissingChunks && !meta.blockedSave;
-  meta.usableForSkillLearning = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasPrimitiveNormalization && !meta.blockedSave && !meta.needsReview && invalidRatio === 0;
+  meta.usableForFullScriptCase = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasLocalAggregateFallback && !meta.blockedSave && invalidRatio === 0;
+  meta.usableForPatternExtraction = !hasFailedChunks && !hasMissingChunks && !hasLocalAggregateFallback && !meta.blockedSave && invalidRatio === 0;
+  meta.usableForProduction = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasLocalAggregateFallback && !meta.blockedSave;
+  meta.usableForSkillLearning = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasLocalAggregateFallback && !hasPrimitiveNormalization && !meta.blockedSave && !meta.needsReview && invalidRatio === 0;
   meta.usableForLearning = meta.usableForSkillLearning;
-  if (hasFailedChunks || hasMissingChunks || hasPrimitiveNormalization) {
+  if (hasFailedChunks || hasMissingChunks || hasPrimitiveNormalization || hasLocalAggregateFallback) {
     meta.needsReview = true;
+    if (hasLocalAggregateFallback) {
+      meta.warnings = uniqueList([...(meta.warnings || []), "本地聚合兜底结果不能进入正式完整案例或 Skill 学习沉淀。"]);
+    }
     meta.usableForSkillLearning = false;
     meta.usableForLearning = false;
     meta.usableForFullScriptCase = false;
@@ -275,6 +280,37 @@ export function applyLongScriptGateFlags(analysis) {
 
 export function getChunkKey(chunk = {}) {
   return [chunk.episodeNo ?? "unknown", chunk.startOffset ?? 0, chunk.endOffset ?? 0, chunk.detectedBy || "chunk"].join(":");
+}
+
+export function createLongScriptInputSignature(input = {}) {
+  const text = String(input.text || "");
+  return {
+    scriptTextHash: hashText(text),
+    textLength: text.length,
+    episodeCount: Number(input.episodeCount) || null,
+    title: input.title || "",
+    genre: input.genre || "",
+    userConfirmedFullScript: Boolean(input.userConfirmedFullScript),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+export function sameLongScriptInputSignature(a = null, b = null) {
+  if (!a || !b) return true;
+  return (
+    a.scriptTextHash === b.scriptTextHash &&
+    Number(a.episodeCount || 0) === Number(b.episodeCount || 0) &&
+    Boolean(a.userConfirmedFullScript) === Boolean(b.userConfirmedFullScript)
+  );
+}
+
+function hashText(text = "") {
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
 }
 
 function annotateChunkExpectations(split = {}, input = {}, coverage = {}) {

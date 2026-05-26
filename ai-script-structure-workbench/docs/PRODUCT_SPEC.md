@@ -561,6 +561,19 @@ sourceMeta.usableForSkillLearning = false
 
 重试失败分集时，已成功分集结果必须保存在 `longScriptAnalysisProgress.chunkResults` 中，重试成功后替换对应 chunk，最终聚合使用所有成功 chunkResults，而不是只聚合本轮重试的分集。如果当前没有失败分集，不允许自动重跑全部 chunk；如果失败项只是全剧聚合失败，系统应保留已有 `chunkResults`，只重跑 `aggregateScriptAnalysis`。
 
+`longScriptAnalysisProgress` 必须保存 `inputSignature`，至少包含：
+
+```js
+{
+  scriptTextHash,
+  episodeCount,
+  userConfirmedFullScript,
+  updatedAt
+}
+```
+
+重试聚合或重试失败分集前必须比较当前输入签名和旧签名。若剧本文本、集数或完整剧本确认状态已经变化，应提示“当前剧本文本已变化，旧分集结果可能不匹配。请重新开始长剧本分析。”，不得复用旧 `chunkResults`。
+
 `failedChunks` 应区分失败阶段：
 
 ```js
@@ -574,6 +587,8 @@ applyLongScriptGateFlags(finalAnalysis)
 ```
 
 如果存在 `failedChunks`、`missingChunks` 或大量 primitive evidence 标准化，只能保存为待复核完整案例草稿，不允许进入正式完整案例、完整主线骨架、生产交付或 Skill 学习沉淀。
+
+如果 `sourceMeta.localAggregateFallback=true` 或 `sourceMeta.aggregateSource="local_fallback"`，也必须视为待复核草稿，不允许进入正式完整案例、生产交付或 Skill 学习沉淀。
 
 路由安全输出上限：
 

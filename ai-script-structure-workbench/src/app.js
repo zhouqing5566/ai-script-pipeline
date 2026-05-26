@@ -11,8 +11,10 @@ import {
   applyLongScriptGateFlags,
   createEpisodeChunkInput,
   createLongAnalysisProgress,
+  createLongScriptInputSignature,
   getChunkKey,
   prepareLongScriptChunks,
+  sameLongScriptInputSignature,
   shouldUseLongScriptAnalysis
 } from "./long-script-analysis.js";
 import { clampMaxOutputTokens } from "./model-router.js";
@@ -471,6 +473,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   const actionLabel = retryAggregateOnly ? "重试全剧聚合" : retryFailedOnly ? "重试失败分集" : "长剧本分集分析";
   let current = initialState || commitOpenInputsBeforeAction(actionLabel);
   const input = current.scriptInput;
+  const inputSignature = createLongScriptInputSignature(input);
   const currentCoverage = coverage || detectScriptCoverage(input.text, input.episodeCount, { userConfirmedFullScript: input.userConfirmedFullScript });
   const split = prepareLongScriptChunks(input, currentCoverage);
   const allChunks = split.episodes || [];
@@ -480,6 +483,10 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   const previousFailedChunks = previousProgress.failedChunks || [];
   const aggregateFailed = previousFailedChunks.some((item) => item.failureStage === "aggregate" || item.detectedBy === "aggregate");
   if (retryFailedOnly || retryAggregateOnly) {
+    if (!sameLongScriptInputSignature(previousProgress.inputSignature, inputSignature)) {
+      showToast("当前剧本文本已变化，旧分集结果可能不匹配。请重新开始长剧本分析。");
+      return;
+    }
     const episodeFailures = previousFailedChunks.filter((item) => (item.failureStage || "episode_chunk") === "episode_chunk");
     const failedKeys = new Set(episodeFailures.map((item) => item.chunkKey).filter(Boolean));
     const failedNos = new Set(episodeFailures.map((item) => item.episodeNo).filter(Boolean));
@@ -495,6 +502,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     }
   }
   const progress = createLongAnalysisProgress(allChunks, split);
+  progress.inputSignature = inputSignature;
   progress.steps[1].status = "成功";
   progress.currentStep = retryAggregateOnly ? "重试全剧聚合" : retryFailedOnly ? (chunks.length ? "重试失败分集" : "重试全剧聚合") : "剧本切分";
   progress.warnings = split.warnings || [];
@@ -657,7 +665,8 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       currentStep: "完成",
       failedChunks,
       missingChunks,
-      chunkResults
+      chunkResults,
+      inputSignature
     };
     return state;
   }, failedChunks.length ? "完成长剧本分集分析（需复核失败分集）" : "完成长剧本分集分析", { targetType: "analysis", action: "generate" });
@@ -1592,6 +1601,23 @@ function renderLongScriptProgress(progress) {
           ? `<div class="warning-list"><p>仅切出 ${(progress.chunks || []).length}/${progress.expectedChunkCount || (progress.chunks || []).length} 集，不能视为完整剧本分析完成。</p></div>`
           : ""
       }
+      ${
+        failedChunks.length
+          ? `<div class="failed-chunk-list">
+              ${failedChunks
+                .map(
+                  (item) => `
+                <div>
+                  <strong>失败阶段：${escapeHtml(failureStageLabel(item))}</strong>
+                  <span>${escapeHtml(item.title || (item.episodeNo ? `第${item.episodeNo}集` : "未知 chunk"))}</span>
+                  <em>${escapeHtml(item.error || "未记录错误")}</em>
+                </div>`
+                )
+                .join("")}
+              ${hasAggregateFailure ? `<p>分集结果已保留，可只重试全剧聚合。</p>` : ""}
+            </div>`
+          : ""
+      }
       <div class="chunk-progress-list">
         ${(progress.chunks || [])
           .map(
@@ -1619,6 +1645,11 @@ function statusClass(status = "") {
   if (status === "分析中") return "running";
   if (status === "待重试") return "warn";
   return "";
+}
+
+function failureStageLabel(item = {}) {
+  if (item.failureStage === "aggregate" || item.detectedBy === "aggregate") return "全剧聚合";
+  return "分集分析";
 }
 
 function renderCoverageSummary(analysis) {

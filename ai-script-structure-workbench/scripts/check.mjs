@@ -45,7 +45,9 @@ import {
   aggregateScriptAnalysis,
   applyLongScriptGateFlags,
   analyzeEpisodeChunk,
+  createLongScriptInputSignature,
   prepareLongScriptChunks,
+  sameLongScriptInputSignature,
   shouldUseLongScriptAnalysis
 } from "../src/long-script-analysis.js";
 import { normalizeRelationshipEdge } from "../src/analysis-normalizers.js";
@@ -235,6 +237,17 @@ const coverageGapAnalysis = { coverage: { inputType: "full_script" }, sourceMeta
 applyLongScriptGateFlags(coverageGapAnalysis);
 assert.equal(coverageGapAnalysis.sourceMeta.needsReview, true);
 assert.equal(coverageGapAnalysis.sourceMeta.completeAggregation, false);
+const localFallbackGate = { coverage: { inputType: "full_script" }, sourceMeta: { localAggregateFallback: true, failedChunks: [], missingChunks: [], evidenceValidation: { invalidEvidenceRatio: 0 } } };
+applyLongScriptGateFlags(localFallbackGate);
+assert.equal(localFallbackGate.sourceMeta.needsReview, true);
+assert.equal(localFallbackGate.sourceMeta.usableForSkillLearning, false);
+assert.equal(localFallbackGate.sourceMeta.usableForProduction, false);
+assert.equal(localFallbackGate.sourceMeta.usableForFullScriptCase, false);
+const signatureA = createLongScriptInputSignature({ text: "第一集\n内容", episodeCount: 1, userConfirmedFullScript: false });
+const signatureB = createLongScriptInputSignature({ text: "第一集\n内容", episodeCount: 1, userConfirmedFullScript: false });
+const signatureC = createLongScriptInputSignature({ text: "第一集\n内容已改", episodeCount: 1, userConfirmedFullScript: false });
+assert.equal(sameLongScriptInputSignature(signatureA, signatureB), true);
+assert.equal(sameLongScriptInputSignature(signatureA, signatureC), false);
 const forgedAnalysis = structuredClone(fragmentAnalysis);
 forgedAnalysis.episodeBeatLedger[0].sourceText = "这是一段完全不存在于原文中的伪造证据。";
 forgedAnalysis.hookAnalysis.evidenceBeatIds = [forgedAnalysis.episodeBeatLedger[0].beatId];
@@ -922,7 +935,10 @@ assert.ok(appSource.includes("完整性来源"));
 assert.ok(appSource.includes("重试失败分集"));
 assert.ok(appSource.includes("重试全剧聚合"));
 assert.ok(appSource.includes("当前没有失败分集可重试"));
+assert.ok(appSource.includes("当前剧本文本已变化，旧分集结果可能不匹配。请重新开始长剧本分析。"));
 assert.ok(appSource.includes("failureStage"));
+assert.ok(appSource.includes("失败阶段："));
+assert.ok(appSource.includes("分集结果已保留，可只重试全剧聚合。"));
 assert.ok(appSource.includes("chunkResults[chunkKey]"));
 assert.ok(appSource.includes("Object.values(chunkResults)"));
 assert.ok(appSource.includes("missingChunks"));
@@ -965,6 +981,8 @@ assert.ok(longAnalysisSource.includes("missingChunks"));
 assert.ok(longAnalysisSource.includes("applyLongScriptGateFlags"));
 assert.ok(longAnalysisSource.includes("chunkedAnalysis"));
 assert.ok(longAnalysisSource.includes("localAggregateFallback"));
+assert.ok(longAnalysisSource.includes("createLongScriptInputSignature"));
+assert.ok(longAnalysisSource.includes("sameLongScriptInputSignature"));
 assert.ok(evidenceValidatorSource.includes("validateEvidenceSourceText"));
 assert.ok(evidenceValidatorSource.includes("invalidEvidenceRatio"));
 assert.ok(evidenceValidatorSource.includes("missingSourceText"));

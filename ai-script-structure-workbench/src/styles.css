@@ -1742,6 +1742,29 @@ pre {
   margin-top: 12px;
 }
 
+.failed-chunk-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fff7f7;
+  color: #991b1b;
+  font-size: 13px;
+}
+
+.failed-chunk-list div {
+  display: grid;
+  grid-template-columns: 150px minmax(120px, 1fr) minmax(0, 2fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.failed-chunk-list em {
+  font-style: normal;
+}
+
 .chunk-progress-row {
   display: grid;
   grid-template-columns: minmax(180px, 1.3fr) 80px 120px 120px minmax(140px, 1fr) minmax(0, 1fr);
