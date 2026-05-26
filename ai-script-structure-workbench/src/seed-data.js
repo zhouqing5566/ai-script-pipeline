@@ -30,6 +30,7 @@ export function createSeedState() {
       genre: "都市 / 重生 / 复仇",
       episodeCount: 24,
       granularity: "标准",
+      userConfirmedFullScript: false,
       text: sampleScriptText()
     },
     currentProject: {

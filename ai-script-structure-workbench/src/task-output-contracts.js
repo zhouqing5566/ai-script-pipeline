@@ -1,7 +1,62 @@
 const contracts = {
   analyzeScript: `必须返回一个可直接 JSON.parse 的根对象，根对象不得包在 scriptAnalysis、analysis、result、data 或 output 内。
+本任务必须先抽证据，再做判断：先生成 evidenceLedger 和 episodeBeatLedger，再基于 evidenceIds / evidenceBeatIds 输出结构分析。
+不得只输出概念总结。sourceText 必须来自用户输入原文，不得编造。
+每个核心模块必须包含 evidenceIds、evidenceBeatIds、inferenceLevel、confidence、riskNotes；没有证据时 needsReview=true，并将 inferenceLevel 标为“合理推断”“创作建议”或“不足以判断”。
+输入不完整时，不要生成确定性的完整主线和结局；原文没有的信息必须标记“不足以判断”。
+可复用模式必须包含 structureSteps、variableSlots、reusePrompt，并引用 sourceEvidenceIds 或 sourceBeatIds。
 根对象必须直接包含以下字段：
 {
+  "coverage": {
+    "inputType": "full_script | partial_script | single_episode | synopsis | outline | fragment | unknown",
+    "detectedEpisodeCount": 1,
+    "userEpisodeCount": 24,
+    "hasEpisodeMarkers": true,
+    "detectedEpisodeMarkers": ["第一集"],
+    "estimatedCoverageRatio": 0.04,
+    "coverageReason": "为什么这样判断输入完整度",
+    "canAnalyzeOpening": true,
+    "canAnalyzeFullMainline": false,
+    "canAnalyzeEnding": false,
+    "canAnalyzeEpisodeFunctions": true,
+    "canAnalyzeReusablePatterns": true,
+    "allowedCaseScope": "opening_case",
+    "warnings": []
+  },
+  "caseScope": "full_script | opening_case | episode_case | fragment_case",
+  "episodeBeatLedger": [
+    {
+      "beatId": "B001",
+      "episodeNo": 1,
+      "sceneNo": 1,
+      "sourceText": "必须来自原文",
+      "beatSummary": "这一 beat 发生了什么",
+      "characters": [],
+      "location": "场景",
+      "conflict": "冲突",
+      "audienceEmotion": [],
+      "suspenseQuestion": "观众追问",
+      "coolPoint": "爽点/期待点",
+      "characterFunction": "人物功能",
+      "relationshipChange": "关系变化",
+      "informationGain": "信息增量",
+      "structureFunction": "结构功能",
+      "reusableValue": "可复用价值",
+      "relatedModules": [],
+      "confidence": 0.8
+    }
+  ],
+  "evidenceLedger": {
+    "coverage": {},
+    "scenes": [],
+    "characterMentions": [],
+    "conflictBeats": [],
+    "hookEvidence": [],
+    "goldfingerEvidence": [],
+    "suspenseEvidence": [],
+    "endingEvidence": [],
+    "episodeEvidence": []
+  },
   "basicInfo": {
     "title": "剧本标题",
     "genre": ["题材"],
@@ -182,16 +237,25 @@ const contracts = {
     {
       "id": "pattern-1",
       "sourceScriptId": "current-analysis",
-      "patternType": "模式类型",
+      "patternType": "hook | coolMoment | reversal | characterRelation | goldfingerUse | episodeRhythm | mainlineSkeleton | endingPayoff",
       "title": "模式标题",
       "description": "模式描述",
+      "sourceEvidenceIds": [],
+      "sourceBeatIds": [],
       "applicableGenres": [],
       "applicableAudienceNeeds": [],
-      "structureTemplate": "结构模板",
+      "structureSteps": ["结构步骤"],
+      "variableSlots": {"scene": ["变量候选"]},
       "whyItWorks": "为什么有效",
+      "emotionalMechanism": "情绪机制",
+      "characterFunction": "人物功能",
+      "plotFunction": "剧情功能",
       "risks": [],
+      "antiPatterns": [],
+      "reusePrompt": "如何复用该模式",
       "exampleEpisodes": [],
-      "confidence": 0.8
+      "confidence": 0.8,
+      "inferenceLevel": "原文明确 | 合理推断 | 创作建议 | 不足以判断"
     }
   ],
   "classificationTags": {

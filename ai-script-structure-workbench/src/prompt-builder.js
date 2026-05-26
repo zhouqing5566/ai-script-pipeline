@@ -21,7 +21,10 @@ const prohibitions = [
   "不要为了反转而反转。",
   "不要输出无法解析的 JSON。",
   "不要用 Demo 数据冒充真实生成。",
-  "不要擅自修改已锁定主题、主线大反差、结局和大节点。"
+  "不要擅自修改已锁定主题、主线大反差、结局和大节点。",
+  "不要把没有原文证据的推断写成事实。",
+  "不要在输入不完整时生成确定性的完整主线、结局或全剧分集功能。",
+  "不要编造 sourceText；sourceText 必须能在用户输入中找到。"
 ];
 
 export function buildPrompt({ taskType, project, input, matchedSkills = [], outputSchema }) {

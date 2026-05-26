@@ -39,6 +39,9 @@ import { schemaValidationMessage, validateTaskOutput } from "../src/schema-valid
 import { extractDocxTextFromArrayBuffer, parseScriptFile } from "../src/file-parser.js";
 import { hasUsefulRuntimeSettings, mergeRuntimeApiConfig, syncRuntimeSettings } from "../src/storage.js";
 import { resolveRequestFormat } from "../src/request-format.js";
+import { detectScriptCoverage } from "../src/script-coverage.js";
+import { normalizeRelationshipEdge } from "../src/analysis-normalizers.js";
+import { applyEvidenceValidationToAnalysis, validateEvidenceSourceText } from "../src/evidence-validator.js";
 import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, shouldUseGeminiNative } from "../src/provider-adapters/gemini.js";
 import { buildOpenAIChatRequestBody } from "../src/provider-adapters/openai-compatible.js";
 import { labelForKey } from "../src/schemas.js";
@@ -58,6 +61,29 @@ assert.ok(analysis.mainlineReversalAnalysis.foreshadowingBeforeReveal.length >= 
 assert.ok(analysis.endingAnalysis.promisedEmotionReturned);
 assert.ok(analysis.episodeFunctionAnalysis.length >= 5);
 assert.ok(analysis.reusablePatterns.length >= 2);
+assert.ok(analysis.coverage);
+assert.ok(analysis.evidenceLedger);
+assert.ok(analysis.episodeBeatLedger.length >= 1);
+for (const section of [
+  "hookAnalysis",
+  "audienceNeedAnalysis",
+  "themeAnalysis",
+  "characterAnalysis",
+  "goldfingerAnalysis",
+  "obstacleAnalysis",
+  "mainlineStructure",
+  "mainlineReversalAnalysis",
+  "endingAnalysis"
+]) {
+  assert.ok(analysis[section].inferenceLevel, `${section} missing inferenceLevel`);
+  assert.notEqual(analysis[section].confidence, undefined, `${section} missing confidence`);
+  assert.ok(
+    analysis[section].needsReview === true || (analysis[section].evidenceIds?.length || analysis[section].evidenceBeatIds?.length),
+    `${section} needs evidence or review flag`
+  );
+}
+assert.ok(analysis.reusablePatterns.every((pattern) => pattern.structureSteps?.length && pattern.variableSlots && pattern.reusePrompt));
+assert.ok(analysis.episodeBeatLedger.every((beat) => state.scriptInput.text.includes(beat.sourceText) || state.scriptInput.text.includes(beat.sourceText.split("\n")[0])));
 assert.equal(labelForKey("openingSummary"), "开头概述");
 assert.equal(labelForKey("hookTypes"), "钩子类型");
 assert.equal(labelForKey("firstSceneFunction"), "首场功能");
@@ -66,6 +92,81 @@ assert.equal(labelForKey("mainlineStrengthScore"), "主线强度");
 assert.equal(labelForKey("reversalStrengthScore"), "大反差强度");
 assert.equal(labelForKey("endingStrengthScore"), "结局强度");
 assert.equal(labelForKey("unknownFutureField"), "补充字段");
+
+const fragmentText = "毒手巫医\n\n第一集\n\n△火车上林清突然流血倒地。\n医生：已经没救了！\n孙大为：不是脑溢血，是被人害的。\n△孙大为拿出银针，金蚕飞出。";
+const fragmentCoverage = detectScriptCoverage(fragmentText, 50);
+assert.equal(fragmentCoverage.canAnalyzeFullMainline, false);
+assert.equal(fragmentCoverage.canAnalyzeEnding, false);
+assert.equal(fragmentCoverage.allowedCaseScope, "opening_case");
+assert.ok(fragmentCoverage.warnings.some((warning) => warning.includes("用户填写 50 集")));
+const fragmentAnalysis = analyzeScript({ title: "毒手巫医", genre: "都市 / 高手下山", episodeCount: 50, text: fragmentText });
+assert.equal(fragmentAnalysis.coverage.canAnalyzeFullMainline, false);
+assert.equal(fragmentAnalysis.endingAnalysis.inferenceLevel === "原文明确", false);
+assert.equal(fragmentAnalysis.mainlineStructure.inferenceLevel === "原文明确", false);
+assert.equal(fragmentAnalysis.caseScope, "opening_case");
+assert.ok(fragmentAnalysis.episodeFunctionAnalysis.length < 50);
+assert.ok(fragmentAnalysis.evidenceLedger.hookEvidence.length >= 1);
+assert.ok(fragmentAnalysis.episodeBeatLedger.length >= 1);
+assert.ok(fragmentAnalysis.reusablePatterns.every((pattern) => pattern.structureSteps?.length && pattern.variableSlots && pattern.reusePrompt));
+assert.equal(fragmentAnalysis.caseScope === "full_script", false);
+assert.ok(fragmentAnalysis.reusablePatterns.every((pattern) => pattern.inferenceLevel !== "原文明确" || pattern.sourceEvidenceIds.length || pattern.sourceBeatIds.length));
+assert.ok(fragmentAnalysis.episodeBeatLedger.every((beat) => fragmentText.includes(beat.sourceText) || fragmentText.includes(beat.sourceText.split("\n")[0])));
+assert.equal(normalizeRelationshipEdge({}), null);
+const normalizedEdge = normalizeRelationshipEdge({ source: "孙大为", relationshipChange: "救人后被关注" });
+assert.equal(normalizedEdge.from, "孙大为");
+assert.equal(normalizedEdge.to, "关系对象缺失，需复核");
+assert.equal(`${normalizedEdge.from} → ${normalizedEdge.to}`.includes("undefined"), false);
+
+const eightEpisodeText = Array.from({ length: 8 }, (_, index) => `第${index + 1}集\n角色${index}：发生局部冲突。`).join("\n");
+const eightCoverage = detectScriptCoverage(eightEpisodeText, null);
+assert.equal(eightCoverage.inputType, "partial_script");
+assert.equal(eightCoverage.canAnalyzeFullMainline, false);
+assert.equal(eightCoverage.requiresManualFullScriptConfirmation, true);
+const tenCoverage = detectScriptCoverage(eightEpisodeText, 10);
+assert.equal(tenCoverage.inputType, "full_script");
+assert.ok(tenCoverage.estimatedCoverageRatio >= 0.78);
+const endingCoverage = detectScriptCoverage("第一集\n开局\n第二集\n升级\n第三集\n大结局，全剧终", null);
+assert.equal(endingCoverage.inputType, "full_script");
+assert.equal(endingCoverage.canAnalyzeEnding, true);
+const forgedAnalysis = structuredClone(fragmentAnalysis);
+forgedAnalysis.episodeBeatLedger[0].sourceText = "这是一段完全不存在于原文中的伪造证据。";
+forgedAnalysis.hookAnalysis.evidenceBeatIds = [forgedAnalysis.episodeBeatLedger[0].beatId];
+forgedAnalysis.hookAnalysis.inferenceLevel = "原文明确";
+const forgedValidation = validateEvidenceSourceText(forgedAnalysis, fragmentText);
+assert.ok(forgedValidation.invalidEvidenceRatio > 0);
+applyEvidenceValidationToAnalysis(forgedAnalysis, fragmentText);
+assert.notEqual(forgedAnalysis.hookAnalysis.inferenceLevel, "原文明确");
+const heavilyForged = structuredClone(fragmentAnalysis);
+heavilyForged.episodeBeatLedger = heavilyForged.episodeBeatLedger.map((beat, index) => ({ ...beat, sourceText: `伪造证据 ${index}` }));
+for (const key of ["hookEvidence", "goldfingerEvidence", "suspenseEvidence", "conflictBeats", "characterMentions"]) {
+  heavilyForged.evidenceLedger[key] = (heavilyForged.evidenceLedger[key] || []).map((item, index) => ({ ...item, sourceText: `伪造 evidence ${key} ${index}` }));
+}
+applyEvidenceValidationToAnalysis(heavilyForged, fragmentText);
+assert.equal(heavilyForged.sourceMeta.blockedSave, true);
+assert.ok(heavilyForged.sourceMeta.evidenceValidation.invalidEvidenceRatio > 0.5);
+const missingSourceAnalysis = structuredClone(fragmentAnalysis);
+missingSourceAnalysis.episodeBeatLedger[0].sourceText = "";
+missingSourceAnalysis.hookAnalysis.evidenceBeatIds = [missingSourceAnalysis.episodeBeatLedger[0].beatId];
+missingSourceAnalysis.hookAnalysis.inferenceLevel = "原文明确";
+applyEvidenceValidationToAnalysis(missingSourceAnalysis, fragmentText);
+assert.ok(missingSourceAnalysis.sourceMeta.evidenceValidation.invalidEvidenceRatio > 0);
+assert.equal(missingSourceAnalysis.episodeBeatLedger[0].invalidSourceText, true);
+assert.notEqual(missingSourceAnalysis.hookAnalysis.inferenceLevel, "原文明确");
+const missingEvidenceSource = structuredClone(fragmentAnalysis);
+missingEvidenceSource.evidenceLedger.hookEvidence[0].sourceText = "";
+applyEvidenceValidationToAnalysis(missingEvidenceSource, fragmentText);
+assert.ok(missingEvidenceSource.sourceMeta.evidenceValidation.invalidEvidenceRatio > 0);
+assert.equal(missingEvidenceSource.evidenceLedger.hookEvidence[0].invalidSourceText, true);
+const declaredWithoutLedger = structuredClone(fragmentAnalysis);
+declaredWithoutLedger.episodeBeatLedger = [];
+declaredWithoutLedger.evidenceLedger = { hookEvidence: [], goldfingerEvidence: [], suspenseEvidence: [], endingEvidence: [], conflictBeats: [], characterMentions: [], episodeEvidence: [], scenes: [] };
+declaredWithoutLedger.hookAnalysis.evidenceBeatIds = ["B404"];
+applyEvidenceValidationToAnalysis(declaredWithoutLedger, fragmentText);
+assert.equal(declaredWithoutLedger.sourceMeta.blockedSave, true);
+assert.equal(declaredWithoutLedger.sourceMeta.evidenceValidation.invalidEvidenceRatio, 1);
+assert.equal(fragmentAnalysis.sourceMeta.usableForCaseSave, true);
+assert.equal(fragmentAnalysis.sourceMeta.usableForFullScriptCase, false);
+assert.equal(fragmentAnalysis.sourceMeta.usableForSkillLearning, false);
 
 state.currentProject.ideaEvaluation = evaluateIdea(state.currentProject);
 state.currentProject.directionCandidates = generateDirections(state.currentProject);
@@ -657,15 +758,39 @@ assert.ok(appSource.includes('autocomplete="new-password"'));
 assert.ok(appSource.includes("commitOpenInputsBeforeAction"));
 assert.ok(appSource.indexOf("const current = commitOpenInputsBeforeAction(taskLabels[taskType] || taskType);") < appSource.indexOf("busyAction = taskLabels[taskType] || taskType;"));
 assert.ok(appSource.includes("analysis.sourceMeta?.blockedSave"));
-assert.ok(appSource.includes("canUseAnalysisForLearning"));
+assert.ok(appSource.includes("canSaveAnalysisAsCase"));
 assert.ok(appSource.includes("renderAnalysisSourceAlert"));
+assert.ok(appSource.includes("renderAnalysisQualityPanel"));
+assert.ok(appSource.includes('state.view === "analysis"'));
+assert.ok(appSource.indexOf('state.view === "analysis"') < appSource.indexOf("<h2>审计提示</h2>"));
+assert.ok(appSource.includes("normalizeRelationshipEdge"));
+assert.ok(appSource.includes("证据账本"));
+assert.ok(appSource.includes("Beat 账本"));
+assert.ok(appSource.includes("确认这是完整剧本"));
+assert.ok(appSource.includes("sourceText 校验"));
+assert.ok(appSource.includes("原文未命中，需复核"));
+assert.ok(appSource.includes("usableForCaseSave"));
+assert.ok(appSource.includes("analysis.caseScope === \"full_script\" ? \"已加入完整案例库\" : \"已按片段/开头/单集案例保存\""));
 assert.ok(appSource.includes("async function handleAction(payload)"));
 assert.ok(!appSource.includes("const action = target.dataset.action"));
 const promptBuilderSource = await fs.readFile(new URL("../src/prompt-builder.js", import.meta.url), "utf8");
 const taskContractSource = await fs.readFile(new URL("../src/task-output-contracts.js", import.meta.url), "utf8");
+const coverageSource = await fs.readFile(new URL("../src/script-coverage.js", import.meta.url), "utf8");
+const evidenceValidatorSource = await fs.readFile(new URL("../src/evidence-validator.js", import.meta.url), "utf8");
 assert.ok(promptBuilderSource.includes("getTaskOutputContract"));
 assert.ok(taskContractSource.includes("不得包在 scriptAnalysis"));
+assert.ok(taskContractSource.includes("episodeBeatLedger"));
+assert.ok(taskContractSource.includes("evidenceLedger"));
+assert.ok(taskContractSource.includes("sourceText 必须来自用户输入原文"));
+assert.ok(taskContractSource.includes("structureSteps"));
+assert.ok(taskContractSource.includes("variableSlots"));
 assert.ok(taskContractSource.includes("schemaRepairAnalyzeScript"));
+assert.ok(coverageSource.includes("requiresManualFullScriptConfirmation"));
+assert.ok(coverageSource.includes("fullScriptConfidence"));
+assert.ok(evidenceValidatorSource.includes("validateEvidenceSourceText"));
+assert.ok(evidenceValidatorSource.includes("invalidEvidenceRatio"));
+assert.ok(evidenceValidatorSource.includes("missingSourceText"));
+assert.ok(!evidenceValidatorSource.includes("items.filter((item) => String(item.sourceText"));
 assert.ok(modelAdapterSource.includes("normalizeParsedOutputForTask"));
 assert.ok(modelAdapterSource.includes("coerceAnalyzeScriptOutput"));
 assert.ok(modelAdapterSource.includes("unwrapPath"));
@@ -674,8 +799,11 @@ assert.ok(modelAdapterSource.includes("hasAnalyzeCoreField"));
 assert.ok(modelAdapterSource.includes("isWrapperPayload"));
 assert.ok(modelAdapterSource.includes("usableForLearning"));
 assert.ok(modelAdapterSource.includes("createDemoSchemaRepairDraft"));
+assert.ok(modelAdapterSource.includes("applyEvidenceValidationToAnalysis"));
+assert.ok(modelAdapterSource.includes("meta.usableForLearning = meta.usableForSkillLearning"));
+assert.ok(!modelAdapterSource.includes("sourceMeta.usableForLearning = !sourceMeta.blockedSave"));
 
-console.log("check passed: V1.1 demo/API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");
+console.log("check passed: V1.2 evidence-led script analysis, API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");
 
 function apiStateLike(apiConfig) {
   const next = structuredClone(apiConfig);

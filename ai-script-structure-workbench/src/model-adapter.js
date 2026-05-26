@@ -21,6 +21,7 @@ import { buildPrompt } from "./prompt-builder.js";
 import { parseJsonWithRepair, extractObjectBody } from "./json-repair.js";
 import { schemaValidationMessage, validateTaskOutput } from "./schema-validator.js";
 import { resolveRequestFormat } from "./request-format.js";
+import { applyEvidenceValidationToAnalysis } from "./evidence-validator.js";
 
 export async function callModel({
   taskType,
@@ -213,6 +214,7 @@ export async function callModel({
   const resolvedEndpointType = mode === "api" ? endpointType || "server_proxy" : "local_demo";
   const status = error ? "failed" : "success";
   const apiModeDemoFallback = requestedMode === "api" && mode === "demo" && !requiresRouteFix;
+  const effectiveSchemaMeta = schemaMeta || parsedJson?.sourceMeta || null;
   const result = {
     success: !error,
     mode,
@@ -227,13 +229,13 @@ export async function callModel({
     usedFallback,
     requiresRouteFix,
     apiModeDemoFallback,
-    needsReview: Boolean(schemaMeta?.needsReview),
-    blockedSave: Boolean(schemaMeta?.blockedSave),
-    usableForLearning: schemaMeta?.usableForLearning !== false,
-    usableForProduction: schemaMeta?.usableForProduction !== false,
-    modelCompletenessScore: schemaMeta?.modelCompletenessScore ?? null,
-    autoFilledFields: schemaMeta?.autoFilledFields || [],
-    autoFilledSections: schemaMeta?.autoFilledSections || [],
+    needsReview: Boolean(effectiveSchemaMeta?.needsReview),
+    blockedSave: Boolean(effectiveSchemaMeta?.blockedSave),
+    usableForLearning: effectiveSchemaMeta?.usableForLearning !== false,
+    usableForProduction: effectiveSchemaMeta?.usableForProduction !== false,
+    modelCompletenessScore: effectiveSchemaMeta?.modelCompletenessScore ?? null,
+    autoFilledFields: effectiveSchemaMeta?.autoFilledFields || [],
+    autoFilledSections: effectiveSchemaMeta?.autoFilledSections || [],
     serverStatus,
     providerStatus,
     providerRawPreview,
@@ -242,7 +244,7 @@ export async function callModel({
     modelUpdatedAt,
     matchedSkillIds,
     warnings,
-    schemaMeta,
+    schemaMeta: effectiveSchemaMeta,
     attemptErrors,
     outputText,
     parsedJson,
@@ -275,7 +277,7 @@ export async function callModel({
     matchedSkillIds,
     skillConflicts: conflicts,
     warnings,
-    schemaMeta,
+    schemaMeta: effectiveSchemaMeta,
     needsReview: result.needsReview,
     blockedSave: result.blockedSave,
     usableForLearning: result.usableForLearning,
@@ -630,15 +632,25 @@ function isWrapperPayload(value, wrapperKey) {
 }
 
 const analyzeCoreSections = [
+  "coverage",
+  "caseScope",
+  "evidenceLedger",
+  "episodeBeatLedger",
   "basicInfo",
   "hookAnalysis",
   "audienceNeedAnalysis",
   "themeAnalysis",
   "characterAnalysis",
+  "goldfingerAnalysis",
+  "obstacleAnalysis",
   "mainlineStructure",
+  "mainlineReversalAnalysis",
+  "endingAnalysis",
   "episodeFunctionAnalysis",
   "reusablePatterns"
 ];
+
+const locallyDerivableAnalyzeSections = new Set(["coverage", "caseScope", "evidenceLedger", "episodeBeatLedger"]);
 
 function createAnalyzeSourceMeta({ source, unwrapped, issues = [] }) {
   const modelProvidedSections = analyzeCoreSections.filter((section) => hasUsefulSection(source?.[section]));
@@ -646,7 +658,8 @@ function createAnalyzeSourceMeta({ source, unwrapped, issues = [] }) {
   const localFallbackSections = [...missingCoreSections];
   const autoFilledSections = [...missingCoreSections];
   const modelCompletenessScore = Math.round((modelProvidedSections.length / analyzeCoreSections.length) * 100);
-  const blockedSave = missingCoreSections.length >= 3;
+  const criticalMissingSections = missingCoreSections.filter((section) => !locallyDerivableAnalyzeSections.has(section));
+  const blockedSave = criticalMissingSections.length >= 3;
   const needsReview = missingCoreSections.length > 0;
   return {
     unwrapped: Boolean(unwrapped.changed),
@@ -656,6 +669,7 @@ function createAnalyzeSourceMeta({ source, unwrapped, issues = [] }) {
     missingCoreSections,
     modelProvidedSections,
     localFallbackSections,
+    criticalMissingSections,
     userPreservedFields: ["basicInfo.title", "basicInfo.genre", "basicInfo.episodeCount"],
     needsReview,
     blockedSave,
@@ -732,19 +746,88 @@ function stabilizeAnalyzeScriptOutput(value, inputMeta = {}, sourceMeta = null) 
   const episodeCount = Number(inputMeta.episodeCount) || Number(merged.basicInfo.episodeCount) || 24;
   merged.basicInfo.episodeCount = episodeCount;
   merged.basicInfo.estimatedLength = merged.basicInfo.estimatedLength || `${episodeCount} 集`;
+  merged.coverage = merged.coverage || base.coverage;
+  merged.evidenceLedger = merged.evidenceLedger || base.evidenceLedger;
+  merged.episodeBeatLedger = Array.isArray(merged.episodeBeatLedger) && merged.episodeBeatLedger.length ? merged.episodeBeatLedger : base.episodeBeatLedger;
+  merged.caseScope = merged.caseScope || merged.coverage?.allowedCaseScope || base.caseScope;
   merged.classificationTags.audienceNeeds = toStringArray(merged.classificationTags.audienceNeeds || merged.audienceNeedAnalysis.primaryNeeds);
   merged.classificationTags.hookTypes = toStringArray(merged.classificationTags.hookTypes || merged.hookAnalysis.hookTypes);
   merged.episodeFunctionAnalysis = Array.isArray(merged.episodeFunctionAnalysis) ? merged.episodeFunctionAnalysis : base.episodeFunctionAnalysis;
+  if (merged.coverage?.inputType !== "full_script") {
+    merged.episodeFunctionAnalysis = base.episodeFunctionAnalysis;
+    if (merged.mainlineStructure?.inferenceLevel === "原文明确") merged.mainlineStructure.inferenceLevel = "创作建议";
+    if (merged.mainlineReversalAnalysis?.inferenceLevel === "原文明确") merged.mainlineReversalAnalysis.inferenceLevel = "创作建议";
+    if (merged.endingAnalysis?.inferenceLevel === "原文明确") merged.endingAnalysis.inferenceLevel = "不足以判断";
+    if (merged.endingAnalysis) {
+      merged.endingAnalysis.confidence = Math.min(Number(merged.endingAnalysis.confidence) || 0.4, 0.35);
+      merged.endingAnalysis.riskNotes = uniqueList([...(merged.endingAnalysis.riskNotes || []), "输入不完整，结局不能标记为原文明确。"]);
+    }
+  }
+  merged.episodeFunctionAnalysis = merged.episodeFunctionAnalysis.map((episode, index) =>
+    ensureEpisodeAnalysisContract(episode, base.episodeFunctionAnalysis[index] || base.episodeFunctionAnalysis[0] || {})
+  );
   merged.reusablePatterns = Array.isArray(merged.reusablePatterns) ? merged.reusablePatterns : base.reusablePatterns;
+  merged.reusablePatterns = merged.reusablePatterns.map((pattern, index) =>
+    ensureReusablePatternContract(pattern, base.reusablePatterns[index] || base.reusablePatterns[index % base.reusablePatterns.length] || {})
+  );
   if (sourceMeta) {
+    sourceMeta.allowedCaseScope = merged.caseScope;
     merged.sourceMeta = sourceMeta;
-    merged.usableForLearning = sourceMeta.usableForLearning;
-    merged.usableForProduction = sourceMeta.usableForProduction;
+    applyEvidenceValidationToAnalysis(merged, inputMeta.text || "");
+    applyAnalyzeLearningFlags(merged);
     if (sourceMeta.blockedSave) merged.confidence = Math.min(Number(merged.confidence) || 0.78, 0.35);
     else if ((sourceMeta.localFallbackSections || []).length >= 3) merged.confidence = Math.min(Number(merged.confidence) || 0.78, 0.45);
     else if (sourceMeta.unwrapped) merged.confidence = Math.min(Number(merged.confidence) || 0.78, 0.85);
+  } else {
+    applyEvidenceValidationToAnalysis(merged, inputMeta.text || "");
+    applyAnalyzeLearningFlags(merged);
   }
   return merged;
+}
+
+function applyAnalyzeLearningFlags(analysis) {
+  const meta = (analysis.sourceMeta ||= {});
+  const invalidRatio = meta.evidenceValidation?.invalidEvidenceRatio || 0;
+  const localFallbackCount = (meta.localFallbackSections || []).length;
+  const isFullScript = analysis.coverage?.inputType === "full_script";
+  meta.usableForCaseSave = !meta.blockedSave;
+  meta.usableForPatternExtraction = !meta.blockedSave && invalidRatio <= 0.3;
+  meta.usableForFullScriptCase = isFullScript && !meta.blockedSave && invalidRatio === 0;
+  meta.usableForSkillLearning = isFullScript && !meta.blockedSave && !meta.needsReview && localFallbackCount === 0 && invalidRatio === 0;
+  meta.usableForLearning = meta.usableForSkillLearning;
+  analysis.usableForLearning = meta.usableForLearning;
+  analysis.usableForProduction = isFullScript && !meta.blockedSave;
+}
+
+function ensureEpisodeAnalysisContract(episode = {}, fallback = {}) {
+  const next = { ...fallback, ...episode };
+  next.evidenceIds = arrayOrFallback(episode.evidenceIds, fallback.evidenceIds);
+  next.evidenceBeatIds = arrayOrFallback(episode.evidenceBeatIds, fallback.evidenceBeatIds);
+  next.inferenceLevel = episode.inferenceLevel || fallback.inferenceLevel || (next.evidenceBeatIds.length ? "原文明确" : "合理推断");
+  next.confidence = episode.confidence ?? fallback.confidence ?? 0.55;
+  next.needsReview = episode.needsReview ?? fallback.needsReview ?? (!next.evidenceIds.length && !next.evidenceBeatIds.length);
+  next.riskNotes = arrayOrFallback(episode.riskNotes, fallback.riskNotes);
+  return next;
+}
+
+function ensureReusablePatternContract(pattern = {}, fallback = {}) {
+  const next = { ...fallback, ...pattern };
+  next.sourceEvidenceIds = arrayOrFallback(pattern.sourceEvidenceIds, fallback.sourceEvidenceIds);
+  next.sourceBeatIds = arrayOrFallback(pattern.sourceBeatIds, fallback.sourceBeatIds);
+  next.structureSteps = arrayOrFallback(pattern.structureSteps, fallback.structureSteps);
+  next.variableSlots = isPlainObject(pattern.variableSlots) ? pattern.variableSlots : fallback.variableSlots || {};
+  next.reusePrompt = pattern.reusePrompt || fallback.reusePrompt || "基于该模式替换变量槽，生成同功能桥段。";
+  next.emotionalMechanism = pattern.emotionalMechanism || fallback.emotionalMechanism || pattern.whyItWorks || "";
+  next.characterFunction = pattern.characterFunction || fallback.characterFunction || "";
+  next.plotFunction = pattern.plotFunction || fallback.plotFunction || "";
+  next.antiPatterns = arrayOrFallback(pattern.antiPatterns, fallback.antiPatterns);
+  next.inferenceLevel = pattern.inferenceLevel || fallback.inferenceLevel || (next.sourceEvidenceIds.length || next.sourceBeatIds.length ? "合理推断" : "创作建议");
+  next.confidence = pattern.confidence ?? fallback.confidence ?? 0.5;
+  return next;
+}
+
+function arrayOrFallback(value, fallback) {
+  return Array.isArray(value) && value.length ? value : Array.isArray(fallback) ? fallback : [];
 }
 
 function createDemoSchemaRepairDraft(input = {}) {

@@ -2,12 +2,20 @@ const taskShapeRules = {
   analyzeScript: {
     type: "object",
     required: [
+      "coverage",
+      "caseScope",
+      "evidenceLedger",
+      "episodeBeatLedger",
       "basicInfo",
       "hookAnalysis",
       "audienceNeedAnalysis",
       "themeAnalysis",
       "characterAnalysis",
+      "goldfingerAnalysis",
+      "obstacleAnalysis",
       "mainlineStructure",
+      "mainlineReversalAnalysis",
+      "endingAnalysis",
       "episodeFunctionAnalysis",
       "reusablePatterns"
     ]
@@ -15,12 +23,20 @@ const taskShapeRules = {
   schemaRepairAnalyzeScript: {
     type: "object",
     required: [
+      "coverage",
+      "caseScope",
+      "evidenceLedger",
+      "episodeBeatLedger",
       "basicInfo",
       "hookAnalysis",
       "audienceNeedAnalysis",
       "themeAnalysis",
       "characterAnalysis",
+      "goldfingerAnalysis",
+      "obstacleAnalysis",
       "mainlineStructure",
+      "mainlineReversalAnalysis",
+      "endingAnalysis",
       "episodeFunctionAnalysis",
       "reusablePatterns"
     ]
@@ -106,6 +122,9 @@ export function validateTaskOutput(taskType, value) {
     }
     issues.push(...missingFields(value, rule.required || []).map((field) => `缺少 ${field}`));
   }
+  if (taskType === "analyzeScript" || taskType === "schemaRepairAnalyzeScript") {
+    issues.push(...validateAnalyzeScriptContract(value));
+  }
   return { ok: issues.length === 0, issues };
 }
 
@@ -119,4 +138,66 @@ function missingFields(value, fields) {
     if (Array.isArray(item)) return item.length === 0;
     return item === null || item === undefined || item === "";
   });
+}
+
+function validateAnalyzeScriptContract(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const issues = [];
+  const coreModules = [
+    "hookAnalysis",
+    "audienceNeedAnalysis",
+    "themeAnalysis",
+    "characterAnalysis",
+    "goldfingerAnalysis",
+    "obstacleAnalysis",
+    "mainlineStructure",
+    "mainlineReversalAnalysis",
+    "endingAnalysis"
+  ];
+  for (const moduleName of coreModules) {
+    const moduleValue = value[moduleName];
+    if (!moduleValue || typeof moduleValue !== "object") continue;
+    if (!moduleValue.inferenceLevel) issues.push(`${moduleName} 缺少 inferenceLevel`);
+    if (moduleValue.confidence === undefined || moduleValue.confidence === null || moduleValue.confidence === "") issues.push(`${moduleName} 缺少 confidence`);
+    const hasEvidence = arrayHasItems(moduleValue.evidenceIds) || arrayHasItems(moduleValue.evidenceBeatIds);
+    if (!hasEvidence && moduleValue.needsReview !== true) issues.push(`${moduleName} 缺少 evidenceIds/evidenceBeatIds 时必须 needsReview=true`);
+  }
+  const episodes = Array.isArray(value.episodeFunctionAnalysis) ? value.episodeFunctionAnalysis : [];
+  episodes.forEach((episode, index) => {
+    if (!episode.inferenceLevel) issues.push(`episodeFunctionAnalysis[${index}] 缺少 inferenceLevel`);
+    if (episode.confidence === undefined || episode.confidence === null || episode.confidence === "") issues.push(`episodeFunctionAnalysis[${index}] 缺少 confidence`);
+  });
+  const patterns = Array.isArray(value.reusablePatterns) ? value.reusablePatterns : [];
+  patterns.forEach((pattern, index) => {
+    if (!arrayHasItems(pattern.structureSteps)) issues.push(`reusablePatterns[${index}] 缺少 structureSteps`);
+    if (!pattern.variableSlots || typeof pattern.variableSlots !== "object" || Array.isArray(pattern.variableSlots)) issues.push(`reusablePatterns[${index}] 缺少 variableSlots`);
+    if (!pattern.reusePrompt) issues.push(`reusablePatterns[${index}] 缺少 reusePrompt`);
+  });
+  if (value.coverage?.canAnalyzeEnding === false && value.endingAnalysis?.inferenceLevel === "原文明确") {
+    issues.push("输入不完整时 endingAnalysis.inferenceLevel 不能是原文明确");
+  }
+  if (value.coverage?.canAnalyzeFullMainline === false && value.mainlineStructure?.inferenceLevel === "原文明确") {
+    issues.push("输入不完整时 mainlineStructure.inferenceLevel 不能是原文明确");
+  }
+  if (value.coverage?.canAnalyzeFullMainline === false && value.mainlineReversalAnalysis?.inferenceLevel === "原文明确") {
+    issues.push("输入不完整时 mainlineReversalAnalysis.inferenceLevel 不能是原文明确");
+  }
+  const beatLedger = Array.isArray(value.episodeBeatLedger) ? value.episodeBeatLedger : [];
+  beatLedger.slice(0, 12).forEach((beat, index) => {
+    for (const field of ["beatId", "sourceText", "beatSummary", "confidence"]) {
+      if (beat?.[field] === undefined || beat?.[field] === null || beat?.[field] === "") issues.push(`episodeBeatLedger[${index}] 缺少 ${field}`);
+    }
+  });
+  const evidenceLedger = value.evidenceLedger || {};
+  for (const group of ["hookEvidence", "goldfingerEvidence", "suspenseEvidence", "endingEvidence", "conflictBeats", "characterMentions"]) {
+    const list = Array.isArray(evidenceLedger[group]) ? evidenceLedger[group] : [];
+    list.slice(0, 12).forEach((item, index) => {
+      if (item?.id && !item.sourceText) issues.push(`evidenceLedger.${group}[${index}] 缺少 sourceText`);
+    });
+  }
+  return issues;
+}
+
+function arrayHasItems(value) {
+  return Array.isArray(value) && value.length > 0;
 }

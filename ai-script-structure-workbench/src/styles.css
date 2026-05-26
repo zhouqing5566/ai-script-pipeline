@@ -617,6 +617,14 @@ textarea {
   color: var(--muted);
 }
 
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .tabbar button.active,
 .asset-tabs button.active {
   background: #fff;
@@ -650,6 +658,118 @@ textarea {
 
 .analysis-source-alert p {
   margin: 4px 0 0;
+}
+
+.analysis-quality-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.analysis-quality-strip > div,
+.quality-list > div {
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.analysis-quality-strip span,
+.quality-list span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.analysis-quality-strip strong,
+.quality-list strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.analysis-quality-strip p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.inference-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: -2px 0 10px;
+}
+
+.inference-row span,
+.inference-row strong,
+.inference-row em {
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.inference-row em {
+  background: var(--risk-soft);
+  color: var(--risk);
+}
+
+.ledger-list,
+.quality-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ledger-row {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.ledger-row > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ledger-row > div:first-child span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ledger-row > div:first-child em {
+  margin-left: auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.ledger-row blockquote {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  background: #fff;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+
+.inspector-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
 }
 
 .card-grid,

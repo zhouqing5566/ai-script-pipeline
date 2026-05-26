@@ -1,5 +1,7 @@
 import { audienceNeedTypes, hookTypes } from "./schemas.js";
 import { uid } from "./seed-data.js";
+import { detectScriptCoverage } from "./script-coverage.js";
+import { applyEvidenceValidationToAnalysis } from "./evidence-validator.js";
 
 const now = () => new Date().toISOString();
 
@@ -50,7 +52,9 @@ function rangeForStage(stageNo, stageCount, episodeCount) {
 
 export function analyzeScript(input = {}) {
   const text = input.text || "";
-  const episodeCount = detectEpisodeCount(text, input.episodeCount);
+  const coverage = detectScriptCoverage(text, input.episodeCount, { userConfirmedFullScript: input.userConfirmedFullScript });
+  const plannedEpisodeCount = Number(input.episodeCount) || coverage.detectedEpisodeCount || detectEpisodeCount(text, input.episodeCount);
+  const analysisEpisodeCount = coverage.canAnalyzeFullMainline ? plannedEpisodeCount : Math.max(coverage.detectedEpisodeCount || (text ? 1 : 0), 1);
   const genres = inferGenre(`${input.genre || ""} ${text}`);
   const needs = inferNeeds(text);
   const hook = /退婚|背叛|订婚/.test(text)
@@ -60,6 +64,32 @@ export function analyzeScript(input = {}) {
       : hookTypes.find((item) => text.includes(item.replace("开局", ""))) || "危机开局";
   const title = input.title || "未命名剧本";
   const baseScore = scoreFromText(text);
+  const episodeChunks = splitScriptIntoEpisodeChunks(text);
+  const episodeBeatLedger = buildEpisodeBeatLedger({ text, episodeChunks, maxEpisodes: coverage.canAnalyzeFullMainline ? 60 : analysisEpisodeCount });
+  const evidenceLedger = buildEvidenceLedger({ coverage, episodeBeatLedger });
+  const hookBeatIds = evidenceLedger.hookEvidence.flatMap((item) => item.relatedBeatIds || []);
+  const hookEvidenceIds = evidenceLedger.hookEvidence.map((item) => item.id);
+  const conflictBeatIds = evidenceLedger.conflictBeats.map((item) => item.beatId).filter(Boolean);
+  const goldfingerBeatIds = evidenceLedger.goldfingerEvidence.flatMap((item) => item.relatedBeatIds || []);
+  const goldfingerEvidenceIds = evidenceLedger.goldfingerEvidence.map((item) => item.id);
+  const suspenseEvidenceIds = evidenceLedger.suspenseEvidence.map((item) => item.id);
+  const allEvidenceIds = collectEvidenceIds(evidenceLedger);
+  const explicitMeta = analysisMeta({
+    evidenceIds: hookEvidenceIds,
+    beatIds: hookBeatIds,
+    inferenceLevel: "原文明确",
+    confidence: 0.86,
+    riskNotes: ["开头承诺强，后续必须持续还情绪债。"]
+  });
+  const insufficientMeta = analysisMeta({
+    evidenceIds: evidenceLedger.endingEvidence.map((item) => item.id),
+    beatIds: evidenceLedger.endingEvidence.flatMap((item) => item.relatedBeatIds || []),
+    inferenceLevel: coverage.canAnalyzeEnding ? "合理推断" : "不足以判断",
+    confidence: coverage.canAnalyzeEnding ? 0.7 : 0.28,
+    riskNotes: coverage.canAnalyzeEnding ? ["结局必须回收开局承诺。"] : ["当前输入没有足够结局原文证据，不能判断终局兑现。"]
+  });
+  const characterNames = inferCharacterNames(text);
+  const protagonistName = characterNames[0] || "主角";
 
   const stageStructure = Array.from({ length: 5 }, (_, index) => {
     const stageNo = index + 1;
@@ -67,7 +97,7 @@ export function analyzeScript(input = {}) {
     return {
       stageNo,
       title: names[index],
-      episodeRange: rangeForStage(stageNo, 5, episodeCount),
+      episodeRange: coverage.canAnalyzeFullMainline ? rangeForStage(stageNo, 5, plannedEpisodeCount) : "输入不足，仅作创作建议",
       stageGoal: [
         "建立羞辱与反击期待，让观众明确情绪债。",
         "用连续小胜换取入局资格，同时扩大阻碍系统。",
@@ -83,14 +113,22 @@ export function analyzeScript(input = {}) {
     };
   });
 
-  const episodes = Array.from({ length: Math.max(episodeCount, 5) }, (_, index) => {
+  const episodes = Array.from({ length: Math.max(analysisEpisodeCount, 1) }, (_, index) => {
     const episodeNo = index + 1;
+    const episodeEvidence = evidenceLedger.episodeEvidence.find((item) => item.episodeNo === episodeNo);
+    const episodeBeat = episodeBeatLedger.find((item) => item.episodeNo === episodeNo) || episodeBeatLedger[index] || null;
     return {
       episodeNo,
-      title: `第${episodeNo}集：${episodeTitle(episodeNo)}`,
-      summary: `围绕${needs[0]}推进一次冲突，主角用信息差换取主动权。`,
-      openingHook: episodeNo === 1 ? "公开羞辱中出现反击机会" : `上一集悬念升级为第${episodeNo}集开场压力`,
-      episodeGoal: episodeNo < episodeCount * 0.4 ? "夺回叙事权" : episodeNo < episodeCount * 0.75 ? "追查深层真相" : "完成终局清算",
+      title: episodeEvidence?.detectedTitle || `第${episodeNo}集：${episodeTitle(episodeNo)}`,
+      summary: episodeBeat?.beatSummary || `围绕${needs[0]}推进一次冲突，主角用信息差换取主动权。`,
+      openingHook: episodeEvidence?.openingHookBeatIds?.length ? "本集开头由原文危机/疑问 beat 支撑" : episodeNo === 1 ? "公开危机中出现反击机会" : `上一集悬念升级为第${episodeNo}集开场压力`,
+      episodeGoal: coverage.canAnalyzeFullMainline
+        ? episodeNo < plannedEpisodeCount * 0.4
+          ? "夺回叙事权"
+          : episodeNo < plannedEpisodeCount * 0.75
+            ? "追查深层真相"
+            : "完成终局清算"
+        : "仅分析输入文本内的本集功能，不推断全剧目标。",
       mainConflict: episodeNo % 4 === 0 ? "亲密关系误判升级" : "主角证据链与反派遮掩对抗",
       keyEvent: `主角发现第${episodeNo}个可利用信息点，并选择是否立刻揭穿。`,
       coolMoment: episodeNo % 3 === 0 ? "身份或证据反打" : "用对方隐藏欲望完成反制",
@@ -103,14 +141,25 @@ export function analyzeScript(input = {}) {
       foreshadowingUsed: episodeNo > 4 ? [`第${episodeNo - 4}集埋下的证据漏洞`] : [],
       cliffhanger: episodeNo % 4 === 0 ? "一个看似敌人的人替主角挡下关键伤害" : "反派拿出更致命的反证",
       episodeFunctionType: episodeNo === 1 ? ["开局吸引", "人物暴露"] : episodeNo % 5 === 0 ? ["关系转折", "情绪沉淀"] : ["主线推进", "爽点释放"],
-      weaknessNotes: episodeNo % 9 === 0 ? ["该集事件成立，但人物变化不足。"] : [],
-      score: episodeNo % 9 === 0 ? 68 : 78 + (episodeNo % 7)
+      weaknessNotes: coverage.canAnalyzeFullMainline && episodeNo % 9 === 0 ? ["该集事件成立，但人物变化不足。"] : [],
+      score: coverage.canAnalyzeFullMainline && episodeNo % 9 === 0 ? 68 : 78 + (episodeNo % 7),
+      ...analysisMeta({
+        evidenceIds: episodeEvidence ? uniqueList([...(episodeEvidence.openingHookBeatIds || []), ...(episodeEvidence.cliffhangerBeatIds || [])]) : [],
+        beatIds: episodeEvidence?.beatIds || (episodeBeat ? [episodeBeat.beatId] : []),
+        inferenceLevel: episodeBeat ? "原文明确" : "合理推断",
+        confidence: episodeBeat ? 0.82 : 0.48,
+        riskNotes: episodeBeat ? [] : ["缺少该集原文 beat，需复核。"]
+      })
     };
   });
 
-  return {
+  const analysisRecord = {
     id: uid("analysis"),
     title,
+    coverage,
+    caseScope: coverage.allowedCaseScope,
+    evidenceLedger,
+    episodeBeatLedger,
     sourceType: input.fileName ? "upload" : "paste",
     fileName: input.fileName || null,
     createdAt: now(),
@@ -122,8 +171,8 @@ export function analyzeScript(input = {}) {
       genre: genres,
       subGenre: needs,
       format: input.format || "短剧",
-      episodeCount,
-      estimatedLength: `${episodeCount} 集，单集 1-3 分钟`,
+      episodeCount: plannedEpisodeCount,
+      estimatedLength: `${plannedEpisodeCount} 集，单集 1-3 分钟`,
       targetAudience: "喜欢强情绪、快节奏、清算感和反转感的短剧用户",
       platformFit: ["短视频平台", "漫剧平台", "付费短剧投流"],
       coreAppeal: "开局高压羞辱制造情绪债，中后段用主线真相反差延长观看动力。",
@@ -142,7 +191,8 @@ export function analyzeScript(input = {}) {
       viewerQuestion: "她会如何在不暴露全部底牌的情况下翻盘？",
       whyContinueWatching: "观众等待第一次反击，也等待幕后真相浮出水面。",
       hookStrengthScore: baseScore,
-      riskNotes: ["开头承诺强，后续必须持续还情绪债。"]
+      riskNotes: ["开头承诺强，后续必须持续还情绪债。"],
+      ...explicitMeta
     },
     audienceNeedAnalysis: {
       primaryNeeds: needs.slice(0, 2),
@@ -153,7 +203,14 @@ export function analyzeScript(input = {}) {
       fantasyCompensation: "故事提供公开证明、反向审判和命运重写。",
       satisfactionPath: "羞辱压迫 -> 隐忍取证 -> 小爽点反打 -> 真相升级 -> 终局清算。",
       emotionalNeedScore: baseScore - 2,
-      riskNotes: ["爽点需要服务尊严修复，不宜只做围观震惊。"]
+      riskNotes: ["爽点需要服务尊严修复，不宜只做围观震惊。"],
+      ...analysisMeta({
+        evidenceIds: uniqueList([...hookEvidenceIds, ...suspenseEvidenceIds]),
+        beatIds: uniqueList([...hookBeatIds, ...conflictBeatIds]),
+        inferenceLevel: hookBeatIds.length ? "合理推断" : "不足以判断",
+        confidence: hookBeatIds.length ? 0.74 : 0.35,
+        riskNotes: hookBeatIds.length ? ["爽点需要服务尊严修复，不宜只做围观震惊。"] : ["爽点需要服务尊严修复，不宜只做围观震惊。", "缺少情绪需求原文证据。"]
+      })
     },
     themeAnalysis: {
       themeStatement: "真正的自由不是掌控每个人，而是在看清真相后仍能选择成为谁。",
@@ -164,7 +221,14 @@ export function analyzeScript(input = {}) {
       howThemeIsExpressed: "通过金手指代价、误判关系和终局选择表达。",
       themePayoff: "主角公开真相后放弃继续操控他人，让关键人物自由选择立场。",
       themeStrengthScore: baseScore - 6,
-      riskNotes: ["如果人物没有最终选择，主题会变成口号。"]
+      riskNotes: ["如果人物没有最终选择，主题会变成口号。"],
+      ...analysisMeta({
+        evidenceIds: allEvidenceIds.slice(0, 5),
+        beatIds: episodeBeatLedger.slice(0, 5).map((beat) => beat.beatId),
+        inferenceLevel: coverage.canAnalyzeFullMainline ? "合理推断" : "创作建议",
+        confidence: coverage.canAnalyzeFullMainline ? 0.66 : 0.42,
+        riskNotes: coverage.canAnalyzeFullMainline ? ["如果人物没有最终选择，主题会变成口号。"] : ["如果人物没有最终选择，主题会变成口号。", "输入不完整，主题只能从当前片段情绪和人物行为推断。"]
+      })
     },
     mainlineStructure: {
       protagonistStartPoint: "被公开误解、资源和关系都处于低位。",
@@ -176,7 +240,14 @@ export function analyzeScript(input = {}) {
       midpointChange: "中段发现表层仇人只是棋子，主角目标从复仇转向破除命运规则。",
       finalConflict: "公开真相与保住最后秘密之间的选择。",
       mainlineStrengthScore: baseScore - 4,
-      riskNotes: ["必须提前埋下幕后规则线索。"]
+      riskNotes: coverage.canAnalyzeFullMainline ? ["必须提前埋下幕后规则线索。"] : ["输入不足，不能把该主线当作原文事实。"],
+      ...analysisMeta({
+        evidenceIds: allEvidenceIds.slice(0, 6),
+        beatIds: episodeBeatLedger.slice(0, 6).map((beat) => beat.beatId),
+        inferenceLevel: coverage.canAnalyzeFullMainline ? "合理推断" : "创作建议",
+        confidence: coverage.canAnalyzeFullMainline ? 0.7 : 0.34,
+        riskNotes: coverage.canAnalyzeFullMainline ? ["必须提前埋下幕后规则线索。"] : ["输入不足，不能把该主线当作原文事实。", "完整主线缺少原文覆盖，需在 UI 中按推断展示。"]
+      })
     },
     mainlineReversalAnalysis: {
       hasMainlineReversal: true,
@@ -190,7 +261,14 @@ export function analyzeScript(input = {}) {
       characterImpact: "主角必须承认自己也可能误判他人。",
       themeConnection: "反差迫使主题从复仇爽升级为自由选择。",
       reversalStrengthScore: baseScore - 1,
-      riskNotes: ["洗白要有边界，不能抵消前期情绪债。"]
+      riskNotes: coverage.canAnalyzeFullMainline ? ["洗白要有边界，不能抵消前期情绪债。"] : ["当前文本不足以确认主线级大反差，只能作为创作建议。"],
+      ...analysisMeta({
+        evidenceIds: suspenseEvidenceIds,
+        beatIds: uniqueList([...hookBeatIds, ...goldfingerBeatIds]),
+        inferenceLevel: coverage.canAnalyzeFullMainline ? "合理推断" : "创作建议",
+        confidence: coverage.canAnalyzeFullMainline ? 0.68 : 0.3,
+        riskNotes: coverage.canAnalyzeFullMainline ? ["洗白要有边界，不能抵消前期情绪债。"] : ["当前文本不足以确认主线级大反差，只能作为创作建议。", "缺少中后段原文证据，不能标记为原文明确。"]
+      })
     },
     endingAnalysis: {
       endingSummary: "主角公开真相，清算幕后者，同时放弃继续用能力操控他人。",
@@ -203,49 +281,63 @@ export function analyzeScript(input = {}) {
       promisedEmotionReturned: true,
       unresolvedIssues: ["后续可保留能力消失后的生活余味"],
       endingStrengthScore: baseScore - 3,
-      riskNotes: ["结局必须回收开局羞辱和母亲真相两条承诺。"]
+      riskNotes: coverage.canAnalyzeEnding ? ["结局必须回收开局承诺。"] : ["输入不足，无法判断结局是否兑现开头承诺。"],
+      ...insufficientMeta
     },
     characterAnalysis: {
-      protagonist: makeCharacter("林照", "女主", "从被污名者到自我选择者"),
-      mainCharacters: [
-        makeCharacter("沈砚", "表面阻碍者 / 隐性同盟", "从冷酷守密到共同承担真相"),
-        makeCharacter("林晚", "继妹 / 表层反派", "用伪装的弱者身份夺取同情"),
-        makeCharacter("林父", "家族权威", "把亲情当成资源秩序的一部分")
-      ],
+      protagonist: makeCharacter(protagonistName, "主角", "从被低估者到能主动选择的人"),
+      mainCharacters: characterNames
+        .filter((name) => name !== protagonistName)
+        .slice(0, 4)
+        .map((name, index) => makeCharacter(name, index === 0 ? "关系推动者" : "冲突参与者", "通过与主角的冲突暴露世界规则和情绪债")),
       relationshipEdges: [
         {
-          from: "林照",
-          to: "沈砚",
-          initialRelation: "前世共犯嫌疑",
-          hiddenRelation: "曾试图阻止献祭规则",
+          from: protagonistName,
+          to: characterNames.find((name) => name !== protagonistName) || "关系对象缺失，需复核",
+          initialRelation: "原文片段中存在冲突或试探",
+          hiddenRelation: coverage.canAnalyzeFullMainline ? "可能存在未揭示立场" : "输入不足，暂不能判断隐藏关系",
           desireTowardOther: "确认对方真实立场",
           conflict: "一个要追查，一个要阻止能力失控",
           emotionalDebt: "前世死亡现场的误解",
-          relationshipShift: "敌对试探 -> 被迫合作 -> 共同选择",
-          finalState: "不靠控制维持信任",
-          themeFunction: "承载自由选择主题"
+          relationshipShift: coverage.canAnalyzeFullMainline ? "敌对试探 -> 被迫合作 -> 共同选择" : "当前片段只能观察到关系张力",
+          finalState: coverage.canAnalyzeFullMainline ? "不靠控制维持信任" : "不足以判断",
+          themeFunction: "承载人物选择与误判"
         }
       ],
       characterSystemSummary: "人物系统围绕叙事权、亲密误判和选择代价展开。",
       characterStrengthScore: baseScore - 5,
-      riskNotes: ["反派需要有自保逻辑，不能只负责被打脸。"]
+      riskNotes: ["反派需要有自保逻辑，不能只负责被打脸。"],
+      ...analysisMeta({
+        evidenceIds: evidenceLedger.characterMentions.map((item) => item.id),
+        beatIds: evidenceLedger.characterMentions.map((item) => item.beatId).filter(Boolean),
+        inferenceLevel: evidenceLedger.characterMentions.length ? "原文明确" : "不足以判断",
+        confidence: evidenceLedger.characterMentions.length ? 0.82 : 0.3,
+        riskNotes: evidenceLedger.characterMentions.length ? ["反派需要有自保逻辑，不能只负责被打脸。"] : ["反派需要有自保逻辑，不能只负责被打脸。", "缺少人物出场证据。"]
+      })
     },
     goldfingerAnalysis: {
-      hasGoldfinger: /系统|面板|能力|看见/.test(text),
-      name: "隐藏欲望视窗",
-      type: "好感度面板 / 欲望识别",
-      visibleFunction: "看见他人最强欲望和恐惧，用于取证和反制。",
-      hiddenNature: "每次使用都会暴露主角一个秘密，反过来考验她对控制的依赖。",
-      rules: ["只能看到当下强烈欲望", "无法直接判断事实真假", "对真诚表达者信息最少"],
-      limits: ["连续使用会误读", "无法解决情感选择"],
-      costs: ["秘密暴露", "信任关系受损", "反派可诱导错误欲望"],
-      upgradePath: ["看见欲望", "看见恐惧", "看见代价", "最终放弃使用"],
-      coolUses: ["公开反打", "识破伪证", "逼反派自曝", "用误导欲望反设局"],
+      hasGoldfinger: /系统|面板|能力|看见|透视|银针|蛊|金蚕|巫医|重生/.test(text),
+      name: /蛊|金蚕|巫医/.test(text) ? "巫医蛊术与透视诊断" : "隐藏欲望视窗",
+      type: /蛊|金蚕|巫医/.test(text) ? "医术 / 蛊术 / 透视能力" : "好感度面板 / 欲望识别",
+      visibleFunction: /蛊|金蚕|巫医/.test(text) ? "识别常人看不见的病因或蛊毒，并用特殊手段当众破局。" : "看见他人最强欲望和恐惧，用于取证和反制。",
+      hiddenNature: "金手指既提供爽感，也会引出更高层阻碍和人物选择代价。",
+      rules: ["能力只能解决具体危机，不能自动解决关系与长期真相", "使用后会引来更强对手或更高层解释"],
+      limits: ["不能替代人物选择", "无法一次性解释全剧真相"],
+      costs: ["暴露身份", "引来敌对势力注意", "让主角被误判为异类"],
+      upgradePath: ["首次破局", "规则暴露", "遭遇反制", "主动选择如何使用"],
+      coolUses: ["当众救人/破局", "识破常规权威误判", "反制反派设局", "打开新悬念"],
       misuseRisks: ["主角用能力替代沟通，人物弧光停滞"],
       relationshipToTheme: "金手指把控制感和自由选择的矛盾具象化。",
       relationshipToCharacterArc: "主角越依赖能力，越需要面对自己真正害怕的东西。",
       goldfingerStrengthScore: baseScore - 7,
-      riskNotes: ["必须保留限制和代价，否则冲突会被能力抹平。"]
+      riskNotes: ["必须保留限制和代价，否则冲突会被能力抹平。"],
+      ...analysisMeta({
+        evidenceIds: goldfingerEvidenceIds,
+        beatIds: goldfingerBeatIds,
+        inferenceLevel: goldfingerBeatIds.length ? "原文明确" : "不足以判断",
+        confidence: goldfingerBeatIds.length ? 0.84 : 0.28,
+        riskNotes: goldfingerBeatIds.length ? ["必须保留限制和代价，否则冲突会被能力抹平。"] : ["必须保留限制和代价，否则冲突会被能力抹平。", "未在输入文本中找到明确金手指证据。"]
+      })
     },
     obstacleAnalysis: {
       obstacleTypes: ["舆论定罪", "家族资源压制", "伪证链", "能力代价", "亲密关系误判"],
@@ -254,10 +346,17 @@ export function analyzeScript(input = {}) {
       whyCannotBeSolvedAtOnce: "证据链被分散，金手指只能看到欲望，不能直接还原事实。",
       pressureMechanism: "每次反击都会暴露一个秘密或引出更高层敌人。",
       obstacleStrengthScore: baseScore - 4,
-      riskNotes: ["如果证据太容易获得，长线动力会不足。"]
+      riskNotes: ["如果证据太容易获得，长线动力会不足。"],
+      ...analysisMeta({
+        evidenceIds: uniqueList([...hookEvidenceIds, ...suspenseEvidenceIds]),
+        beatIds: conflictBeatIds,
+        inferenceLevel: conflictBeatIds.length ? "原文明确" : "合理推断",
+        confidence: conflictBeatIds.length ? 0.78 : 0.42,
+        riskNotes: conflictBeatIds.length ? ["如果证据太容易获得，长线动力会不足。"] : ["如果证据太容易获得，长线动力会不足。", "阻碍系统缺少足够冲突 beat。"]
+      })
     },
     episodeFunctionAnalysis: episodes,
-    reusablePatterns: makeReusablePatterns(title, needs, genres),
+    reusablePatterns: makeReusablePatterns({ title, needs, genres, evidenceLedger, episodeBeatLedger, coverage }),
     classificationTags: {
       genre: genres,
       audienceNeeds: needs,
@@ -271,9 +370,235 @@ export function analyzeScript(input = {}) {
       weaknesses: ["需要强化中段伏笔密度", "反派系统需要避免工具化"],
       suggestedRepairs: ["在第 3-5 集加入能力代价伏笔", "让表层反派每次行动都服务幕后规则"]
     },
-    analystNotes: "Demo 分析基于结构规则生成，真实生产建议接入模型后由主编复核。",
-    confidence: 0.78
+    analystNotes: coverage.inputType === "full_script" ? "分析基于完整度较高的输入生成，仍建议主编复核证据链。" : "当前输入不是完整剧本，完整主线、结局和全剧分集功能均按推断/建议处理。",
+    confidence: coverage.inputType === "full_script" ? 0.78 : 0.58,
+    needsReview: coverage.inputType !== "full_script",
+    usableForLearning: true,
+    usableForProduction: coverage.inputType === "full_script",
+    sourceMeta: {
+      blockedSave: false,
+      needsReview: coverage.inputType !== "full_script",
+      usableForLearning: true,
+      usableForProduction: coverage.inputType === "full_script",
+      usableForSkillLearning: coverage.inputType === "full_script",
+      usableForFullScriptCase: coverage.inputType === "full_script",
+      allowedCaseScope: coverage.allowedCaseScope,
+      modelCompletenessScore: 100,
+      localFallbackSections: [],
+      missingCoreSections: [],
+      warnings: coverage.warnings
+    }
   };
+  applyEvidenceValidationToAnalysis(analysisRecord, text);
+  applyLearningFlags(analysisRecord);
+  return analysisRecord;
+}
+
+function splitScriptIntoEpisodeChunks(text = "") {
+  const source = String(text || "").trim();
+  if (!source) return [];
+  const markerRegex = /(?:^|\n)\s*(第\s*([0-9０-９零〇一二两三四五六七八九十百千]+)\s*[集话回章][^\n]*)/g;
+  const matches = [...source.matchAll(markerRegex)];
+  if (!matches.length) {
+    return [{ episodeNo: null, title: "未分集片段", text: source }];
+  }
+  return matches.map((match, index) => {
+    const start = match.index + (match[0].startsWith("\n") ? 1 : 0);
+    const end = matches[index + 1]?.index ?? source.length;
+    return {
+      episodeNo: parseEpisodeNo(match[2]) || index + 1,
+      title: match[1].trim(),
+      text: source.slice(start, end).trim()
+    };
+  });
+}
+
+function buildEpisodeBeatLedger({ text, episodeChunks, maxEpisodes }) {
+  const chunks = episodeChunks.length ? episodeChunks.slice(0, maxEpisodes || episodeChunks.length) : [{ episodeNo: null, title: "片段", text }];
+  const beats = [];
+  chunks.forEach((chunk) => {
+    const sourceLines = chunk.text
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const groups = groupLinesIntoBeats(sourceLines).slice(0, 8);
+    groups.forEach((lines, index) => {
+      const sourceText = lines.join("\n").trim();
+      if (!sourceText) return;
+      const beatId = `B${String(beats.length + 1).padStart(3, "0")}`;
+      const characters = extractCharacters(sourceText);
+      beats.push({
+        beatId,
+        episodeNo: chunk.episodeNo,
+        sceneNo: index + 1,
+        sourceText,
+        beatSummary: summarizeText(sourceText, 90),
+        characters,
+        location: inferLocation(sourceText),
+        conflict: inferBeatConflict(sourceText),
+        audienceEmotion: inferBeatEmotions(sourceText),
+        suspenseQuestion: inferSuspenseQuestion(sourceText),
+        coolPoint: inferCoolPoint(sourceText),
+        characterFunction: characters.length ? `暴露 ${characters.slice(0, 3).join("、")} 的态度、能力或欲望。` : "暴露当前场景中的行动压力。",
+        relationshipChange: /质问|跪|救|阻止|威胁|合作|拜|谢/.test(sourceText) ? "关系权力位置发生变化。" : "关系变化不明显。",
+        informationGain: inferInformationGain(sourceText),
+        structureFunction: inferStructureFunction(sourceText, beats.length),
+        reusableValue: inferReusableValue(sourceText),
+        relatedModules: inferRelatedModules(sourceText, beats.length),
+        confidence: 0.86
+      });
+    });
+  });
+  return beats;
+}
+
+function groupLinesIntoBeats(lines = []) {
+  const groups = [];
+  let current = [];
+  const flush = () => {
+    if (current.length) groups.push(current);
+    current = [];
+  };
+  lines.forEach((line) => {
+    const startsScene = /^[△▲◇◆]/.test(line);
+    if (startsScene && current.length >= 2) flush();
+    current.push(line);
+    if (current.length >= 3 || /[？！!?]$/.test(line) || /悬念|转身离开|死定|完了|怎么处理/.test(line)) flush();
+  });
+  flush();
+  return groups.length ? groups : [lines.slice(0, 3)];
+}
+
+function buildEvidenceLedger({ coverage, episodeBeatLedger }) {
+  let evidenceNo = 0;
+  const createEvidence = (beat, evidenceType, summary) => ({
+    id: `E${String(++evidenceNo).padStart(3, "0")}`,
+    episodeNo: beat.episodeNo,
+    sceneNo: beat.sceneNo,
+    sourceText: beat.sourceText,
+    summary,
+    evidenceType,
+    relatedCharacters: beat.characters || [],
+    relatedBeatIds: [beat.beatId],
+    confidence: beat.confidence
+  });
+  const hookBeats = episodeBeatLedger.slice(0, 2);
+  const conflictBeats = episodeBeatLedger
+    .filter((beat, index) => index < 8 || /冲突|质问|威胁|阻止|杀|死|毒|救|背叛/.test(beat.sourceText))
+    .slice(0, 12)
+    .map((beat) => ({ ...createEvidence(beat, "conflict", beat.conflict), beatId: beat.beatId }));
+  const hookEvidence = hookBeats.map((beat) => createEvidence(beat, "hook", "开场直接提供危机、疑问或人物反差。"));
+  const goldfingerEvidence = episodeBeatLedger
+    .filter((beat) => /系统|面板|能力|看见|透视|银针|蛊|金蚕|巫医|重生|特效/.test(beat.sourceText))
+    .slice(0, 8)
+    .map((beat) => createEvidence(beat, "goldfinger", "原文出现特殊能力、金手指或非常规破局手段。"));
+  const suspenseEvidence = episodeBeatLedger
+    .filter((beat) => /什么|为什么|怎么|难道|真相|来头|身份|？|\?/.test(beat.sourceText))
+    .slice(0, 8)
+    .map((beat) => createEvidence(beat, "suspense", "该 beat 提供观众追问或身份悬念。"));
+  const endingEvidence = coverage.canAnalyzeEnding ? episodeBeatLedger.slice(-2).map((beat) => createEvidence(beat, "ending", "结尾或终局相关证据。")) : [];
+  const characterMentions = collectCharacterMentions(episodeBeatLedger);
+  const scenes = episodeBeatLedger.map((beat) => ({
+    sceneId: `S${String(beat.sceneNo || 1).padStart(3, "0")}-${beat.beatId}`,
+    episodeNo: beat.episodeNo,
+    sceneNo: beat.sceneNo,
+    location: beat.location,
+    characters: beat.characters,
+    sceneSummary: beat.beatSummary,
+    sourceTextPreview: summarizeText(beat.sourceText, 110),
+    beatIds: [beat.beatId]
+  }));
+  const episodeEvidence = Object.values(
+    episodeBeatLedger.reduce((acc, beat) => {
+      const no = beat.episodeNo || 1;
+      acc[no] ||= {
+        episodeNo: no,
+        detectedTitle: `第${no}集`,
+        beatIds: [],
+        openingHookBeatIds: [],
+        cliffhangerBeatIds: [],
+        evidenceCompleteness: 0
+      };
+      acc[no].beatIds.push(beat.beatId);
+      if (beat.structureFunction.includes("开头") || acc[no].openingHookBeatIds.length < 1) acc[no].openingHookBeatIds.push(beat.beatId);
+      return acc;
+    }, {})
+  ).map((item) => ({
+    ...item,
+    cliffhangerBeatIds: item.beatIds.slice(-1),
+    evidenceCompleteness: Math.min(1, Math.round((item.beatIds.length / 5) * 100) / 100)
+  }));
+
+  return {
+    coverage,
+    scenes,
+    characterMentions,
+    conflictBeats,
+    hookEvidence,
+    goldfingerEvidence,
+    suspenseEvidence,
+    endingEvidence,
+    episodeEvidence
+  };
+}
+
+function collectCharacterMentions(beats = []) {
+  const seen = new Map();
+  beats.forEach((beat) => {
+    (beat.characters || []).forEach((character) => {
+      const key = `${character}-${beat.beatId}`;
+      if (seen.has(key)) return;
+      seen.set(key, {
+        id: `M${String(seen.size + 1).padStart(3, "0")}`,
+        character,
+        episodeNo: beat.episodeNo,
+        sceneNo: beat.sceneNo,
+        beatId: beat.beatId,
+        sourceText: beat.sourceText,
+        summary: `${character} 在该 beat 中被提及或发言。`,
+        confidence: 0.8
+      });
+    });
+  });
+  return [...seen.values()].slice(0, 40);
+}
+
+function analysisMeta({ evidenceIds = [], beatIds = [], inferenceLevel = "合理推断", confidence = 0.6, riskNotes = [] } = {}) {
+  const uniqueEvidenceIds = uniqueList(evidenceIds);
+  const uniqueBeatIds = uniqueList(beatIds);
+  return {
+    evidenceIds: uniqueEvidenceIds,
+    evidenceBeatIds: uniqueBeatIds,
+    inferenceLevel,
+    confidence,
+    needsReview: uniqueEvidenceIds.length === 0 && uniqueBeatIds.length === 0,
+    riskNotes: uniqueList([...(riskNotes || []), ...(uniqueEvidenceIds.length || uniqueBeatIds.length ? [] : ["该模块缺少原文证据。"])])
+  };
+}
+
+function applyLearningFlags(analysis) {
+  const meta = (analysis.sourceMeta ||= {});
+  const invalidRatio = meta.evidenceValidation?.invalidEvidenceRatio || 0;
+  const localFallbackCount = (meta.localFallbackSections || []).length;
+  const isFullScript = analysis.coverage?.inputType === "full_script";
+  meta.usableForCaseSave = !meta.blockedSave;
+  meta.usableForPatternExtraction = !meta.blockedSave && invalidRatio <= 0.3;
+  meta.usableForFullScriptCase = isFullScript && !meta.blockedSave && invalidRatio === 0;
+  meta.usableForSkillLearning = isFullScript && !meta.blockedSave && !meta.needsReview && localFallbackCount === 0 && invalidRatio === 0;
+  meta.usableForLearning = meta.usableForSkillLearning;
+  analysis.usableForLearning = meta.usableForLearning;
+  analysis.usableForProduction = isFullScript && !meta.blockedSave;
+}
+
+function collectEvidenceIds(evidenceLedger) {
+  return uniqueList(
+    [
+      ...(evidenceLedger.hookEvidence || []),
+      ...(evidenceLedger.goldfingerEvidence || []),
+      ...(evidenceLedger.suspenseEvidence || []),
+      ...(evidenceLedger.endingEvidence || [])
+    ].map((item) => item.id)
+  );
 }
 
 function makeCharacter(name, role, arcSummary) {
@@ -299,37 +624,184 @@ function makeCharacter(name, role, arcSummary) {
   };
 }
 
-function makeReusablePatterns(title, needs, genres) {
+function makeReusablePatterns({ title, needs, genres, evidenceLedger, episodeBeatLedger, coverage }) {
+  const hookEvidenceIds = evidenceLedger.hookEvidence.map((item) => item.id);
+  const hookBeatIds = evidenceLedger.hookEvidence.flatMap((item) => item.relatedBeatIds || []);
+  const goldfingerEvidenceIds = evidenceLedger.goldfingerEvidence.map((item) => item.id);
+  const goldfingerBeatIds = evidenceLedger.goldfingerEvidence.flatMap((item) => item.relatedBeatIds || []);
+  const hasSourceEvidence = hookEvidenceIds.length || hookBeatIds.length;
   return [
     {
       id: uid("pattern"),
       sourceScriptId: "current-analysis",
-      patternType: "开头钩子模式",
-      title: "公开羞辱中的隐藏信息反打",
-      description: "在公开羞辱场景中让主角获得只有自己能看见的信息，建立低位反打期待。",
+      patternType: "hook",
+      title: "公共空间突发危机 + 被轻视者破局",
+      description: "在公共场景制造紧急危机，让权威误判或失败，再由被低估的主角用特殊能力破局。",
+      sourceEvidenceIds: hookEvidenceIds,
+      sourceBeatIds: hookBeatIds,
       applicableGenres: genres,
       applicableAudienceNeeds: needs,
-      structureTemplate: "公开定罪 -> 主角看见漏洞 -> 暂不全盘反击 -> 留钩子钓出幕后者",
-      whyItWorks: "同时满足尊严修复和悬念追看。",
-      risks: ["如果主角不反击太久，会变成憋屈。"],
+      structureSteps: ["公共场景制造紧急危机", "权威角色误判或失败", "主角被质疑或被低估", "主角提出反常判断", "群众/权威阻拦", "主角用金手指破局", "权威震惊", "新悬念打开"],
+      variableSlots: {
+        scene: ["火车", "医院", "婚宴", "拍卖会"],
+        crisis: ["中毒", "怪病", "走火入魔", "命案"],
+        authority: ["医生", "长老", "专家", "官员"],
+        ability: ["医术", "毒术", "玄术", "系统识别"]
+      },
+      whyItWorks: "同时满足危机压迫、身份反差、尊严修复和继续追看的身份悬念。",
+      emotionalMechanism: "先让观众替主角承受质疑，再通过当众破局释放尊严修复。",
+      characterFunction: "快速证明主角不是普通人，同时保留来历和代价疑问。",
+      plotFunction: "用一次可视化破局打开金手指、反派势力和下一层悬念。",
+      risks: ["如果权威太蠢，会削弱破局含金量。", "如果能力无限制，中后段冲突会被抹平。"],
+      antiPatterns: ["只让路人震惊但不引出新阻碍", "只展示能力，不建立人物目标或代价"],
+      reusePrompt: "基于该模式，替换 scene/crisis/authority/ability 变量，生成一个适用于新题材的开头破局桥段，并保留新悬念。",
       exampleEpisodes: [1, 2],
-      confidence: 0.82
+      confidence: hasSourceEvidence ? 0.84 : 0.42,
+      inferenceLevel: hasSourceEvidence ? "原文明确" : "创作建议"
     },
     {
       id: uid("pattern"),
       sourceScriptId: "current-analysis",
-      patternType: "主线大反差模式",
-      title: "表面共犯其实阻止更大代价",
+      patternType: "goldfingerUse",
+      title: "特殊能力破局后立刻引来更高层对手",
       description: `${title} 可以用关系误判支撑中后段惊奇。`,
+      sourceEvidenceIds: goldfingerEvidenceIds,
+      sourceBeatIds: goldfingerBeatIds,
       applicableGenres: genres,
       applicableAudienceNeeds: needs,
-      structureTemplate: "前期敌对 -> 多处不合常理保护 -> 中段裂缝 -> 终局真相",
-      whyItWorks: "把单线复仇升级为人物选择和主题兑现。",
-      risks: ["需要足够伏笔避免强行洗白。"],
+      structureSteps: ["主角用能力解决眼前危机", "旁观者/权威改变评价", "反派发现能力威胁", "更专业的对手登场", "能力规则或身份来历被追问", "下一集进入能力反制"],
+      variableSlots: {
+        ability: ["巫医蛊术", "系统识别", "隐藏身份", "重生记忆"],
+        observer: ["医生", "老板", "同门", "女主/男主"],
+        higherEnemy: ["蛊师", "家族高手", "系统监管者", "幕后策划者"],
+        cost: ["身份暴露", "体力反噬", "关键材料缺口", "关系误会"]
+      },
+      whyItWorks: "爽点之后马上给出更强阻碍，避免能力一次解决所有问题。",
+      emotionalMechanism: "先兑现爽感，再把期待转化为对下一层敌人的好奇。",
+      characterFunction: "让主角的强大和限制同时成立。",
+      plotFunction: "从单场破局推进到长期阻碍系统。",
+      risks: ["如果只升级敌人不升级人物选择，会变成重复打怪。"],
+      antiPatterns: ["每次只换一个更强反派", "能力没有代价也没有误用风险"],
+      reusePrompt: "沿用该模式，写一个主角第一次使用金手指后引来更高层对手的桥段，必须包含能力限制或身份风险。",
       exampleEpisodes: [4, 12, 20],
-      confidence: 0.76
+      confidence: goldfingerBeatIds.length ? 0.78 : 0.38,
+      inferenceLevel: goldfingerBeatIds.length ? "合理推断" : "创作建议"
     }
   ];
+}
+
+function parseEpisodeNo(value = "") {
+  const normalized = String(value).replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 65248));
+  if (/^\d+$/.test(normalized)) return Number(normalized);
+  const map = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (normalized === "十") return 10;
+  if (normalized.includes("十")) {
+    const [tens, ones] = normalized.split("十");
+    return (tens ? map[tens] || 1 : 1) * 10 + (ones ? map[ones] || 0 : 0);
+  }
+  return map[normalized] || null;
+}
+
+function extractCharacters(text = "") {
+  const names = [];
+  for (const match of String(text).matchAll(/([\u4e00-\u9fa5A-Za-z0-9]{1,10})(?:（[^）]*）)?[：:]/g)) {
+    const name = match[1].trim();
+    if (name && !/医生|龙套|旁白|字幕|标注|特效|闪回/.test(name)) names.push(name);
+    else if (name) names.push(name);
+  }
+  return uniqueList(names).slice(0, 5);
+}
+
+function inferCharacterNames(text = "") {
+  const counts = new Map();
+  for (const match of String(text).matchAll(/([\u4e00-\u9fa5A-Za-z0-9]{1,10})(?:（[^）]*）)?[：:]/g)) {
+    const name = match[1].trim();
+    if (name) counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  for (const match of String(text).matchAll(/【标注：([^，,】]+)/g)) {
+    const name = match[1].trim();
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([name]) => name)
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function inferLocation(text = "") {
+  if (/火车|包厢|车厢/.test(text)) return "火车/包厢";
+  if (/医院|病房|医生/.test(text)) return "医疗场景";
+  if (/宴|婚|订婚/.test(text)) return "宴会/公开场合";
+  if (/山|门派|师父/.test(text)) return "山门/修行场景";
+  return "未明确";
+}
+
+function inferBeatConflict(text = "") {
+  if (/死|救|毒|脑溢血|出血|抽搐/.test(text)) return "生死危机与救治失败压力。";
+  if (/质问|阻止|住手|担得起|杀人/.test(text)) return "主角行动被权威或反派阻拦。";
+  if (/威胁|后退|跪|责罚/.test(text)) return "强弱位置发生压制或反转。";
+  return "当前 beat 的冲突需要结合上下文判断。";
+}
+
+function inferBeatEmotions(text = "") {
+  const emotions = [];
+  if (/死|救|危|毒|抽搐/.test(text)) emotions.push("紧张");
+  if (/质问|阻止|羞辱|瞎搞/.test(text)) emotions.push("压迫");
+  if (/什么|难道|来头|居然|怎么/.test(text)) emotions.push("好奇");
+  if (/救活|醒|谢|震惊|大师死了/.test(text)) emotions.push("爽感释放");
+  return emotions.length ? emotions : ["观望"];
+}
+
+function inferSuspenseQuestion(text = "") {
+  if (/来头|VVVVIP|身份/.test(text)) return "主角到底是什么来历？";
+  if (/蛊|虫|金蚕|透视/.test(text)) return "这种非常规能力的规则和代价是什么？";
+  if (/为什么|为何/.test(text)) return "背后的动机是什么？";
+  return /[？?]/.test(text) ? "观众会追问这个异常现象如何解释。" : "";
+}
+
+function inferCoolPoint(text = "") {
+  if (/银针|金蚕|透视|巫医|蛊/.test(text)) return "非常规医术/蛊术可视化破局。";
+  if (/VVVVIP|大人物|恭敬/.test(text)) return "隐藏身份带来的地位反差。";
+  if (/掐断|跪拜|谢胖爷/.test(text)) return "强者身份突然显露。";
+  return "";
+}
+
+function inferInformationGain(text = "") {
+  if (/不是脑溢血|被人害|蛊/.test(text)) return "观众知道危机并非常规疾病，而是人为或超常因素。";
+  if (/VVVVIP|大人物/.test(text)) return "观众获得主角身份不普通的线索。";
+  if (/一个月|必死|材料/.test(text)) return "观众获得主角生命倒计时和长期目标。";
+  return "提供新的行动信息或人物态度。";
+}
+
+function inferStructureFunction(text = "", index = 0) {
+  if (index === 0) return "开头钩子";
+  if (/银针|金蚕|透视|系统|能力|巫医|蛊/.test(text)) return "金手指引出";
+  if (/什么|为什么|来头|身份|难道|？|\?/.test(text)) return "悬念制造";
+  if (/袁超|反派|杀|坏我好事|死定/.test(text)) return "反派压迫";
+  if (/醒|救|震惊|跪|谢/.test(text)) return "爽点释放";
+  return "主线推进";
+}
+
+function inferReusableValue(text = "") {
+  if (/火车|医院|医生|救/.test(text)) return "可复用为公共空间突发危机开头。";
+  if (/VVVVIP|隐藏|身份|来头/.test(text)) return "可复用为身份反差钩子。";
+  if (/银针|金蚕|蛊|系统|能力/.test(text)) return "可复用为金手指可视化破局桥段。";
+  return "可作为人物关系或冲突节奏参考。";
+}
+
+function inferRelatedModules(text = "", index = 0) {
+  const modules = new Set(["episodeFunctionAnalysis"]);
+  if (index < 2) modules.add("hookAnalysis");
+  if (/情绪|羞辱|质问|救|死|危|震惊/.test(text)) modules.add("audienceNeedAnalysis");
+  if (/银针|金蚕|蛊|系统|能力|透视/.test(text)) modules.add("goldfingerAnalysis");
+  if (/主角|师父|老师|老板|医生|袁|孙|苏/.test(text)) modules.add("characterAnalysis");
+  if (/真相|来头|身份|为什么|幕后/.test(text)) modules.add("mainlineStructure");
+  return [...modules];
+}
+
+function uniqueList(items = []) {
+  return [...new Set(items.filter(Boolean))];
 }
 
 function episodeTitle(no) {

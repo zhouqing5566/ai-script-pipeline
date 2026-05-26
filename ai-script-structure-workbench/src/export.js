@@ -3,6 +3,7 @@ import { redactApiConfig, sanitizeForExport } from "./redaction.js";
 
 function line(value, fallback = "未填写") {
   if (Array.isArray(value)) return value.length ? value.join("、") : fallback;
+  if (value && typeof value === "object") return Object.entries(value).map(([key, val]) => `${key}: ${line(val)}`).join("；");
   if (value === null || value === undefined || value === "") return fallback;
   return String(value);
 }
@@ -50,6 +51,31 @@ export function exportAnalysisMarkdown(analysis) {
       ].join("\n")
     )
   );
+  if (analysis.coverage) {
+    parts.push(
+      section(
+        "输入完整度",
+        [
+          `- 输入类型：${line(analysis.coverage.inputType)}`,
+          `- 检测到集数：${line(analysis.coverage.detectedEpisodeCount)}`,
+          `- 用户填写集数：${line(analysis.coverage.userEpisodeCount)}`,
+          `- 覆盖比例：${Math.round((analysis.coverage.estimatedCoverageRatio || 0) * 100)}%`,
+          `- 可入库类型：${line(analysis.caseScope || analysis.coverage.allowedCaseScope)}`,
+          `- 警告：${line(analysis.coverage.warnings)}`
+        ].join("\n")
+      )
+    );
+  }
+  if (analysis.episodeBeatLedger?.length) {
+    parts.push(
+      section(
+        "剧情 Beat 账本",
+        analysis.episodeBeatLedger
+          .map((beat) => `### ${beat.beatId}\n- 原文：${line(beat.sourceText)}\n- 摘要：${line(beat.beatSummary)}\n- 结构功能：${line(beat.structureFunction)}\n- 可复用价值：${line(beat.reusableValue)}`)
+          .join("\n\n")
+      )
+    );
+  }
   parts.push(
     section(
       "开头钩子",
@@ -111,7 +137,10 @@ export function exportAnalysisMarkdown(analysis) {
     section(
       "可复用模式",
       analysis.reusablePatterns
-        .map((pattern) => `### ${pattern.title}\n- 类型：${pattern.patternType}\n- 为什么有效：${pattern.whyItWorks}\n- 使用风险：${line(pattern.risks)}`)
+        .map(
+          (pattern) =>
+            `### ${pattern.title}\n- 类型：${pattern.patternType}\n- 判断层级：${line(pattern.inferenceLevel)}\n- 来源证据：${line([...(pattern.sourceEvidenceIds || []), ...(pattern.sourceBeatIds || [])])}\n- 结构步骤：${line(pattern.structureSteps)}\n- 变量槽：${line(pattern.variableSlots)}\n- 情绪机制：${line(pattern.emotionalMechanism)}\n- 人物功能：${line(pattern.characterFunction)}\n- 剧情功能：${line(pattern.plotFunction)}\n- 复用 Prompt：${line(pattern.reusePrompt)}\n- 使用风险：${line(pattern.risks)}`
+        )
         .join("\n\n")
     )
   );

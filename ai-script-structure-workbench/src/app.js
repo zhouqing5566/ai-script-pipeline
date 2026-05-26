@@ -4,6 +4,7 @@ import { repairEpisode } from "./repair.js";
 import { auditDraft } from "./audit.js";
 import { loadRuntimeSettings, mergeRuntimeApiConfig, resetLocalState, syncRuntimeSettings, writeExport } from "./storage.js";
 import { parseScriptFile } from "./file-parser.js";
+import { normalizeRelationshipEdge } from "./analysis-normalizers.js";
 import {
   navItems,
   analysisTabs,
@@ -485,11 +486,13 @@ function readOpenInputs(baseState) {
   const scriptGenre = document.querySelector("#script-genre");
   const scriptEpisodeCount = document.querySelector("#script-episode-count");
   const scriptGranularity = document.querySelector("#script-granularity");
+  const userConfirmedFullScript = document.querySelector("#script-confirm-full");
   if (scriptTitle) state.scriptInput.title = scriptTitle.value;
   if (scriptText) state.scriptInput.text = scriptText.value;
   if (scriptGenre) state.scriptInput.genre = scriptGenre.value;
   if (scriptEpisodeCount) state.scriptInput.episodeCount = Number(scriptEpisodeCount.value) || 24;
   if (scriptGranularity) state.scriptInput.granularity = scriptGranularity.value;
+  if (userConfirmedFullScript) state.scriptInput.userConfirmedFullScript = userConfirmedFullScript.checked;
 
   const ideaText = document.querySelector("#idea-text");
   const projectTitle = document.querySelector("#project-title");
@@ -513,8 +516,8 @@ function saveCurrentAnalysisAsCase() {
     showToast("请先完成剧本分析");
     return;
   }
-  if (!canUseAnalysisForLearning(analysis)) {
-    showToast("该分析大量字段由本地规则补齐，不能用于案例库、模式资产或 Skill 沉淀。请重新分析或执行结构修复。");
+  if (!canSaveAnalysisAsCase(analysis)) {
+    showToast("该分析证据链或结构缺失较多，只能作为待复核草稿。请重新分析或执行结构修复。");
     return;
   }
   store.setState((state) => {
@@ -534,16 +537,17 @@ function saveCurrentAnalysisAsCase() {
       tags: ["结构分析", "可复用模式", analysis.basicInfo.format],
       status: analysis.sourceMeta?.needsReview ? "待复核" : "待审核",
       summary: analysis.basicInfo.coreAppeal,
+      caseScope: analysis.caseScope || analysis.coverage?.allowedCaseScope || "fragment_case",
       analysis
     };
     state.cases = [item, ...state.cases.filter((caseItem) => caseItem.id !== item.id)];
     return state;
   }, "保存分析结果到案例库", { targetType: "case", targetId: analysis.id, action: "generate" });
-  showToast("已加入案例库");
+  showToast(analysis.caseScope === "full_script" ? "已加入完整案例库" : "已按片段/开头/单集案例保存");
 }
 
-function canUseAnalysisForLearning(analysis) {
-  return Boolean(analysis) && !analysis.sourceMeta?.blockedSave && analysis.usableForLearning !== false;
+function canSaveAnalysisAsCase(analysis) {
+  return Boolean(analysis) && !analysis.sourceMeta?.blockedSave && analysis.sourceMeta?.usableForCaseSave !== false;
 }
 
 function lockSelected(key, summary) {
@@ -1255,12 +1259,14 @@ function renderAnalysis(state) {
       <div class="upload-row">
         <label class="file-button">${icon("upload")}上传 txt / md / docx<input id="script-file" type="file" accept=".txt,.md,.docx,.doc,.pdf" /></label>
         <span>已支持 .docx 正文解析；老式 .doc 和 PDF 会提示转换，避免乱码。</span>
+        <label class="inline-check"><input id="script-confirm-full" type="checkbox" ${input.userConfirmedFullScript ? "checked" : ""} />确认这是完整剧本</label>
       </div>
       <textarea id="script-text" class="large-textarea" spellcheck="false">${escapeHtml(input.text)}</textarea>
     </section>
     ${
       analysis
         ? `
+      ${renderCoverageSummary(analysis)}
       <section class="tabbar">
         ${analysisTabs.map(([id, label]) => `<button class="${state.activeAnalysisTab === id ? "active" : ""}" data-action="set-analysis-tab" data-id="${id}">${label}</button>`).join("")}
       </section>
@@ -1268,7 +1274,7 @@ function renderAnalysis(state) {
         ${renderAnalysisSourceAlert(analysis)}
         ${renderAnalysisTab(analysis, state.activeAnalysisTab)}
         <div class="panel-actions">
-          <button class="secondary-button" data-action="save-case">${icon("archive")}加入案例库</button>
+          <button class="secondary-button" data-action="save-case">${icon("archive")}${analysis.caseScope === "full_script" ? "加入完整案例库" : "按片段/开头/单集案例保存"}</button>
           <button class="secondary-button" data-action="export-analysis">${icon("download")}导出分析报告</button>
         </div>
       </section>`
@@ -1299,22 +1305,135 @@ function renderAnalysisSourceAlert(analysis) {
   `;
 }
 
+function renderCoverageSummary(analysis) {
+  const coverage = analysis.coverage || analysis.evidenceLedger?.coverage || {};
+  const certain = [
+    coverage.canAnalyzeOpening ? "开头钩子" : "",
+    coverage.canAnalyzeReusablePatterns ? "片段模式" : "",
+    coverage.canAnalyzeEpisodeFunctions ? "已输入分集功能" : ""
+  ].filter(Boolean);
+  const inferred = [
+    !coverage.canAnalyzeFullMainline ? "完整主线" : "",
+    !coverage.canAnalyzeEnding ? "结局兑现" : "",
+    !coverage.canAnalyzeFullMainline ? "全剧分集节奏" : ""
+  ].filter(Boolean);
+  return `
+    <section class="analysis-quality-strip">
+      <div>
+        <span>输入完整度</span>
+        <strong>${labelInputType(coverage.inputType)}</strong>
+        <p>${escapeHtml(coverage.coverageReason || "等待完整度检测。")}</p>
+      </div>
+      <div>
+        <span>集数检测</span>
+        <strong>${coverage.detectedEpisodeCount ?? 0} / ${coverage.userEpisodeCount ?? "未填"}</strong>
+        <p>覆盖比例 ${Math.round((coverage.estimatedCoverageRatio || 0) * 100)}%</p>
+      </div>
+      <div>
+        <span>可确定模块</span>
+        <strong>${certain.join("、") || "暂无"}</strong>
+        <p>仅可推断：${inferred.join("、") || "无"}</p>
+      </div>
+      <div>
+        <span>可入库类型</span>
+        <strong>${labelCaseScope(analysis.caseScope || coverage.allowedCaseScope)}</strong>
+        <p>${coverage.inputType === "full_script" ? "可作为完整剧本案例" : "不能进入完整主线骨架库"}</p>
+      </div>
+    </section>
+  `;
+}
+
+function renderAnalysisOverview(analysis) {
+  const coverage = analysis.coverage || {};
+  const evidenceCount = countEvidenceItems(analysis.evidenceLedger);
+  const beatCount = (analysis.episodeBeatLedger || []).length;
+  const missingEvidenceModules = findMissingEvidenceModules(analysis);
+  return `
+    <div class="score-strip">
+      ${scoreCard("钩子强度", analysis.hookAnalysis.hookStrengthScore)}
+      ${scoreCard("情绪需求", analysis.audienceNeedAnalysis.emotionalNeedScore)}
+      ${scoreCard("主题承载", analysis.themeAnalysis.themeStrengthScore)}
+      ${scoreCard("主线强度", analysis.mainlineStructure.mainlineStrengthScore)}
+    </div>
+    ${keyValueGrid([
+      ["输入类型", labelInputType(coverage.inputType)],
+      ["原文证据数量", evidenceCount],
+      ["剧情 Beat 数量", beatCount],
+      ["可确定分析模块", [coverage.canAnalyzeOpening ? "开头" : "", coverage.canAnalyzeEpisodeFunctions ? "已输入分集" : "", coverage.canAnalyzeReusablePatterns ? "片段模式" : ""].filter(Boolean).join("、") || "暂无"],
+      ["仅可推断模块", [!coverage.canAnalyzeFullMainline ? "完整主线" : "", !coverage.canAnalyzeEnding ? "结局" : ""].filter(Boolean).join("、") || "无"],
+      ["可入库类型", labelCaseScope(analysis.caseScope || coverage.allowedCaseScope)],
+      ["不可入库原因", coverage.inputType === "full_script" ? "无" : "当前输入不是完整剧本，不能保存为完整剧本案例或完整主线骨架资产。"],
+      ["本地补齐模块", analysis.sourceMeta?.localFallbackSections?.join("、") || "无"],
+      ["模型完整度", analysis.sourceMeta?.modelCompletenessScore !== undefined ? `${analysis.sourceMeta.modelCompletenessScore}%` : "未记录"],
+      ["sourceText 校验", analysis.sourceMeta?.evidenceValidation ? `${analysis.sourceMeta.evidenceValidation.validCount}/${analysis.sourceMeta.evidenceValidation.checkedCount} 有效` : "未记录"],
+      ["无效证据比例", analysis.sourceMeta?.evidenceValidation ? `${Math.round((analysis.sourceMeta.evidenceValidation.invalidEvidenceRatio || 0) * 100)}%` : "未记录"],
+      ["是否可用于学习沉淀", analysis.sourceMeta?.usableForSkillLearning ? "可用于完整 Skill 沉淀" : "仅可用于片段/钩子/爽点模式参考"],
+      ["缺失证据模块", missingEvidenceModules.join("、") || "无"]
+    ])}
+  `;
+}
+
+function renderEvidenceLedger(ledger = {}) {
+  const items = [
+    ...(ledger.hookEvidence || []),
+    ...(ledger.goldfingerEvidence || []),
+    ...(ledger.suspenseEvidence || []),
+    ...(ledger.endingEvidence || []),
+    ...(ledger.conflictBeats || [])
+  ];
+  if (!items.length) return emptyState("暂无证据账本", "模型或本地规则未能从原文中抽取到可审计证据。");
+  return `
+    <div class="ledger-list">
+      ${items
+        .map(
+          (item) => `
+        <article class="ledger-row">
+          <div><strong>${escapeHtml(item.id)}</strong><span>${escapeHtml(item.evidenceType || "evidence")}</span>${item.invalidSourceText ? "<em>原文未命中，需复核</em>" : ""}</div>
+          <blockquote>${escapeHtml(item.sourceText || "")}</blockquote>
+          ${keyValueGrid([
+            ["证据说明", item.summary],
+            ["相关人物", item.relatedCharacters],
+            ["关联 Beat", item.relatedBeatIds],
+            ["信心", Math.round((item.confidence || 0) * 100) + "%"]
+          ])}
+        </article>`
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderBeatLedger(beats = []) {
+  if (!beats.length) return emptyState("暂无 Beat 账本", "没有抽取到逐剧情 beat。");
+  return `
+    <div class="ledger-list">
+      ${beats
+        .map(
+          (beat) => `
+        <article class="ledger-row beat">
+          <div><strong>${escapeHtml(beat.beatId)}</strong><span>第 ${beat.episodeNo ?? "?"} 集 / 场 ${beat.sceneNo ?? "?"}</span>${beat.invalidSourceText ? "<em>原文未命中，需复核</em>" : ""}</div>
+          <blockquote>${escapeHtml(beat.sourceText || "")}</blockquote>
+          ${keyValueGrid([
+            ["Beat 摘要", beat.beatSummary],
+            ["观众情绪", beat.audienceEmotion],
+            ["悬念问题", beat.suspenseQuestion],
+            ["结构功能", beat.structureFunction],
+            ["可复用价值", beat.reusableValue],
+            ["关联模块", beat.relatedModules],
+            ["信心", Math.round((beat.confidence || 0) * 100) + "%"]
+          ])}
+        </article>`
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 function renderAnalysisTab(analysis, tab) {
   const map = {
-    overview: () => `
-      <div class="score-strip">
-        ${scoreCard("钩子强度", analysis.hookAnalysis.hookStrengthScore)}
-        ${scoreCard("情绪需求", analysis.audienceNeedAnalysis.emotionalNeedScore)}
-        ${scoreCard("主题承载", analysis.themeAnalysis.themeStrengthScore)}
-        ${scoreCard("主线强度", analysis.mainlineStructure.mainlineStrengthScore)}
-      </div>
-      ${keyValueGrid([
-        ["题材", analysis.basicInfo.genre.join("、")],
-        ["目标用户", analysis.basicInfo.targetAudience],
-        ["核心看点", analysis.basicInfo.coreAppeal],
-        ["商业定位", analysis.basicInfo.commercialPositioning],
-        ["结构信心", `${Math.round(analysis.confidence * 100)}%`]
-      ])}`,
+    overview: () => renderAnalysisOverview(analysis),
+    evidence: () => renderEvidenceLedger(analysis.evidenceLedger),
+    beats: () => renderBeatLedger(analysis.episodeBeatLedger || []),
     hook: () => renderObjectSection("开头钩子分析", analysis.hookAnalysis),
     emotion: () => renderObjectSection("观众情绪需求分析", analysis.audienceNeedAnalysis),
     theme: () => renderObjectSection("主题层分析", analysis.themeAnalysis),
@@ -1324,7 +1443,11 @@ function renderAnalysisTab(analysis, tab) {
         ${[analysis.characterAnalysis.protagonist, ...analysis.characterAnalysis.mainCharacters].map(renderCharacterCard).join("")}
       </div>
       <h3>关系边</h3>
-      ${analysis.characterAnalysis.relationshipEdges.map((edge) => `<div class="relation-row"><strong>${edge.from} → ${edge.to}</strong><span>${edge.relationshipShift}</span><span>${edge.themeFunction}</span></div>`).join("")}`,
+      ${(analysis.characterAnalysis.relationshipEdges || [])
+        .map(normalizeRelationshipEdge)
+        .filter(Boolean)
+        .map((edge) => `<div class="relation-row"><strong>${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</strong><span>${escapeHtml(edge.relationshipShift || edge.conflict || "关系变化需复核")}</span><span>${escapeHtml(edge.themeFunction || "主题功能需复核")}</span></div>`)
+        .join("") || "<p class='muted'>暂无可确认的人物关系边。</p>"}`,
     goldfinger: () => `${renderObjectSection("金手指分析", analysis.goldfingerAnalysis)}${renderObjectSection("阻碍系统", analysis.obstacleAnalysis)}`,
     mainline: () => `
       ${renderObjectSection("主线骨架", analysis.mainlineStructure, ["stageStructure"])}
@@ -1896,6 +2019,34 @@ function renderSecurityNotes() {
 function renderInspector(state) {
   const project = state.currentProject;
   const selected = project.episodeOutline.find((item) => item.episodeNo === state.selectedEpisodeNo);
+  if (state.view === "analysis") {
+    return `
+      <div class="inspector-section">
+        <h2>锁定状态</h2>
+        <div class="lock-list">
+          ${lockItems
+            .map(
+              ([key, label]) => `
+          <div class="${project.locks[key] ? "locked" : ""}">
+            <span>${project.locks[key] ? icon("lock") : icon("unlock")}</span>
+            <strong>${label}</strong>
+          </div>`
+            )
+            .join("")}
+        </div>
+      </div>
+      ${renderAnalysisQualityPanel(state.currentAnalysis)}
+      <div class="inspector-section">
+        <h2>版本记录</h2>
+        <div class="version-list">
+          ${(project.versions || [])
+            .slice(0, 8)
+            .map((version) => `<div><strong>${version.changeSummary}</strong><span>${formatDate(version.createdAt)}｜${version.action}</span></div>`)
+            .join("")}
+        </div>
+      </div>
+    `;
+  }
   return `
     <div class="inspector-section">
       <h2>锁定状态</h2>
@@ -1958,9 +2109,56 @@ function renderRiskList(project) {
     .join("");
 }
 
+function renderAnalysisQualityPanel(analysis) {
+  if (!analysis) {
+    return `
+      <div class="inspector-section">
+        <h2>分析质量面板</h2>
+        <p class="muted">完成剧本分析后，这里会显示输入完整度、证据覆盖和可入库范围。</p>
+      </div>
+    `;
+  }
+  const coverage = analysis.coverage || {};
+  const evidenceCount = countEvidenceItems(analysis.evidenceLedger);
+  const beatCount = (analysis.episodeBeatLedger || []).length;
+  const missingModules = findMissingEvidenceModules(analysis);
+  const canSave = !analysis.sourceMeta?.blockedSave;
+  return `
+    <div class="inspector-section">
+      <h2>分析质量面板</h2>
+      <div class="quality-list">
+        <div><span>输入类型</span><strong>${labelInputType(coverage.inputType)}</strong></div>
+        <div><span>集数覆盖</span><strong>${coverage.detectedEpisodeCount ?? 0} / ${coverage.userEpisodeCount ?? "未填"}</strong></div>
+        <div><span>覆盖比例</span><strong>${Math.round((coverage.estimatedCoverageRatio || 0) * 100)}%</strong></div>
+        <div><span>证据 / Beat</span><strong>${evidenceCount} / ${beatCount}</strong></div>
+        <div><span>sourceText 校验</span><strong>${analysis.sourceMeta?.evidenceValidation ? `${analysis.sourceMeta.evidenceValidation.validCount}/${analysis.sourceMeta.evidenceValidation.checkedCount}` : "未记录"}</strong></div>
+        <div><span>无效证据比例</span><strong>${analysis.sourceMeta?.evidenceValidation ? `${Math.round((analysis.sourceMeta.evidenceValidation.invalidEvidenceRatio || 0) * 100)}%` : "未记录"}</strong></div>
+        <div><span>无效 evidence/beat</span><strong>${analysis.sourceMeta?.evidenceValidation ? `${analysis.sourceMeta.evidenceValidation.invalidEvidenceIds.length}/${analysis.sourceMeta.evidenceValidation.invalidBeatIds.length}` : "未记录"}</strong></div>
+        <div><span>模型结构完整度</span><strong>${analysis.sourceMeta?.modelCompletenessScore !== undefined ? `${analysis.sourceMeta.modelCompletenessScore}%` : "未记录"}</strong></div>
+        <div><span>本地补齐模块</span><strong>${formatValue(analysis.sourceMeta?.localFallbackSections || [])}</strong></div>
+        <div><span>blockedSave</span><strong>${analysis.sourceMeta?.blockedSave ? "是" : "否"}</strong></div>
+        <div><span>needsReview</span><strong>${analysis.sourceMeta?.needsReview || analysis.needsReview ? "是" : "否"}</strong></div>
+        <div><span>usableForLearning</span><strong>${analysis.sourceMeta?.usableForLearning === false ? "否" : "是"}</strong></div>
+        <div><span>可入库类型</span><strong>${labelCaseScope(analysis.caseScope || coverage.allowedCaseScope)}</strong></div>
+        <div><span>可否入库</span><strong>${canSave ? "可按范围保存" : "仅待复核草稿"}</strong></div>
+        <div><span>Skill 沉淀</span><strong>${analysis.sourceMeta?.usableForSkillLearning ? "可用于完整 Skill" : "仅片段模式参考"}</strong></div>
+      </div>
+      <div class="warning-list">
+        ${missingModules.length ? `<p>缺失证据模块：${escapeHtml(missingModules.join("、"))}</p>` : "<p>核心模块均有证据或 Beat 引用。</p>"}
+        ${(coverage.warnings || []).slice(0, 3).map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}
+      </div>
+      <div class="inspector-actions">
+        <button class="small-button" data-action="analyze-script">重新分析</button>
+        <button class="small-button" data-action="save-case">按当前范围保存</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderObjectSection(title, object, skip = []) {
   return `
     <h2>${title}</h2>
+    ${object?.inferenceLevel ? `<div class="inference-row"><span>${escapeHtml(object.inferenceLevel)}</span><strong>信心 ${Math.round((object.confidence || 0) * 100)}%</strong>${object.needsReview ? "<em>缺少证据，需复核</em>" : ""}</div>` : ""}
     <div class="kv-grid">
       ${Object.entries(object)
         .filter(([key]) => !skip.includes(key))
@@ -2019,7 +2217,23 @@ function renderEpisodeFunctionRow(episode) {
 }
 
 function renderPatternCard(pattern) {
-  return `<article class="info-card"><h3>${pattern.title}<span>${pattern.patternType}</span></h3><p>${pattern.description}</p><dl><dt>为什么有效</dt><dd>${pattern.whyItWorks}</dd><dt>风险</dt><dd>${formatValue(pattern.risks)}</dd></dl></article>`;
+  return `
+    <article class="info-card pattern-card">
+      <h3>${escapeHtml(pattern.title)}<span>${escapeHtml(pattern.patternType)}</span></h3>
+      <p>${escapeHtml(pattern.description || "")}</p>
+      <dl>
+        <dt>结构步骤</dt><dd>${formatValue(pattern.structureSteps)}</dd>
+        <dt>变量槽</dt><dd>${formatValue(pattern.variableSlots)}</dd>
+        <dt>情绪机制</dt><dd>${formatValue(pattern.emotionalMechanism)}</dd>
+        <dt>人物功能</dt><dd>${formatValue(pattern.characterFunction)}</dd>
+        <dt>剧情功能</dt><dd>${formatValue(pattern.plotFunction)}</dd>
+        <dt>风险</dt><dd>${formatValue(pattern.risks)}</dd>
+        <dt>反模式</dt><dd>${formatValue(pattern.antiPatterns)}</dd>
+        <dt>复用 Prompt</dt><dd>${formatValue(pattern.reusePrompt)}</dd>
+        <dt>来源证据</dt><dd>${formatValue([...(pattern.sourceEvidenceIds || []), ...(pattern.sourceBeatIds || [])])}</dd>
+      </dl>
+    </article>
+  `;
 }
 
 function renderCaseItem(item) {
@@ -2499,6 +2713,59 @@ function parseCsv(value) {
     .split(/[,，、\n]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function labelInputType(value) {
+  const labels = {
+    full_script: "完整剧本",
+    partial_script: "部分剧本",
+    single_episode: "单集文本",
+    synopsis: "剧情梗概",
+    outline: "大纲",
+    fragment: "片段",
+    unknown: "未知"
+  };
+  return labels[value] || labels.unknown;
+}
+
+function labelCaseScope(value) {
+  const labels = {
+    full_script: "完整剧本案例",
+    opening_case: "开头案例",
+    episode_case: "单集/局部案例",
+    fragment_case: "片段案例"
+  };
+  return labels[value] || "待判断";
+}
+
+function countEvidenceItems(ledger = {}) {
+  return [
+    ...(ledger.hookEvidence || []),
+    ...(ledger.goldfingerEvidence || []),
+    ...(ledger.suspenseEvidence || []),
+    ...(ledger.endingEvidence || []),
+    ...(ledger.conflictBeats || [])
+  ].length;
+}
+
+function findMissingEvidenceModules(analysis = {}) {
+  const modules = [
+    ["hookAnalysis", "开头钩子"],
+    ["audienceNeedAnalysis", "情绪需求"],
+    ["themeAnalysis", "主题"],
+    ["characterAnalysis", "人物"],
+    ["goldfingerAnalysis", "金手指"],
+    ["obstacleAnalysis", "阻碍"],
+    ["mainlineStructure", "主线骨架"],
+    ["mainlineReversalAnalysis", "大反差"],
+    ["endingAnalysis", "结局"]
+  ];
+  return modules
+    .filter(([key]) => {
+      const item = analysis[key] || {};
+      return !(item.evidenceIds || []).length && !(item.evidenceBeatIds || []).length;
+    })
+    .map(([, label]) => label);
 }
 
 function formatValue(value) {
