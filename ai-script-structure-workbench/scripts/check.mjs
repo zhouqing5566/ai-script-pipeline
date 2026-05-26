@@ -252,6 +252,8 @@ assert.equal(apiSuccessResult.mode, "api");
 assert.equal(apiSuccessResult.endpointType, "server_proxy");
 assert.equal(apiSuccessResult.requestFormat, "openai_chat");
 assert.equal(apiSuccessResult.log.serverProxy, true);
+assert.equal(apiSuccessResult.usableForLearning, true);
+assert.equal(apiSuccessResult.usableForProduction, true);
 assert.equal(proxyCalls.length, 1);
 assert.equal(proxyCalls[0].requestFormat, "openai_chat");
 assert.equal(proxyCalls[0].providerId, "provider-openai-compatible-template");

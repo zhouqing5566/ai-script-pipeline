@@ -229,8 +229,8 @@ export async function callModel({
     apiModeDemoFallback,
     needsReview: Boolean(schemaMeta?.needsReview),
     blockedSave: Boolean(schemaMeta?.blockedSave),
-    usableForLearning: schemaMeta ? Boolean(schemaMeta.usableForLearning) : true,
-    usableForProduction: schemaMeta ? Boolean(schemaMeta.usableForProduction) : true,
+    usableForLearning: schemaMeta?.usableForLearning !== false,
+    usableForProduction: schemaMeta?.usableForProduction !== false,
     modelCompletenessScore: schemaMeta?.modelCompletenessScore ?? null,
     autoFilledFields: schemaMeta?.autoFilledFields || [],
     autoFilledSections: schemaMeta?.autoFilledSections || [],
@@ -570,7 +570,16 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
   }
 
   if (taskType !== "analyzeScript") {
-    return { value: unwrapped.value, warnings, meta: { unwrapped: unwrapped.changed, unwrapPath: unwrapped.unwrapPath } };
+    return {
+      value: unwrapped.value,
+      warnings,
+      meta: {
+        unwrapped: unwrapped.changed,
+        unwrapPath: unwrapped.unwrapPath,
+        usableForLearning: true,
+        usableForProduction: true
+      }
+    };
   }
 
   const shape = validateTaskOutput(taskType, unwrapped.value);
@@ -591,7 +600,7 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
 
 function unwrapTaskPayload(value, taskType) {
   if (!isPlainObject(value)) return { value, changed: false, wrapperKey: null, unwrapPath: [] };
-  const wrapperKeys = taskType === "analyzeScript" ? ["scriptAnalysis", "analysis", "result", "data", "output"] : ["result", "data", "output"];
+  const wrapperKeys = taskType === "analyzeScript" ? ["scriptAnalysis", "analysis", "result", "data", "output", "payload", "content"] : ["result", "data", "output", "payload", "content"];
   let current = value;
   const unwrapPath = [];
   for (let depth = 0; depth < 5 && isPlainObject(current); depth += 1) {
@@ -616,7 +625,7 @@ function hasAnalyzeCoreField(value) {
 }
 
 function isWrapperPayload(value, wrapperKey) {
-  const auxiliaryKeys = new Set(["meta", "status", "message", "error", "errors", "ok", "success", "title", "name"]);
+  const auxiliaryKeys = new Set(["meta", "status", "message", "msg", "error", "errors", "ok", "success", "title", "name", "code", "requestId", "traceId", "usage", "model", "created", "id", "choices"]);
   return Object.keys(value).every((key) => key === wrapperKey || auxiliaryKeys.has(key));
 }
 
