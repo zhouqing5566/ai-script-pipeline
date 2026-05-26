@@ -8,8 +8,10 @@ import { normalizeRelationshipEdge } from "./analysis-normalizers.js";
 import { detectScriptCoverage } from "./script-coverage.js";
 import {
   aggregateScriptAnalysis,
+  applyLongScriptGateFlags,
   createEpisodeChunkInput,
   createLongAnalysisProgress,
+  getChunkKey,
   prepareLongScriptChunks,
   shouldUseLongScriptAnalysis
 } from "./long-script-analysis.js";
@@ -466,17 +468,26 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   let current = initialState || commitOpenInputsBeforeAction(retryFailedOnly ? "重试失败分集" : "长剧本分集分析");
   const input = current.scriptInput;
   const currentCoverage = coverage || detectScriptCoverage(input.text, input.episodeCount, { userConfirmedFullScript: input.userConfirmedFullScript });
-  const split = prepareLongScriptChunks(input);
-  let chunks = split.episodes || [];
+  const split = prepareLongScriptChunks(input, currentCoverage);
+  const allChunks = split.episodes || [];
+  const previousProgress = current.longScriptAnalysisProgress || {};
+  const previousResults = retryFailedOnly ? { ...(previousProgress.chunkResults || {}) } : {};
+  let chunks = allChunks;
   if (retryFailedOnly) {
-    const failedNos = new Set((current.longScriptAnalysisProgress?.failedChunks || []).map((item) => item.episodeNo));
-    chunks = chunks.filter((chunk) => failedNos.has(chunk.episodeNo));
-    if (!chunks.length) chunks = split.episodes || [];
+    const failedKeys = new Set((previousProgress.failedChunks || []).map((item) => item.chunkKey).filter(Boolean));
+    const failedNos = new Set((previousProgress.failedChunks || []).map((item) => item.episodeNo).filter(Boolean));
+    chunks = allChunks.filter((chunk) => failedKeys.has(getChunkKey(chunk)) || failedNos.has(chunk.episodeNo));
+    if (!chunks.length) chunks = allChunks;
   }
-  const progress = createLongAnalysisProgress(chunks);
+  const progress = createLongAnalysisProgress(allChunks, split);
   progress.steps[1].status = "成功";
   progress.currentStep = retryFailedOnly ? "重试失败分集" : "剧本切分";
   progress.warnings = split.warnings || [];
+  progress.chunkResults = previousResults;
+  progress.chunks = (progress.chunks || []).map((item) => {
+    if (previousResults[item.chunkKey]) return { ...item, status: "成功", error: "" };
+    return item;
+  });
   busyAction = "长剧本分析";
   store.setState((state) => {
     state.longScriptAnalysisProgress = progress;
@@ -484,10 +495,12 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   }, retryFailedOnly ? "重试失败分集分析" : "开始长剧本分集分析", { targetType: "analysis", action: "generate", light: true });
   render();
 
-  const episodeChunkAnalyses = [];
   const failedChunks = [];
+  const missingChunks = split.missingChunks || [];
+  const chunkResults = { ...previousResults };
   const logs = [];
   for (const chunk of chunks) {
+    const chunkKey = getChunkKey(chunk);
     updateLongProgress((draft) => {
       draft.currentStep = `第 ${chunk.episodeNo || "?"} 集分析中`;
       markChunkStatus(draft, chunk, "分析中", "");
@@ -509,12 +522,14 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       });
       logs.unshift(result.log);
       if (!result.success) throw Object.assign(new Error(result.error || "分集分析失败"), { result });
-      episodeChunkAnalyses.push(result.parsedJson || result.outputText);
+      chunkResults[chunkKey] = result.parsedJson || result.outputText;
       updateLongProgress((draft) => {
+        draft.chunkResults = { ...(draft.chunkResults || {}), [chunkKey]: chunkResults[chunkKey] };
         markChunkStatus(draft, chunk, "成功", "");
       });
     } catch (error) {
       const failed = {
+        chunkKey,
         episodeNo: chunk.episodeNo,
         title: chunk.title,
         detectedBy: chunk.detectedBy,
@@ -528,11 +543,16 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       });
     }
   }
+  const episodeChunkAnalyses = Object.values(chunkResults)
+    .filter(Boolean)
+    .sort((a, b) => (Number(a.episodeNo) || 0) - (Number(b.episodeNo) || 0));
 
   updateLongProgress((draft) => {
     draft.currentStep = "全剧结构聚合";
     draft.steps[2].status = "分析中";
     draft.failedChunks = failedChunks;
+    draft.missingChunks = missingChunks;
+    draft.chunkResults = chunkResults;
   });
   let finalAnalysis = null;
   let aggregateLog = null;
@@ -549,7 +569,10 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     allOpenQuestions: episodeChunkAnalyses.flatMap((item) => item.openQuestions || []),
     allReusablePatterns: episodeChunkAnalyses.flatMap((item) => item.reusablePatterns || []),
     allCharacterMentions: episodeChunkAnalyses.flatMap((item) => item.characterMentions || []),
-    failedChunks
+    failedChunks,
+    missingChunks,
+    expectedChunkCount: split.expectedChunkCount || allChunks.length,
+    detectedChunkCount: split.detectedChunkCount || allChunks.length
   };
   try {
     const aggregateResult = await callModel({
@@ -567,15 +590,19 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     finalAnalysis.caseScope = finalAnalysis.caseScope || currentCoverage.allowedCaseScope || "full_script";
     finalAnalysis.sourceMeta ||= {};
     finalAnalysis.sourceMeta.chunkedAnalysis = true;
-    finalAnalysis.sourceMeta.chunkCount = episodeChunkAnalyses.length + failedChunks.length;
+    finalAnalysis.sourceMeta.chunkCount = split.expectedChunkCount || episodeChunkAnalyses.length + failedChunks.length + missingChunks.length;
+    finalAnalysis.sourceMeta.expectedChunks = split.expectedChunkCount || finalAnalysis.sourceMeta.chunkCount;
+    finalAnalysis.sourceMeta.detectedChunks = split.detectedChunkCount || allChunks.length;
     finalAnalysis.sourceMeta.successfulChunks = episodeChunkAnalyses.length;
     finalAnalysis.sourceMeta.failedChunks = failedChunks;
-    if (failedChunks.length) {
-      finalAnalysis.sourceMeta.needsReview = true;
-      finalAnalysis.sourceMeta.usableForSkillLearning = false;
-      finalAnalysis.sourceMeta.usableForLearning = false;
-      finalAnalysis.usableForLearning = false;
-    }
+    finalAnalysis.sourceMeta.missingChunks = missingChunks;
+    finalAnalysis.sourceMeta.participatingChunks = episodeChunkAnalyses.length;
+    finalAnalysis.sourceMeta.completeAggregation = failedChunks.length === 0 && missingChunks.length === 0;
+    finalAnalysis.sourceMeta.warnings = [
+      ...(finalAnalysis.sourceMeta.warnings || []),
+      missingChunks.length ? `仅切出 ${allChunks.length}/${split.expectedChunkCount || allChunks.length} 个分集/chunk，不能视为完整剧本分析完成。` : ""
+    ].filter(Boolean);
+    applyLongScriptGateFlags(finalAnalysis);
   } catch (error) {
     failedChunks.push({ episodeNo: null, title: "全剧结构聚合", detectedBy: "aggregate", error: error.message || "全剧聚合失败" });
     if (error.log) aggregateLog = error.log;
@@ -585,6 +612,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     finalAnalysis.sourceMeta.usableForSkillLearning = false;
     finalAnalysis.sourceMeta.usableForLearning = false;
     finalAnalysis.sourceMeta.warnings = [...(finalAnalysis.sourceMeta.warnings || []), `全剧聚合模型失败，已使用本地合并兜底：${error.message || "未知错误"}`];
+    applyLongScriptGateFlags(finalAnalysis);
   }
 
   updateLongProgress((draft) => {
@@ -592,6 +620,8 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     draft.steps[2].status = aggregateLog?.success === false ? "失败" : "成功";
     draft.steps[3].status = "成功";
     draft.failedChunks = failedChunks;
+    draft.missingChunks = missingChunks;
+    draft.chunkResults = chunkResults;
     draft.active = false;
   });
   busyAction = null;
@@ -605,11 +635,13 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       ...(state.longScriptAnalysisProgress || progress),
       active: false,
       currentStep: "完成",
-      failedChunks
+      failedChunks,
+      missingChunks,
+      chunkResults
     };
     return state;
   }, failedChunks.length ? "完成长剧本分集分析（需复核失败分集）" : "完成长剧本分集分析", { targetType: "analysis", action: "generate" });
-  showToast(failedChunks.length ? `长剧本分析完成，但有 ${failedChunks.length} 个失败 chunk，需复核或重试。` : "完成长剧本分集分析");
+  showToast(failedChunks.length || missingChunks.length ? `长剧本分析完成，但有 ${failedChunks.length} 个失败 chunk、${missingChunks.length} 个缺失分集，需复核。` : "完成长剧本分集分析");
 }
 
 function updateLongProgress(mutator) {
@@ -735,7 +767,8 @@ function saveCurrentAnalysisAsCase() {
     state.cases = [item, ...state.cases.filter((caseItem) => caseItem.id !== item.id)];
     return state;
   }, "保存分析结果到案例库", { targetType: "case", targetId: analysis.id, action: "generate" });
-  showToast(analysis.caseScope === "full_script" ? "已加入完整案例库" : "已按片段/开头/单集案例保存");
+  const isFormalFullCase = analysis.caseScope === "full_script" && analysis.sourceMeta?.usableForFullScriptCase !== false && !analysis.sourceMeta?.needsReview;
+  showToast(isFormalFullCase ? "已加入完整案例库" : "已保存为待复核案例草稿，暂不进入完整主线或 Skill 沉淀");
 }
 
 function canSaveAnalysisAsCase(analysis) {
@@ -1521,6 +1554,18 @@ function renderLongScriptProgress(progress) {
         ${(progress.steps || []).map((step) => `<span class="status-pill ${statusClass(step.status)}">${escapeHtml(step.label)}｜${escapeHtml(step.status)}</span>`).join("")}
       </div>
       <p class="muted">当前步骤：${escapeHtml(progress.currentStep || "待分析")}</p>
+      <div class="long-progress-summary">
+        <span>声明/预期：${progress.expectedChunkCount || (progress.chunks || []).length}</span>
+        <span>系统切出：${progress.detectedChunkCount || (progress.chunks || []).length}</span>
+        <span>成功分析：${Object.keys(progress.chunkResults || {}).length}</span>
+        <span>失败：${(progress.failedChunks || []).length}</span>
+        <span>缺失：${(progress.missingChunks || []).length}</span>
+      </div>
+      ${
+        (progress.missingChunks || []).length
+          ? `<div class="warning-list"><p>仅切出 ${(progress.chunks || []).length}/${progress.expectedChunkCount || (progress.chunks || []).length} 集，不能视为完整剧本分析完成。</p></div>`
+          : ""
+      }
       <div class="chunk-progress-list">
         ${(progress.chunks || [])
           .map(
@@ -1619,7 +1664,10 @@ function renderAnalysisOverview(analysis) {
       ["sourceText 校验", analysis.sourceMeta?.evidenceValidation ? `${analysis.sourceMeta.evidenceValidation.validCount}/${analysis.sourceMeta.evidenceValidation.checkedCount} 有效` : "未记录"],
       ["无效证据比例", analysis.sourceMeta?.evidenceValidation ? `${Math.round((analysis.sourceMeta.evidenceValidation.invalidEvidenceRatio || 0) * 100)}%` : "未记录"],
       ["分集分析流程", analysis.sourceMeta?.chunkedAnalysis ? `是，chunk ${analysis.sourceMeta.chunkCount || 0}` : "否"],
+      ["预期 / 切出 / 参与聚合", analysis.sourceMeta?.chunkedAnalysis ? `${analysis.sourceMeta.expectedChunks || analysis.sourceMeta.chunkCount || 0} / ${analysis.sourceMeta.detectedChunks || 0} / ${analysis.sourceMeta.participatingChunks || 0}` : "未启用"],
       ["失败 chunk", analysis.sourceMeta?.failedChunks?.length ? analysis.sourceMeta.failedChunks.map((item) => item.title || item.episodeNo).join("、") : "无"],
+      ["缺失分集", analysis.sourceMeta?.missingChunks?.length ? `${analysis.sourceMeta.missingChunks.length} 个` : "无"],
+      ["完整聚合", analysis.sourceMeta?.chunkedAnalysis ? (analysis.sourceMeta.completeAggregation ? "是" : "否") : "未启用"],
       ["是否可用于学习沉淀", analysis.sourceMeta?.usableForSkillLearning ? "可用于完整 Skill 沉淀" : "仅可用于片段/钩子/爽点模式参考"],
       ["缺失证据模块", missingEvidenceModules.join("、") || "无"]
     ])}
@@ -2392,7 +2440,13 @@ function renderAnalysisQualityPanel(analysis) {
         <div><span>覆盖比例估算</span><strong>${Math.round((coverage.estimatedCoverageRatio || 0) * 100)}%</strong></div>
         <div><span>证据 / Beat</span><strong>${evidenceCount} / ${beatCount}</strong></div>
         <div><span>长剧本分集流程</span><strong>${analysis.sourceMeta?.chunkedAnalysis ? `是｜${analysis.sourceMeta.chunkCount || 0} 个 chunk` : "否"}</strong></div>
+        <div><span>声明/预期 chunk</span><strong>${analysis.sourceMeta?.expectedChunks || analysis.sourceMeta?.chunkCount || 0}</strong></div>
+        <div><span>系统切出 chunk</span><strong>${analysis.sourceMeta?.detectedChunks || 0}</strong></div>
+        <div><span>成功分析 chunk</span><strong>${analysis.sourceMeta?.successfulChunks || 0}</strong></div>
+        <div><span>参与聚合 chunk</span><strong>${analysis.sourceMeta?.participatingChunks || 0}</strong></div>
         <div><span>失败 chunk</span><strong>${analysis.sourceMeta?.failedChunks?.length || 0}</strong></div>
+        <div><span>缺失分集/chunk</span><strong>${analysis.sourceMeta?.missingChunks?.length || 0}</strong></div>
+        <div><span>完整聚合</span><strong>${analysis.sourceMeta?.completeAggregation ? "是" : "否"}</strong></div>
         <div><span>sourceText 校验</span><strong>${analysis.sourceMeta?.evidenceValidation ? `${analysis.sourceMeta.evidenceValidation.validCount}/${analysis.sourceMeta.evidenceValidation.checkedCount}` : "未记录"}</strong></div>
         <div><span>无效证据比例</span><strong>${analysis.sourceMeta?.evidenceValidation ? `${Math.round((analysis.sourceMeta.evidenceValidation.invalidEvidenceRatio || 0) * 100)}%` : "未记录"}</strong></div>
         <div><span>无效 evidence/beat</span><strong>${analysis.sourceMeta?.evidenceValidation ? `${analysis.sourceMeta.evidenceValidation.invalidEvidenceIds.length}/${analysis.sourceMeta.evidenceValidation.invalidBeatIds.length}` : "未记录"}</strong></div>

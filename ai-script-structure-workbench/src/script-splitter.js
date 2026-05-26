@@ -58,14 +58,16 @@ export function splitScriptIntoEpisodes(scriptText = "") {
       text: text.slice(startOffset, endOffset).trim(),
       startOffset,
       endOffset,
-      detectedBy: match.detectedBy
+      detectedBy: match.detectedBy,
+      needsReview: match.detectedBy === "heading"
     };
   });
+  const hasHeadingSplit = episodes.some((episode) => episode.detectedBy === "heading");
 
   return {
     episodes,
     detectedEpisodeCount: new Set(episodes.map((item) => item.episodeNo)).size,
-    warnings: []
+    warnings: hasHeadingSplit ? ["检测到“一、xxx”类标题切分，属于启发式分集边界，需人工复核。"] : []
   };
 }
 

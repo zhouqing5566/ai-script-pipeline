@@ -20,18 +20,23 @@ export function shouldUseLongScriptAnalysis(input = {}, coverage = null) {
   );
 }
 
-export function prepareLongScriptChunks(input = {}) {
+export function prepareLongScriptChunks(input = {}, coverage = null) {
   const text = String(input.text || "");
+  const currentCoverage = coverage || detectScriptCoverage(text, input.episodeCount, { userConfirmedFullScript: input.userConfirmedFullScript });
   const split = splitScriptIntoEpisodes(text);
-  if ((split.detectedEpisodeCount || 0) >= 2) return split;
-  if (text.length > LONG_SCRIPT_CHAR_LIMIT) return splitScriptIntoChunks(text, LONG_SCRIPT_CHAR_LIMIT);
-  return split;
+  const base = (split.detectedEpisodeCount || 0) >= 2 ? split : text.length > LONG_SCRIPT_CHAR_LIMIT ? splitScriptIntoChunks(text, LONG_SCRIPT_CHAR_LIMIT) : split;
+  return annotateChunkExpectations(base, input, currentCoverage);
 }
 
-export function createLongAnalysisProgress(chunks = []) {
+export function createLongAnalysisProgress(chunks = [], meta = {}) {
+  const missingChunks = Array.isArray(meta.missingChunks) ? meta.missingChunks : [];
   return {
     active: true,
     currentStep: "覆盖检测",
+    expectedChunkCount: meta.expectedChunkCount || chunks.length,
+    detectedChunkCount: meta.detectedChunkCount || chunks.length,
+    missingChunks,
+    chunkResults: {},
     steps: [
       { id: "coverage", label: "覆盖检测", status: "成功" },
       { id: "split", label: "剧本切分", status: "待分析" },
@@ -39,6 +44,7 @@ export function createLongAnalysisProgress(chunks = []) {
       { id: "evidence", label: "证据校验", status: "待分析" }
     ],
     chunks: chunks.map((chunk) => ({
+      chunkKey: getChunkKey(chunk),
       episodeNo: chunk.episodeNo,
       title: chunk.title,
       detectedBy: chunk.detectedBy,
@@ -128,6 +134,7 @@ export function aggregateScriptAnalysis(input = {}) {
   const coverage = input.coverage || detectScriptCoverage(originalInput.text || "", originalInput.episodeCount, { userConfirmedFullScript: originalInput.userConfirmedFullScript });
   const chunks = Array.isArray(input.episodeChunkAnalyses) ? input.episodeChunkAnalyses : [];
   const failedChunks = Array.isArray(input.failedChunks) ? input.failedChunks : [];
+  const missingChunks = Array.isArray(input.missingChunks) ? input.missingChunks : [];
   const base = analyzeScript({ ...originalInput, userConfirmedFullScript: true });
   const mergedBeats = chunks.flatMap((chunk) => chunk.episodeBeatLedger || []);
   const mergedLedger = mergeEvidenceLedgers(chunks.map((chunk) => chunk.evidenceLedger || {}), coverage);
@@ -147,14 +154,20 @@ export function aggregateScriptAnalysis(input = {}) {
     sourceMeta: {
       ...(base.sourceMeta || {}),
       chunkedAnalysis: true,
-      chunkCount: chunks.length + failedChunks.length,
+      chunkCount: input.expectedChunkCount || chunks.length + failedChunks.length + missingChunks.length,
+      expectedChunks: input.expectedChunkCount || chunks.length + failedChunks.length + missingChunks.length,
+      detectedChunks: input.detectedChunkCount || chunks.length + failedChunks.length,
       successfulChunks: chunks.length,
       failedChunks,
-      needsReview: failedChunks.length > 0 || base.sourceMeta?.needsReview || false,
+      missingChunks,
+      participatingChunks: chunks.length,
+      completeAggregation: failedChunks.length === 0 && missingChunks.length === 0,
+      needsReview: failedChunks.length > 0 || missingChunks.length > 0 || base.sourceMeta?.needsReview || false,
       blockedSave: base.sourceMeta?.blockedSave || false,
       warnings: uniqueList([
         ...(base.sourceMeta?.warnings || []),
         failedChunks.length ? `存在 ${failedChunks.length} 个失败分集/chunk，不能进入正式 Skill 沉淀。` : "",
+        missingChunks.length ? `仅切出 ${chunks.length + failedChunks.length}/${input.expectedChunkCount || chunks.length + failedChunks.length + missingChunks.length} 个分集/chunk，不能视为完整剧本分析完成。` : "",
         "完整剧本已使用分集分析流程，而不是依赖单次超大输出。"
       ])
     },
@@ -163,13 +176,8 @@ export function aggregateScriptAnalysis(input = {}) {
       `长剧本分集分析：成功 ${chunks.length} 个 chunk，失败 ${failedChunks.length} 个。`
     ].filter(Boolean).join("\n")
   };
-  if (failedChunks.length) {
-    analysis.sourceMeta.usableForSkillLearning = false;
-    analysis.sourceMeta.usableForLearning = false;
-    analysis.usableForLearning = false;
-  }
   applyEvidenceValidationToAnalysis(analysis, originalInput.text || "");
-  applyChunkLearningFlags(analysis);
+  applyLongScriptGateFlags(analysis);
   return analysis;
 }
 
@@ -231,23 +239,74 @@ function remapEvidenceIds(ids = [], prefix) {
   return (Array.isArray(ids) ? ids : [ids]).map((id) => (id ? `${prefix}_${id}` : "")).filter(Boolean);
 }
 
-function applyChunkLearningFlags(analysis) {
+export function applyLongScriptGateFlags(analysis) {
   const meta = (analysis.sourceMeta ||= {});
   const invalidRatio = meta.evidenceValidation?.invalidEvidenceRatio || 0;
   const hasFailedChunks = (meta.failedChunks || []).length > 0;
+  const hasDeclaredCoverageGap = Number(meta.expectedChunks || 0) > Number(meta.detectedChunks || meta.successfulChunks || 0);
+  const hasMissingChunks = (meta.missingChunks || []).length > 0 || hasDeclaredCoverageGap;
   const hasPrimitiveNormalization = (meta.normalizedEvidenceEntries || 0) > 0 || (meta.normalizedBeatEntries || 0) > 0;
   const isFullScript = analysis.coverage?.inputType === "full_script";
+  meta.participatingChunks = meta.participatingChunks ?? meta.successfulChunks ?? 0;
+  meta.completeAggregation = !hasFailedChunks && !hasMissingChunks;
+  if (hasDeclaredCoverageGap && !(meta.missingChunks || []).length) {
+    meta.warnings = uniqueList([...(meta.warnings || []), `系统仅切出 ${meta.detectedChunks || meta.successfulChunks || 0}/${meta.expectedChunks} 个分集/chunk，不能视为完整剧本分析完成。`]);
+  }
   meta.usableForCaseSave = !meta.blockedSave;
-  meta.usableForFullScriptCase = isFullScript && !hasFailedChunks && !meta.blockedSave && invalidRatio === 0;
-  meta.usableForSkillLearning = isFullScript && !hasFailedChunks && !hasPrimitiveNormalization && !meta.blockedSave && !meta.needsReview && invalidRatio === 0;
+  meta.usableForFullScriptCase = isFullScript && !hasFailedChunks && !hasMissingChunks && !meta.blockedSave && invalidRatio === 0;
+  meta.usableForPatternExtraction = !hasFailedChunks && !hasMissingChunks && !meta.blockedSave && invalidRatio === 0;
+  meta.usableForProduction = isFullScript && !hasFailedChunks && !hasMissingChunks && !meta.blockedSave;
+  meta.usableForSkillLearning = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasPrimitiveNormalization && !meta.blockedSave && !meta.needsReview && invalidRatio === 0;
   meta.usableForLearning = meta.usableForSkillLearning;
-  if (hasFailedChunks || hasPrimitiveNormalization) {
+  if (hasFailedChunks || hasMissingChunks || hasPrimitiveNormalization) {
     meta.needsReview = true;
     meta.usableForSkillLearning = false;
     meta.usableForLearning = false;
+    meta.usableForFullScriptCase = false;
+    meta.usableForProduction = false;
   }
   analysis.usableForLearning = meta.usableForLearning;
-  analysis.usableForProduction = isFullScript && !hasFailedChunks && !meta.blockedSave;
+  analysis.usableForProduction = meta.usableForProduction;
+  return analysis;
+}
+
+export function getChunkKey(chunk = {}) {
+  return [chunk.episodeNo ?? "unknown", chunk.startOffset ?? 0, chunk.endOffset ?? 0, chunk.detectedBy || "chunk"].join(":");
+}
+
+function annotateChunkExpectations(split = {}, input = {}, coverage = {}) {
+  const episodes = Array.isArray(split.episodes) ? split.episodes : [];
+  const userEpisodeCount = Number(input.episodeCount) || Number(coverage.userEpisodeCount) || null;
+  const expectsDeclaredFull =
+    Boolean(input.userConfirmedFullScript && userEpisodeCount >= LONG_SCRIPT_EPISODE_THRESHOLD) ||
+    (coverage.inputType === "full_script" && userEpisodeCount >= LONG_SCRIPT_EPISODE_THRESHOLD);
+  const expectedChunkCount = expectsDeclaredFull ? userEpisodeCount : episodes.length;
+  const detectedChunkCount = split.detectedEpisodeCount || episodes.length;
+  const missingChunks = [];
+  if (expectsDeclaredFull && expectedChunkCount > detectedChunkCount) {
+    const detectedNos = new Set(episodes.map((episode) => Number(episode.episodeNo)).filter(Boolean));
+    for (let no = 1; no <= expectedChunkCount; no += 1) {
+      if (!detectedNos.has(no)) {
+        missingChunks.push({
+          episodeNo: no,
+          title: `第${no}集未切出`,
+          detectedBy: "missing",
+          error: "用户声明完整剧本，但文本中未检测到该集内容。"
+        });
+      }
+    }
+  }
+  return {
+    ...split,
+    episodes,
+    expectedChunkCount,
+    detectedChunkCount,
+    missingChunks,
+    warnings: uniqueList([
+      ...(split.warnings || []),
+      missingChunks.length ? `用户声明 ${expectedChunkCount} 集，但系统仅切出 ${detectedChunkCount} 集，缺失 ${missingChunks.length} 集。` : ""
+    ])
+  };
 }
 
 function estimateTokens(text = "") {

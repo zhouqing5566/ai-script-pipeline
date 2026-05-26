@@ -1695,6 +1695,22 @@ pre {
   margin: 10px 0;
 }
 
+.long-progress-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(110px, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.long-progress-summary span {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .status-pill.ok {
   border-color: #86efac;
   background: #ecfdf5;

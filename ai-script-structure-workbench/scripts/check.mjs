@@ -43,7 +43,9 @@ import { detectScriptCoverage } from "../src/script-coverage.js";
 import { splitScriptIntoEpisodes } from "../src/script-splitter.js";
 import {
   aggregateScriptAnalysis,
+  applyLongScriptGateFlags,
   analyzeEpisodeChunk,
+  prepareLongScriptChunks,
   shouldUseLongScriptAnalysis
 } from "../src/long-script-analysis.js";
 import { normalizeRelationshipEdge } from "../src/analysis-normalizers.js";
@@ -162,6 +164,14 @@ assert.equal(fiftyCoverage.inputType, "full_script");
 assert.equal(fiftyCoverage.detectedEpisodeCount, 50);
 assert.ok(fiftyCoverage.completenessSource.includes("系统检测"));
 assert.equal(shouldUseLongScriptAnalysis({ title: "五十集长剧", episodeCount: 50, text: fiftyEpisodeText, userConfirmedFullScript: true }, fiftyCoverage), true);
+const declaredButShortText = "第一集\n主角在火车上救人，并留下蛊师追杀悬念。";
+const declaredShortCoverage = detectScriptCoverage(declaredButShortText, 50, { userConfirmedFullScript: true });
+assert.equal(shouldUseLongScriptAnalysis({ title: "声明五十集", episodeCount: 50, text: declaredButShortText, userConfirmedFullScript: true }, declaredShortCoverage), true);
+const declaredShortSplit = prepareLongScriptChunks({ title: "声明五十集", episodeCount: 50, text: declaredButShortText, userConfirmedFullScript: true }, declaredShortCoverage);
+assert.equal(declaredShortSplit.expectedChunkCount, 50);
+assert.equal(declaredShortSplit.detectedChunkCount, 1);
+assert.equal(declaredShortSplit.missingChunks.length, 49);
+assert.ok(declaredShortSplit.warnings.some((warning) => warning.includes("仅切出") || warning.includes("系统仅切出")));
 const episodeChunk = analyzeEpisodeChunk({
   projectTitle: "五十集长剧",
   genre: "都市",
@@ -183,6 +193,20 @@ assert.equal(aggregatedLong.sourceMeta.chunkedAnalysis, true);
 assert.equal(aggregatedLong.sourceMeta.failedChunks.length, 1);
 assert.equal(aggregatedLong.sourceMeta.needsReview, true);
 assert.equal(aggregatedLong.sourceMeta.usableForSkillLearning, false);
+const missingAggregate = aggregateScriptAnalysis({
+  originalInput: { title: "声明五十集", genre: "都市", episodeCount: 50, text: declaredButShortText, userConfirmedFullScript: true },
+  coverage: declaredShortCoverage,
+  episodeChunkAnalyses: [episodeChunk],
+  failedChunks: [],
+  missingChunks: declaredShortSplit.missingChunks,
+  expectedChunkCount: declaredShortSplit.expectedChunkCount,
+  detectedChunkCount: declaredShortSplit.detectedChunkCount
+});
+assert.equal(missingAggregate.sourceMeta.missingChunks.length, 49);
+assert.equal(missingAggregate.sourceMeta.needsReview, true);
+assert.equal(missingAggregate.sourceMeta.usableForSkillLearning, false);
+assert.equal(missingAggregate.sourceMeta.usableForFullScriptCase, false);
+assert.equal(missingAggregate.sourceMeta.completeAggregation, false);
 const successfulAggregate = aggregateScriptAnalysis({
   originalInput: {
     title: "短完整剧",
@@ -201,6 +225,15 @@ const successfulAggregate = aggregateScriptAnalysis({
 assert.equal(successfulAggregate.sourceMeta.failedChunks.length, 0);
 assert.equal(successfulAggregate.sourceMeta.chunkedAnalysis, true);
 assert.equal(successfulAggregate.sourceMeta.usableForSkillLearning, successfulAggregate.sourceMeta.evidenceValidation.invalidEvidenceRatio === 0 && !successfulAggregate.sourceMeta.needsReview);
+const gatedAnalysis = { coverage: { inputType: "full_script" }, sourceMeta: { failedChunks: [], missingChunks: [{ episodeNo: 5 }], evidenceValidation: { invalidEvidenceRatio: 0 } } };
+applyLongScriptGateFlags(gatedAnalysis);
+assert.equal(gatedAnalysis.sourceMeta.needsReview, true);
+assert.equal(gatedAnalysis.sourceMeta.usableForProduction, false);
+assert.equal(gatedAnalysis.sourceMeta.usableForFullScriptCase, false);
+const coverageGapAnalysis = { coverage: { inputType: "full_script" }, sourceMeta: { expectedChunks: 50, detectedChunks: 1, failedChunks: [], missingChunks: [], evidenceValidation: { invalidEvidenceRatio: 0 } } };
+applyLongScriptGateFlags(coverageGapAnalysis);
+assert.equal(coverageGapAnalysis.sourceMeta.needsReview, true);
+assert.equal(coverageGapAnalysis.sourceMeta.completeAggregation, false);
 const forgedAnalysis = structuredClone(fragmentAnalysis);
 forgedAnalysis.episodeBeatLedger[0].sourceText = "这是一段完全不存在于原文中的伪造证据。";
 forgedAnalysis.hookAnalysis.evidenceBeatIds = [forgedAnalysis.episodeBeatLedger[0].beatId];
@@ -886,12 +919,18 @@ assert.ok(appSource.includes("用户声明集数"));
 assert.ok(appSource.includes("系统检测集数"));
 assert.ok(appSource.includes("完整性来源"));
 assert.ok(appSource.includes("重试失败分集"));
+assert.ok(appSource.includes("chunkResults[chunkKey]"));
+assert.ok(appSource.includes("Object.values(chunkResults)"));
+assert.ok(appSource.includes("missingChunks"));
+assert.ok(appSource.includes("仅切出"));
+assert.ok(appSource.includes("applyLongScriptGateFlags"));
+assert.ok(appSource.includes("参与聚合 chunk"));
 assert.ok(appSource.includes("该任务已按安全输出上限发送。完整剧本将使用分集分析流程，而不是依赖单次超大输出。"));
 assert.ok(appSource.includes("sourceText 校验"));
 assert.ok(appSource.includes("原文未命中，需复核"));
 assert.ok(appSource.includes("模型返回为字符串，已自动标准化，需复核"));
 assert.ok(appSource.includes("usableForCaseSave"));
-assert.ok(appSource.includes("analysis.caseScope === \"full_script\" ? \"已加入完整案例库\" : \"已按片段/开头/单集案例保存\""));
+assert.ok(appSource.includes("已保存为待复核案例草稿"));
 assert.ok(appSource.includes("async function handleAction(payload)"));
 assert.ok(!appSource.includes("const action = target.dataset.action"));
 const promptBuilderSource = await fs.readFile(new URL("../src/prompt-builder.js", import.meta.url), "utf8");
@@ -913,9 +952,12 @@ assert.ok(coverageSource.includes("fullScriptConfidence"));
 assert.ok(coverageSource.includes("completenessSource"));
 assert.ok(splitterSource.includes("splitScriptIntoEpisodes"));
 assert.ok(splitterSource.includes("EP|Episode"));
+assert.ok(splitterSource.includes("启发式分集边界"));
 assert.ok(longAnalysisSource.includes("shouldUseLongScriptAnalysis"));
 assert.ok(longAnalysisSource.includes("aggregateScriptAnalysis"));
 assert.ok(longAnalysisSource.includes("failedChunks"));
+assert.ok(longAnalysisSource.includes("missingChunks"));
+assert.ok(longAnalysisSource.includes("applyLongScriptGateFlags"));
 assert.ok(longAnalysisSource.includes("chunkedAnalysis"));
 assert.ok(evidenceValidatorSource.includes("validateEvidenceSourceText"));
 assert.ok(evidenceValidatorSource.includes("invalidEvidenceRatio"));

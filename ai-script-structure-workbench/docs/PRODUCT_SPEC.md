@@ -533,14 +533,41 @@ detectScriptCoverage
 {
   chunkedAnalysis: true,
   chunkCount,
+  expectedChunks,
+  detectedChunks,
   successfulChunks,
+  participatingChunks,
   failedChunks,
+  missingChunks,
+  completeAggregation,
   needsReview,
+  usableForFullScriptCase,
+  usableForPatternExtraction,
+  usableForProduction,
   usableForSkillLearning
 }
 ```
 
-如果存在 `failedChunks` 或大量 primitive evidence 标准化，只能保存为待复核完整案例草稿，不允许进入正式 Skill 学习沉淀。
+如果用户声明 50 集但系统只切出 1 集，必须记录：
+
+```js
+sourceMeta.missingChunks = [
+  { episodeNo: 2, title: "第2集未切出", detectedBy: "missing" }
+]
+sourceMeta.needsReview = true
+sourceMeta.usableForFullScriptCase = false
+sourceMeta.usableForSkillLearning = false
+```
+
+重试失败分集时，已成功分集结果必须保存在 `longScriptAnalysisProgress.chunkResults` 中，重试成功后替换对应 chunk，最终聚合使用所有成功 chunkResults，而不是只聚合本轮重试的分集。
+
+所有路径（真实模型聚合成功、本地聚合兜底、聚合失败后兜底）都必须调用统一门禁：
+
+```js
+applyLongScriptGateFlags(finalAnalysis)
+```
+
+如果存在 `failedChunks`、`missingChunks` 或大量 primitive evidence 标准化，只能保存为待复核完整案例草稿，不允许进入正式完整案例、完整主线骨架、生产交付或 Skill 学习沉淀。
 
 路由安全输出上限：
 
