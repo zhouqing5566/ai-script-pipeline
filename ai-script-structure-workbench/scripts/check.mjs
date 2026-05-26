@@ -32,8 +32,8 @@ import {
   createRouteDraft,
   switchCoreRoutesToModel
 } from "../src/model-config.js";
-import { selectModelRoute } from "../src/model-router.js";
-import { callModel, shouldRetryModelError } from "../src/model-adapter.js";
+import { clampMaxOutputTokens, selectModelRoute } from "../src/model-router.js";
+import { callModel, shouldRetryModelError, testModelRoute } from "../src/model-adapter.js";
 import { sanitizeStateForSnapshot } from "../src/redaction.js";
 import { schemaValidationMessage, validateTaskOutput } from "../src/schema-validator.js";
 import { extractDocxTextFromArrayBuffer, parseScriptFile } from "../src/file-parser.js";
@@ -225,6 +225,8 @@ const apiSelection = selectModelRoute({
 });
 assert.equal(apiSelection.mode, "api");
 assert.equal(apiSelection.model.id, "model-openai-compatible-default");
+assert.equal(clampMaxOutputTokens(200000, "analyzeScript"), 12000);
+assert.equal(clampMaxOutputTokens(200000, "jsonRepair"), 4096);
 
 const proxyCalls = [];
 globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
@@ -256,6 +258,37 @@ assert.equal(proxyCalls[0].providerId, "provider-openai-compatible-template");
 assert.equal(proxyCalls[0].modelId, "model-openai-compatible-default");
 assert.equal(Object.hasOwn(proxyCalls[0], "provider"), false);
 assert.equal(Object.hasOwn(proxyCalls[0], "model"), false);
+delete globalThis.__MODEL_CALL_PROXY__;
+
+const routeProbeCalls = [];
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
+  routeProbeCalls.push(payload);
+  return {
+    outputText: "ROUTE_OK",
+    tokenUsage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    requestFormat: payload.requestFormat,
+    endpointType: "server_proxy",
+    status: 200,
+    serverStatus: 200,
+    providerStatus: 200
+  };
+};
+const routeProbeState = structuredClone(apiState);
+routeProbeState.apiConfig.routes = routeProbeState.apiConfig.routes.map((route) =>
+  route.taskType === "analyzeScript" ? { ...route, maxOutputTokens: 200000, timeoutMs: 60000, retryCount: 1 } : route
+);
+const routeProbeResult = await testModelRoute({
+  taskType: "analyzeScript",
+  featureArea: "剧本分析中心",
+  inputMeta: { project: routeProbeState.currentProject },
+  state: routeProbeState
+});
+assert.equal(routeProbeResult.success, true);
+assert.equal(routeProbeResult.mode, "api");
+assert.equal(routeProbeCalls.length, 1);
+assert.equal(routeProbeCalls[0].options.jsonModeRequired, false);
+assert.equal(routeProbeCalls[0].options.maxOutputTokens, 256);
+assert.ok(routeProbeResult.warnings.some((warning) => warning.includes("maxOutputTokens 200000")));
 delete globalThis.__MODEL_CALL_PROXY__;
 
 const modelResult = await callModel({
@@ -436,6 +469,7 @@ assert.ok(modelAdapterSource.includes('fetch("/api/model-call"'));
 assert.ok(modelAdapterSource.includes("providerId: provider?.id"));
 assert.ok(modelAdapterSource.includes("taskType: taskType || null"));
 assert.ok(modelAdapterSource.includes("shouldRetryModelError"));
+assert.ok(modelAdapterSource.includes("testModelRoute"));
 assert.ok(modelAdapterSource.includes("modelErrorRetryBlockReason"));
 assert.ok(modelAdapterSource.includes("不可重试原因"));
 assert.ok(!modelAdapterSource.includes("const payload = { provider, model"));
@@ -443,6 +477,7 @@ assert.ok(!modelAdapterSource.includes("callOpenAICompatible"));
 assert.ok(!modelAdapterSource.includes("callGemini"));
 assert.ok(modelAdapterSource.includes("requiresRouteFix"));
 assert.ok(modelAdapterSource.includes("executeApiAttemptWithRetries"));
+assert.ok(modelAdapterSource.includes("jsonModeRequired: false"));
 assert.ok(!modelAdapterSource.includes("function resolveClientRequestFormat"));
 const requestFormatSource = await fs.readFile(new URL("../src/request-format.js", import.meta.url), "utf8");
 assert.ok(requestFormatSource.includes("resolveRequestFormat"));
@@ -451,6 +486,7 @@ const appSource = await fs.readFile(new URL("../src/app.js", import.meta.url), "
 assert.ok(appSource.includes("syncRuntimeSettings"));
 assert.ok(appSource.includes("配置已同步到本地服务"));
 assert.ok(appSource.includes("API Mode + Demo 兜底"));
+assert.ok(appSource.includes("轻量测试当前任务路由"));
 assert.ok(appSource.includes("这是 Demo Provider 测试，不代表真实 API 可用"));
 
 console.log("check passed: V1.1 demo/API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");

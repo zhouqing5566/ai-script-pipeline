@@ -22,7 +22,8 @@ export function selectModelRoute({
       route,
       model: demoModel,
       provider: demoProvider,
-      reason: "当前处于 Demo Mode"
+      reason: "当前处于 Demo Mode",
+      taskType
     });
   }
   const projectModelId = project?.modelOverrides?.taskModels?.[taskType] || project?.modelOverrides?.globalModelId || null;
@@ -41,10 +42,10 @@ export function selectModelRoute({
     if (!model) continue;
     const provider = config.providers.find((candidate) => candidate.id === model.providerId && candidate.enabled);
     if (isDemoModel(model, provider)) {
-      return createSelection({ mode: "demo", route, model, provider, reason: item.reason });
+      return createSelection({ mode: "demo", route, model, provider, reason: item.reason, taskType });
     }
     if (provider) {
-      return createSelection({ mode: "api", route, model, provider, reason: item.reason });
+      return createSelection({ mode: "api", route, model, provider, reason: item.reason, taskType });
     }
   }
 
@@ -55,7 +56,8 @@ export function selectModelRoute({
     route,
     model: demoModel,
     provider: demoProvider,
-    reason: "没有可用真实模型，使用 DemoRuleEngine"
+    reason: "没有可用真实模型，使用 DemoRuleEngine",
+    taskType
   });
 }
 
@@ -84,25 +86,53 @@ export function describeRouteSelection(selection) {
   };
 }
 
-function createSelection({ mode, route, model, provider, reason }) {
+function createSelection({ mode, route, model, provider, reason, taskType }) {
+  const requestedMaxOutputTokens = route?.maxOutputTokens || model?.maxOutputTokens || 4096;
+  const maxOutputTokens = clampMaxOutputTokens(requestedMaxOutputTokens, taskType || route?.taskType);
+  const optionWarnings = [];
+  if (Number(requestedMaxOutputTokens) > maxOutputTokens) {
+    optionWarnings.push(`maxOutputTokens ${requestedMaxOutputTokens} 已按 ${taskType || route?.taskType || "当前任务"} 安全上限 ${maxOutputTokens} 发送，避免真实 API 超时或拒绝。`);
+  }
   return {
     mode,
     route,
     model,
     provider,
     routingReason: reason,
+    optionWarnings,
     usedFallback: false,
     fallbackModelIds: route?.allowFallback === false ? [] : route?.fallbackModelIds || [],
     options: {
       temperature: route?.temperature ?? 0.5,
       topP: route?.topP ?? 0.9,
-      maxOutputTokens: route?.maxOutputTokens || model?.maxOutputTokens || 4096,
+      maxOutputTokens,
+      requestedMaxOutputTokens,
       jsonModeRequired: Boolean(route?.jsonModeRequired),
       streamingEnabled: Boolean(route?.streamingEnabled),
       retryCount: route?.retryCount || 0,
       timeoutMs: route?.timeoutMs || provider?.timeoutMs || 60000
     }
   };
+}
+
+export function clampMaxOutputTokens(value, taskType = "") {
+  const requested = Math.max(1, Number(value) || 4096);
+  const caps = {
+    analyzeScript: 12000,
+    generateEpisodeOutline: 16000,
+    generateMacroOutline: 12000,
+    generateStageOutline: 10000,
+    generateDraft: 12000,
+    auditOutline: 8000,
+    jsonRepair: 4096,
+    evaluateIdea: 4000,
+    generateDirections: 8000,
+    generateThemeCandidates: 6000,
+    generateMainlineReversals: 8000,
+    generateEndingCandidates: 6000,
+    generateMajorNodes: 8000
+  };
+  return Math.min(requested, caps[taskType] || 8000);
 }
 
 function findRoute(routes = [], taskType, featureArea) {

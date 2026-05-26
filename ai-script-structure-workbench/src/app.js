@@ -1,5 +1,5 @@
 import { createStore } from "./state.js";
-import { callModel, runModelTask } from "./model-adapter.js";
+import { callModel, runModelTask, testModelRoute } from "./model-adapter.js";
 import { repairEpisode } from "./repair.js";
 import { auditDraft } from "./audit.js";
 import { loadRuntimeSettings, mergeRuntimeApiConfig, resetLocalState, syncRuntimeSettings, writeExport } from "./storage.js";
@@ -904,11 +904,11 @@ async function testCurrentTaskRoute() {
   render();
   await syncApiSettings({ successMessage: "测试前已同步配置到本地服务。", show: false });
   const current = readOpenInputs(store.getState());
-  const result = await callModel({
+  const result = await testModelRoute({
     taskType,
     featureArea: featureAreaForTaskType(taskType),
     projectId: current.currentProject.id,
-    inputMeta: inputMetaForTask(current, taskType),
+    inputMeta: { project: current.currentProject },
     state: current
   });
   store.setState((state) => {
@@ -921,6 +921,9 @@ async function testCurrentTaskRoute() {
       providerName: result.log?.providerName || result.providerId || "未选择",
       modelName: result.log?.modelName || result.modelId || "未选择",
       endpointType: result.endpointType,
+      serverStatus: result.serverStatus || result.log?.serverStatus || null,
+      providerStatus: result.providerStatus || result.log?.providerStatus || null,
+      outputPreview: result.outputText ? String(result.outputText).slice(0, 120) : "",
       routingReason: result.log?.routingReason || "",
       matchedSkillIds: result.matchedSkillIds || [],
       warnings: result.warnings || [],
@@ -933,7 +936,7 @@ async function testCurrentTaskRoute() {
     return state;
   }, "测试当前任务路由", { targetType: "settings", action: "generate", light: true });
   busyAction = null;
-  showToast(result.success ? "当前任务路由测试完成" : `当前任务路由测试失败：${result.error || "未知错误"}`);
+  showToast(result.success ? "当前任务路由轻量测试完成" : `当前任务路由测试失败：${result.error || "未知错误"}`);
 }
 
 async function switchCoreTasksToSelectedModel() {
@@ -1592,7 +1595,7 @@ function renderApiStatus(state) {
           </label>
         </div>
         <div class="panel-actions">
-          <button class="secondary-button" data-action="test-task-route">测试当前任务路由</button>
+          <button class="secondary-button" data-action="test-task-route">轻量测试当前任务路由</button>
           <button class="primary-button" data-action="switch-core-routes">一键切换核心任务到当前真实模型</button>
         </div>
         ${renderRouteTestResult(config.lastRouteTestResult)}
@@ -1621,7 +1624,7 @@ function renderApiStatus(state) {
 }
 
 function renderRouteTestResult(result) {
-  if (!result) return "<p class='muted'>选择任务后点击测试，可确认真实任务最终使用哪个 Provider、模型和请求格式。</p>";
+  if (!result) return "<p class='muted'>选择任务后点击轻量测试，只验证路由选择与服务端 Provider 链路，不会运行完整剧本分析。</p>";
   return `
     <div class="suggestion-box ${result.success ? "" : "has-warning"}">
       <h3>最近路由测试</h3>
@@ -1633,7 +1636,10 @@ function renderRouteTestResult(result) {
         ["Provider", result.providerName],
         ["模型", result.modelName],
         ["端点类型", result.endpointType || "未记录"],
+        ["服务端状态", result.serverStatus || "未记录"],
+        ["Provider 状态", result.providerStatus || "未记录"],
         ["路由原因", result.routingReason || "未记录"],
+        ["探针输出", result.outputPreview || "无"],
         ["Skill", (result.matchedSkillIds || []).join("、") || "无"],
         ["警告", (result.warnings || []).join("；") || "无"],
         ["需要修正路由", result.requiresRouteFix ? "是" : "否"],

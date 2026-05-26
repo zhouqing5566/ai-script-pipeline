@@ -401,6 +401,8 @@ V1.1 加固：
 - `allowDemoInApiMode` 开启时需要二次确认；开启后页面顶部和调用日志必须以醒目警告标记“真实 API Mode 允许 Demo 兜底”。
 - `requestFormat` 解析统一由 `src/request-format.js` 负责。`openai_chat` 永远走 Chat Completions，`gemini_native` 才走 Gemini native，`auto` 仅在 `providerType=gemini` 或 Base URL 为 `generativelanguage.googleapis.com` 时走 native，其余默认 `openai_chat`。
 - retry 只对网络失败、超时、被中止、429、5xx、空响应等临时错误重试；结构校验失败、400 请求格式错误、缺少 Key、模型不属于 Provider 等配置或 schema 问题不做无意义重试。
+- 基础状态里的“测试当前任务路由”应使用轻量路由探针，只验证 route/provider/model/requestFormat/server proxy 链路，不运行完整生产任务，避免把剧本分析误当连通性测试。
+- `maxOutputTokens` 应按任务类型设置安全上限；当用户填写过大的输出上限时，实际发送给 Provider 的值需要被限制，并在 warnings / 调用日志中说明，避免 Provider 长时间推理或拒绝请求。
 - Provider 类型为 `local` 时，测试连接结果必须标记为 Demo Provider 测试，不代表真实 API 可用。
 - `/api/model-call` 与 `/api/test-provider` 服务端日志应记录 `taskType`、`routeId`、`providerId`、`providerName`、`modelId`、`modelName`、`requestFormat`、`endpointType`、`serverStatus`、`providerStatus`、`providerRawPreview`、`settingsUpdatedAt`、`providerUpdatedAt`、`latencyMs`、`errorMessage`，便于定位“配置已改但任务读到旧配置”的问题；日志不得记录 `apiKey`。
 ```

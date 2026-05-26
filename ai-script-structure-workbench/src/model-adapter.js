@@ -83,6 +83,7 @@ export async function callModel({
   let model = selection.model;
   let mode = selection.mode;
   const warnings = [];
+  warnings.push(...(selection.optionWarnings || []));
   const requestedMode = state?.apiConfig?.mode || "demo";
   const requiresRouteFix = requestedMode === "api" && selection.mode === "demo" && !state?.apiConfig?.allowDemoInApiMode;
   if (requestedMode === "api" && selection.mode === "demo") {
@@ -128,6 +129,16 @@ export async function callModel({
       costEstimate = estimateCost(model, tokenUsage);
     }
   } catch (providerError) {
+    const mainMeta = providerError.providerPayload || null;
+    if (mainMeta) {
+      endpointType = mainMeta.endpointType || endpointType;
+      providerStatus = mainMeta.providerStatus || providerStatus;
+      serverStatus = mainMeta.serverStatus || mainMeta.status || serverStatus;
+      providerRawPreview = mainMeta.providerRawPreview || providerRawPreview;
+      settingsUpdatedAt = mainMeta.settingsUpdatedAt || settingsUpdatedAt;
+      providerUpdatedAt = mainMeta.providerUpdatedAt || providerUpdatedAt;
+      modelUpdatedAt = mainMeta.modelUpdatedAt || modelUpdatedAt;
+    }
     if (!attemptErrors.length) attemptErrors.push(`主模型失败：${providerError.message}`);
     if (selection.mode === "api") {
       const fallback = selectFallbackModel({
@@ -169,6 +180,16 @@ export async function callModel({
           modelUpdatedAt = response.modelUpdatedAt || null;
           costEstimate = estimateCost(model, tokenUsage);
         } catch (fallbackError) {
+          const fallbackMeta = fallbackError.providerPayload || null;
+          if (fallbackMeta) {
+            endpointType = fallbackMeta.endpointType || endpointType;
+            providerStatus = fallbackMeta.providerStatus || providerStatus;
+            serverStatus = fallbackMeta.serverStatus || fallbackMeta.status || serverStatus;
+            providerRawPreview = fallbackMeta.providerRawPreview || providerRawPreview;
+            settingsUpdatedAt = fallbackMeta.settingsUpdatedAt || settingsUpdatedAt;
+            providerUpdatedAt = fallbackMeta.providerUpdatedAt || providerUpdatedAt;
+            modelUpdatedAt = fallbackMeta.modelUpdatedAt || modelUpdatedAt;
+          }
           if (!attemptErrors.some((item) => item.includes("备用模型"))) attemptErrors.push(`备用模型失败：${fallbackError.message}`);
           error = attemptErrors.join("；");
         }
@@ -285,6 +306,185 @@ export async function runModelTask(taskType, input, state) {
     log: result.log,
     result
   };
+}
+
+export async function testModelRoute({
+  taskType,
+  featureArea,
+  projectId,
+  skillIds = [],
+  inputMeta = {},
+  routeOverride,
+  state
+}) {
+  const startedAt = performance.now();
+  const project = inputMeta.project || state?.currentProject || null;
+  const resolvedFeatureArea = featureArea || featureAreaForTask(taskType);
+  const { matchedSkills, matchedSkillIds, conflicts } = matchSkillsForTask({
+    taskType,
+    featureArea: resolvedFeatureArea,
+    project,
+    state,
+    skillIds
+  });
+  const selection = selectModelRoute({
+    state,
+    project,
+    taskType,
+    featureArea: resolvedFeatureArea,
+    matchedSkills,
+    routeOverride
+  });
+  const requestedMode = state?.apiConfig?.mode || "demo";
+  const requiresRouteFix = requestedMode === "api" && selection.mode === "demo" && !state?.apiConfig?.allowDemoInApiMode;
+  const warnings = [...(selection.optionWarnings || [])];
+  if (requestedMode === "api" && selection.mode === "demo") {
+    warnings.push("当前为真实 API Mode，但该任务路由仍指向 Demo 模型。请在系统设置 → 路由配置中绑定真实模型。");
+  }
+
+  let outputText = "";
+  let error = null;
+  let tokenUsage = null;
+  let requestFormat = selection.mode === "api" ? resolveRequestFormat({ provider: selection.provider, model: selection.model }) : "demo";
+  let endpointType = selection.mode === "api" ? "server_proxy" : "local_demo";
+  let providerStatus = null;
+  let serverStatus = null;
+  let providerRawPreview = null;
+  let settingsUpdatedAt = null;
+  let providerUpdatedAt = null;
+  let modelUpdatedAt = null;
+  const attemptErrors = [];
+
+  try {
+    if (requiresRouteFix) {
+      error = "当前是真实 API Mode，但该任务仍指向 Demo 模型。请点击“一键切换核心任务到当前真实模型”，或手动修改任务路由。";
+    } else if (selection.mode === "demo") {
+      outputText = "ROUTE_OK_DEMO";
+      providerStatus = 200;
+      serverStatus = 200;
+    } else {
+      const probeOptions = {
+        ...selection.options,
+        jsonModeRequired: false,
+        maxOutputTokens: Math.min(256, selection.options.maxOutputTokens || 256),
+        retryCount: 0,
+        timeoutMs: Math.min(Math.max(selection.options.timeoutMs || 30000, 10000), 30000)
+      };
+      const response = await callProvider({
+        provider: selection.provider,
+        model: selection.model,
+        route: selection.route,
+        taskType,
+        messages: [
+          { role: "system", content: "你是模型路由连通性诊断探针。" },
+          { role: "user", content: "请只回复 ROUTE_OK，不要解释。" }
+        ],
+        options: probeOptions
+      });
+      outputText = response.outputText || "";
+      tokenUsage = response.tokenUsage || null;
+      requestFormat = response.requestFormat || requestFormat;
+      endpointType = response.endpointType || endpointType;
+      providerStatus = response.providerStatus || response.status || null;
+      serverStatus = response.serverStatus || response.status || null;
+      providerRawPreview = response.providerRawPreview || null;
+      settingsUpdatedAt = response.settingsUpdatedAt || null;
+      providerUpdatedAt = response.providerUpdatedAt || null;
+      modelUpdatedAt = response.modelUpdatedAt || null;
+    }
+  } catch (probeError) {
+    error = normalizeClientProviderError(probeError.message);
+    const meta = probeError.providerPayload || null;
+    if (meta) {
+      requestFormat = meta.requestFormat || requestFormat;
+      endpointType = meta.endpointType || endpointType;
+      providerStatus = meta.providerStatus || providerStatus;
+      serverStatus = meta.serverStatus || meta.status || serverStatus;
+      providerRawPreview = meta.providerRawPreview || providerRawPreview;
+      settingsUpdatedAt = meta.settingsUpdatedAt || settingsUpdatedAt;
+      providerUpdatedAt = meta.providerUpdatedAt || providerUpdatedAt;
+      modelUpdatedAt = meta.modelUpdatedAt || modelUpdatedAt;
+    }
+    attemptErrors.push(`路由探针失败：${error}`);
+  }
+
+  const latencyMs = Math.round(performance.now() - startedAt);
+  const apiModeDemoFallback = requestedMode === "api" && selection.mode === "demo" && !requiresRouteFix;
+  const result = {
+    success: !error,
+    mode: selection.mode,
+    requestedMode,
+    requestFormat,
+    endpointType,
+    status: error ? "failed" : "success",
+    taskType,
+    routeId: selection.route?.id || null,
+    providerId: selection.provider?.id || null,
+    modelId: selection.model?.id || null,
+    usedFallback: false,
+    requiresRouteFix,
+    apiModeDemoFallback,
+    matchedSkillIds,
+    warnings,
+    attemptErrors,
+    outputText,
+    parsedJson: null,
+    error,
+    latencyMs,
+    tokenUsage,
+    costEstimate: estimateCost(selection.model, tokenUsage),
+    serverStatus,
+    providerStatus,
+    providerRawPreview,
+    settingsUpdatedAt,
+    providerUpdatedAt,
+    modelUpdatedAt,
+    logId: createLogId()
+  };
+  const log = {
+    id: result.logId,
+    taskType,
+    taskLabel: `${taskLabels[taskType] || taskType} 路由诊断`,
+    featureArea: resolvedFeatureArea,
+    mode: result.mode,
+    requestedMode,
+    providerId: result.providerId,
+    providerName: selection.provider?.name || "未选择",
+    routeId: result.routeId,
+    requestFormat,
+    endpointType,
+    serverProxy: endpointType === "server_proxy",
+    status: result.status,
+    providerStatus,
+    serverStatus,
+    providerRawPreview,
+    modelId: result.modelId,
+    modelName: selection.model?.displayName || selection.model?.modelName || "未选择",
+    skillVersion: matchedSkills.map((skill) => `${skill.name} ${skill.version}`).join("；") || "未匹配",
+    matchedSkillIds,
+    skillConflicts: conflicts,
+    warnings,
+    apiModeDemoWarning: warnings.some((item) => item.includes("真实 API Mode")),
+    apiModeDemoFallback,
+    requiresRouteFix,
+    routingReason: selection.routingReason,
+    usedFallback: false,
+    attemptErrors,
+    inputSummary: `路由诊断：${taskType}`,
+    outputSummary: outputText ? summarizeInput(outputText) : "无输出",
+    success: result.success,
+    errorMessage: error,
+    latencyMs,
+    tokenUsage,
+    costEstimate: result.costEstimate,
+    settingsUpdatedAt,
+    providerUpdatedAt,
+    modelUpdatedAt,
+    createdAt: new Date().toISOString()
+  };
+  await appendModelLog(log);
+  result.log = log;
+  return result;
 }
 
 function dispatchTask(taskType, input, state) {
@@ -430,7 +630,9 @@ async function callProvider({ provider, model, messages, options, taskType, rout
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data.ok === false) {
-      throw new Error(data.errorMessage || data.error || `Provider 请求失败：${response.status}`);
+      const error = new Error(data.errorMessage || data.error || `Provider 请求失败：${response.status}`);
+      error.providerPayload = data;
+      throw error;
     }
     return {
       outputText: data.outputText || "",
@@ -446,7 +648,9 @@ async function callProvider({ provider, model, messages, options, taskType, rout
       modelUpdatedAt: data.modelUpdatedAt || null
     };
   } catch (error) {
-    throw new Error(normalizeClientProviderError(error.message));
+    const normalized = new Error(normalizeClientProviderError(error.message));
+    if (error.providerPayload) normalized.providerPayload = error.providerPayload;
+    throw normalized;
   }
 }
 

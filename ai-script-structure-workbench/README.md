@@ -93,6 +93,7 @@ npm run check
 - 真实任务统一请求本地 `/api/model-call`，由 Node 服务端代理外部 Provider，减少 CORS / Failed to fetch 问题。
 - `/api/model-call` 与 `/api/test-provider` 的真实路径只从前端接收 `providerId/modelId`，服务端再从 `data/settings/model-settings.json` 读取真实 Key，避免把完整 Provider 和 API Key 放进任务请求体。
 - 保存 Provider、模型、路由、API Mode 或“一键切换核心任务”后，前端会等待 `/api/settings` 同步完成；看到“配置已同步到本地服务”后再测试，能避免服务端读取旧配置。
+- 系统会按任务类型限制过大的 `maxOutputTokens`，避免把 `200000` 这类输出上限直接发给 Provider 导致长任务超时；调用日志会记录对应警告。
 - 真实 API 调用失败时不会静默切回 Demo。
 - 只有路由中配置了可用备用真实模型时才会 fallback，并在调用日志中记录 `usedFallback`。
 - 如果某个任务实际选择了 DemoRuleEngine，系统会在 UI、调用日志和 `ModelCallResult.warnings` 中提示：当前为真实 API Mode，但该任务路由仍指向 Demo 模型。
@@ -152,7 +153,9 @@ settingsUpdatedAt 可辅助判断本次任务是否读到了最新同步配置
 系统设置 → 基础状态 → 测试当前任务路由
 ```
 
-选择 `taskType` 后测试实际任务路由。若提示任务仍指向 Demo，点击“一键切换核心任务到当前真实模型”。
+选择 `taskType` 后进行轻量路由探针测试。它只验证实际路由、Provider、模型、请求格式和 server proxy 链路，不会运行完整剧本分析。若提示任务仍指向 Demo，点击“一键切换核心任务到当前真实模型”。
+
+如果 Provider 测试通过，但完整剧本分析仍超时，优先检查该任务路由的 `maxOutputTokens` 和 `timeoutMs`。`deepseek-v4-pro` 等推理模型在长 JSON 任务上可能明显慢于普通 chat/flash 模型，建议先用轻量路由测试确认链路，再把生产任务切到更快模型或提高超时。
 
 Provider 测试也会走服务端 settings：如果刚修改了 Base URL、API Key、启用状态或请求格式，请先点击“保存 Provider”，再点击“测试连接”。测试连接不会退回去拿 Demo 模型冒充当前 Provider 的结果；当前 Provider 下没有启用模型时会直接报错。
 
