@@ -400,6 +400,7 @@ function normalizeProviderHealth(health = {}) {
 
 export function normalizeModel(model = {}) {
   const jsonModeWasExplicit = Boolean(model.supportsJsonModeExplicit);
+  const now = new Date().toISOString();
   return {
     id: model.id || createId("model"),
     providerId: model.providerId || "",
@@ -417,11 +418,14 @@ export function normalizeModel(model = {}) {
     costLevel: model.costLevel || "unknown",
     qualityLevel: qualityLevels.includes(model.qualityLevel) ? model.qualityLevel : "balanced",
     recommendedTasks: Array.isArray(model.recommendedTasks) ? model.recommendedTasks : [],
-    notes: model.notes || ""
+    notes: model.notes || "",
+    createdAt: model.createdAt || now,
+    updatedAt: model.updatedAt || model.createdAt || null
   };
 }
 
 export function normalizeRoute(route = {}) {
+  const now = new Date().toISOString();
   return {
     id: route.id || createId("route"),
     featureArea: route.featureArea || "创作决策中心",
@@ -439,7 +443,9 @@ export function normalizeRoute(route = {}) {
     timeoutMs: Number(route.timeoutMs) || 60000,
     allowFallback: route.allowFallback !== false,
     enabled: route.enabled !== false,
-    notes: route.notes || ""
+    notes: route.notes || "",
+    createdAt: route.createdAt || now,
+    updatedAt: route.updatedAt || route.createdAt || null
   };
 }
 
@@ -467,6 +473,7 @@ export function createProviderDraft() {
 }
 
 export function createModelDraft(providerId = "") {
+  const now = new Date().toISOString();
   return normalizeModel({
     id: createId("model"),
     providerId,
@@ -477,7 +484,9 @@ export function createModelDraft(providerId = "") {
     supportsJsonMode: false,
     supportsJsonModeExplicit: false,
     qualityLevel: "balanced",
-    recommendedTasks: ["analyzeScript", "generateEpisodeOutline"]
+    recommendedTasks: ["analyzeScript", "generateEpisodeOutline"],
+    createdAt: now,
+    updatedAt: now
   });
 }
 
@@ -576,7 +585,8 @@ export function switchCoreRoutesToModel(apiConfig, modelId) {
         featureArea: existing.featureArea || featureAreaForTaskType(taskType),
         primaryModelId: modelId,
         enabled: true,
-        allowFallback: existing.allowFallback !== false
+        allowFallback: existing.allowFallback !== false,
+        updatedAt: new Date().toISOString()
       });
     } else {
       nextRoutes.push(
@@ -592,7 +602,9 @@ export function switchCoreRoutesToModel(apiConfig, modelId) {
           allowFallback: true,
           timeoutMs: defaultTimeoutForTask(taskType),
           maxOutputTokens: defaultMaxOutputForTask(taskType),
-          notes: "一键切换核心任务时自动创建。"
+          notes: "一键切换核心任务时自动创建。",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
         })
       );
     }
@@ -644,6 +656,7 @@ export function featureAreaForTaskType(taskType) {
 }
 
 export function createRouteDraft(modelId = "") {
+  const now = new Date().toISOString();
   return normalizeRoute({
     id: createId("route"),
     featureArea: "创作决策中心",
@@ -652,7 +665,9 @@ export function createRouteDraft(modelId = "") {
     fallbackModelIds: [],
     requiredCapabilities: ["json"],
     jsonModeRequired: true,
-    enabled: true
+    enabled: true,
+    createdAt: now,
+    updatedAt: now
   });
 }
 

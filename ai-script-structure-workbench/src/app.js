@@ -947,15 +947,98 @@ function ensureLongScriptTaskRoutesReady(config = {}) {
   if (config.mode !== "api") return { ready: true, warnings: [], requiredTasks: [] };
   const requiredTasks = ["analyzeEpisodeChunk", "aggregateScriptAnalysis"];
   const health = config.taskRouteHealth || {};
-  const missing = requiredTasks.filter((taskType) => !health[taskType]?.checks?.task_smoke?.success);
-  const warnings = missing.map((taskType) => `${taskType} task_smoke 未通过；analyzeScript 测试通过不能代替 ${taskType} 测试。`);
+  const missing = [];
+  const stale = [];
+  for (const taskType of requiredTasks) {
+    const item = health[taskType];
+    if (!item?.checks?.task_smoke?.success) {
+      missing.push(taskType);
+      continue;
+    }
+    const freshness = validateTaskRouteHealthFresh(config, taskType, item);
+    if (!freshness.fresh) stale.push({ taskType, reasons: freshness.reasons });
+  }
+  const warnings = [
+    ...missing.map((taskType) => `${taskType} task_smoke 未通过；analyzeScript 测试通过不能代替 ${taskType} 测试。`),
+    ...stale.map((item) => `${item.taskType} 的任务测试已过期，请重新执行完整任务链路测试。${item.reasons.join("；")}`)
+  ];
   return {
-    ready: missing.length === 0,
+    ready: missing.length === 0 && stale.length === 0,
     requiredTasks,
     missing,
+    stale,
     warnings,
     health: Object.fromEntries(requiredTasks.map((taskType) => [taskType, health[taskType] || null]))
   };
+}
+
+function validateTaskRouteHealthFresh(config = {}, taskType, health = {}) {
+  const current = createTaskRouteFingerprint(config, taskType);
+  const saved = health.fingerprint || null;
+  if (!saved) return { fresh: false, reasons: ["缺少任务路由测试指纹"] };
+  const fields = ["providerId", "modelId", "routeId", "requestFormat", "baseUrlHash", "providerUpdatedAt", "modelUpdatedAt", "routeUpdatedAt"];
+  const reasons = fields
+    .filter((field) => (saved[field] || null) !== (current[field] || null))
+    .map((field) => `${field} 已变化`);
+  if (health.stale) reasons.push(health.staleReason || "配置已变化");
+  return { fresh: reasons.length === 0, reasons, current, saved };
+}
+
+function createTaskRouteFingerprint(config = {}, taskType) {
+  return createTaskRouteFingerprintFromBundle(resolveTaskRouteBundle(config, taskType));
+}
+
+function createTaskRouteFingerprintFromBundle(bundle = {}) {
+  const provider = bundle.provider || {};
+  const model = bundle.model || {};
+  const route = bundle.route || {};
+  const diagnostics = diagnoseProviderProtocol(provider, model);
+  return {
+    providerId: provider.id || null,
+    modelId: model.id || null,
+    routeId: route.id || null,
+    requestFormat: provider.requestFormat || "auto",
+    resolvedRequestFormat: diagnostics.resolvedRequestFormat || "",
+    baseUrlHash: hashConfigValue(provider.baseUrl || ""),
+    providerUpdatedAt: provider.updatedAt || null,
+    modelUpdatedAt: model.updatedAt || null,
+    routeUpdatedAt: route.updatedAt || null
+  };
+}
+
+function markTaskRouteHealthStale(apiConfig = {}, reason = "配置已变化，请重新执行完整任务链路测试。") {
+  const taskRouteHealth = apiConfig.taskRouteHealth || {};
+  apiConfig.taskRouteHealth = Object.fromEntries(
+    Object.entries(taskRouteHealth).map(([taskType, item]) => [
+      taskType,
+      {
+        ...item,
+        stale: true,
+        staleReason: reason,
+        success: false,
+        message: reason
+      }
+    ])
+  );
+  if (apiConfig.lastTaskChainTest) {
+    apiConfig.lastTaskChainTest = {
+      ...apiConfig.lastTaskChainTest,
+      stale: true,
+      staleReason: reason,
+      success: false
+    };
+  }
+  return apiConfig;
+}
+
+function hashConfigValue(value = "") {
+  const text = String(value || "");
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
 }
 
 function createChunkFailure(error, chunk) {
@@ -1377,6 +1460,7 @@ async function saveApiMode() {
     state.apiConfig.selectedModelId = selectedModelId;
     state.apiConfig.allowDemoInApiMode = allowDemoInApiMode;
     state.mode = state.apiConfig.mode;
+    markTaskRouteHealthStale(state.apiConfig, "API Mode 或全局模型配置已变化，请重新执行完整任务链路测试。");
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存 API 运行模式", { targetType: "settings", action: "edit", light: true });
@@ -1435,6 +1519,7 @@ async function saveProvider(providerId) {
         ? providerDraft
         : provider
     );
+    markTaskRouteHealthStale(state.apiConfig, "Provider 配置已变化，请重新执行完整任务链路测试。");
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存 API Provider", { targetType: "settings", action: "edit", light: true });
@@ -1628,6 +1713,7 @@ async function saveModel(modelId) {
           }
         : item
     );
+    markTaskRouteHealthStale(state.apiConfig, "模型配置已变化，请重新执行完整任务链路测试。");
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存模型配置", { targetType: "settings", action: "edit", light: true });
@@ -1884,6 +1970,9 @@ function finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorT
     diagnostics,
     suggestions,
     providerHealthStatus: success ? "ok" : errorType === "provider_protocol_mismatch" ? "protocol_error" : "task_json_failed",
+    fingerprint: createTaskRouteFingerprintFromBundle(bundle),
+    stale: false,
+    staleReason: "",
     log,
     latencyMs: Math.round(performance.now() - startedAt),
     createdAt: new Date().toISOString()
@@ -2115,6 +2204,7 @@ async function switchCoreTasksToSelectedModel() {
     state.apiConfig = switchCoreRoutesToModel(state.apiConfig, model.id);
     state.apiConfig.selectedModelId = model.id;
     state.mode = "api";
+    markTaskRouteHealthStale(state.apiConfig, "核心任务路由已切换，请重新执行完整任务链路测试。");
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "一键切换核心任务到当前真实模型", { targetType: "settings", action: "edit", light: true });
@@ -2160,6 +2250,7 @@ async function saveRoute(routeId) {
           }
         : route
     );
+    markTaskRouteHealthStale(state.apiConfig, "路由配置已变化，请重新执行完整任务链路测试。");
     state.apiConfig.updatedAt = new Date().toISOString();
     return state;
   }, "保存模型路由", { targetType: "settings", action: "edit", light: true });
@@ -2548,7 +2639,7 @@ function renderLongScriptRouteReadiness(readiness = {}) {
       ${(readiness.requiredTasks || ["analyzeEpisodeChunk", "aggregateScriptAnalysis"])
         .map((taskType) => {
           const item = readiness.health?.[taskType];
-          return `<p>${escapeHtml(taskType)}：task_smoke ${item?.checks?.task_smoke?.success ? "通过" : "未通过"}${item?.errorMessage ? `｜${escapeHtml(item.errorMessage)}` : ""}</p>`;
+          return `<p>${escapeHtml(taskType)}：task_smoke ${item?.checks?.task_smoke?.success ? "通过" : "未通过"}${item?.stale ? "｜测试已过期" : ""}${item?.errorMessage ? `｜${escapeHtml(item.errorMessage)}` : ""}</p>`;
         })
         .join("")}
       ${(readiness.warnings || []).map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
@@ -3173,6 +3264,7 @@ function renderTaskChainTestResult(result) {
   return `
     <div class="suggestion-box ${result.success ? "" : "has-warning"}">
       <h3>最近完整任务链路测试</h3>
+      ${result.stale ? `<p class="warning-text">配置已变化，请重新执行完整任务链路测试。</p>` : ""}
       ${(result.warnings || []).map((item) => `<p class="warning-text">${escapeHtml(item)}</p>`).join("")}
       <div class="compact-list">
         ${(result.results || [])
@@ -3180,8 +3272,9 @@ function renderTaskChainTestResult(result) {
             <div class="${item.success ? "" : "has-warning"}">
               <strong>${escapeHtml(item.taskType)}</strong>
               <span>${escapeHtml(item.message || "")}</span>
-              <small>provider_ping ${item.checks?.provider_ping?.success ? "通过" : "失败"}｜chat_smoke ${item.checks?.chat_smoke?.success ? "通过" : "失败"}｜json_smoke ${item.checks?.json_smoke?.success ? "通过" : "失败"}｜task_smoke ${item.checks?.task_smoke?.success ? "通过" : "失败"}</small>
+              <small>provider_ping ${item.checks?.provider_ping?.success ? "通过" : "失败"}｜chat_smoke ${item.checks?.chat_smoke?.success ? "通过" : "失败"}｜json_smoke ${item.checks?.json_smoke?.success ? "通过" : "失败"}｜task_smoke ${item.checks?.task_smoke?.success ? "通过" : "失败"}${item.stale ? "｜测试已过期" : ""}</small>
               ${item.errorMessage ? `<small class="warning-text">${escapeHtml(item.errorMessage)}</small>` : ""}
+              ${item.staleReason ? `<small class="warning-text">${escapeHtml(item.staleReason)}</small>` : ""}
               ${(item.suggestions || []).length ? `<small>建议：${escapeHtml(item.suggestions.join("；"))}</small>` : ""}
             </div>
           `)
@@ -3214,8 +3307,8 @@ function renderProviderHealthPanel(config) {
               <span>provider_ping：${renderHealthCheck(health.checks?.provider_ping)}</span>
               <span>chat_smoke：${renderHealthCheck(health.checks?.chat_smoke)}</span>
               <span>json_smoke：${renderHealthCheck(health.checks?.json_smoke)}</span>
-              <span>task_smoke analyzeEpisodeChunk：${taskEpisode?.checks?.task_smoke?.success ? "通过" : "未通过"}</span>
-              <span>task_smoke aggregateScriptAnalysis：${taskAggregate?.checks?.task_smoke?.success ? "通过" : "未通过"}</span>
+              <span>task_smoke analyzeEpisodeChunk：${renderTaskHealthStatus(taskEpisode)}</span>
+              <span>task_smoke aggregateScriptAnalysis：${renderTaskHealthStatus(taskAggregate)}</span>
               <span>最近错误：${escapeHtml(health.lastErrorType || health.message || "无")}</span>
               <span>修复建议：${escapeHtml((health.suggestions || diagnostics.suggestions || []).join("；") || "无")}</span>
             </div>`;
@@ -3229,6 +3322,12 @@ function renderProviderHealthPanel(config) {
 function renderHealthCheck(check) {
   if (!check) return "未测试";
   return check.success ? "通过" : "失败";
+}
+
+function renderTaskHealthStatus(health) {
+  if (!health) return "未测试";
+  if (health.stale) return "测试已过期";
+  return health.checks?.task_smoke?.success ? "通过" : "未通过";
 }
 
 function renderProviderSettings(config) {
