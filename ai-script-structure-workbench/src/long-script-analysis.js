@@ -256,6 +256,7 @@ export function applyLongScriptGateFlags(analysis) {
   const hasPrimitiveNormalization = (meta.normalizedEvidenceEntries || 0) > 0 || (meta.normalizedBeatEntries || 0) > 0;
   const hasLocalAggregateFallback = meta.localAggregateFallback === true || meta.aggregateSource === "local_fallback";
   const hasSchemaRepairedChunks = meta.schemaRepairedChunks === true || (meta.schemaRepairedChunkIds || []).length > 0;
+  const hasTaskRouteSchemaRepair = meta.taskRouteHealthUsedSchemaRepair === true;
   const isFullScript = analysis.coverage?.inputType === "full_script";
   meta.participatingChunks = meta.participatingChunks ?? meta.successfulChunks ?? 0;
   meta.completeAggregation = !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks;
@@ -263,12 +264,12 @@ export function applyLongScriptGateFlags(analysis) {
     meta.warnings = uniqueList([...(meta.warnings || []), `系统仅切出 ${meta.detectedChunks || meta.successfulChunks || 0}/${meta.expectedChunks} 个分集/chunk，不能视为完整剧本分析完成。`]);
   }
   meta.usableForCaseSave = !meta.blockedSave;
-  meta.usableForFullScriptCase = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !hasSchemaRepairedChunks && !meta.blockedSave && invalidRatio === 0;
-  meta.usableForPatternExtraction = !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !hasSchemaRepairedChunks && !meta.blockedSave && invalidRatio === 0;
-  meta.usableForProduction = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !hasSchemaRepairedChunks && !meta.blockedSave;
-  meta.usableForSkillLearning = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !hasSchemaRepairedChunks && !hasPrimitiveNormalization && !meta.blockedSave && !meta.needsReview && invalidRatio === 0;
+  meta.usableForFullScriptCase = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !hasSchemaRepairedChunks && !hasTaskRouteSchemaRepair && !meta.blockedSave && invalidRatio === 0;
+  meta.usableForPatternExtraction = !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !hasSchemaRepairedChunks && !hasTaskRouteSchemaRepair && !meta.blockedSave && invalidRatio === 0;
+  meta.usableForProduction = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !hasSchemaRepairedChunks && !hasTaskRouteSchemaRepair && !meta.blockedSave;
+  meta.usableForSkillLearning = isFullScript && !hasFailedChunks && !hasMissingChunks && !hasSkippedChunks && !hasLocalAggregateFallback && !hasSchemaRepairedChunks && !hasTaskRouteSchemaRepair && !hasPrimitiveNormalization && !meta.blockedSave && !meta.needsReview && invalidRatio === 0;
   meta.usableForLearning = meta.usableForSkillLearning;
-  if (hasFailedChunks || hasMissingChunks || hasSkippedChunks || hasPrimitiveNormalization || hasLocalAggregateFallback || hasSchemaRepairedChunks) {
+  if (hasFailedChunks || hasMissingChunks || hasSkippedChunks || hasPrimitiveNormalization || hasLocalAggregateFallback || hasSchemaRepairedChunks || hasTaskRouteSchemaRepair) {
     meta.needsReview = true;
     if (hasSkippedChunks) {
       meta.warnings = uniqueList([...(meta.warnings || []), "存在因 JSON 输出失败而跳过的分集，不能进入正式完整案例或 Skill 学习沉淀。"]);
@@ -278,6 +279,9 @@ export function applyLongScriptGateFlags(analysis) {
     }
     if (hasSchemaRepairedChunks) {
       meta.warnings = uniqueList([...(meta.warnings || []), "存在经过 schema repair 的分集，需人工复核，不能直接进入正式完整案例或 Skill 学习沉淀。"]);
+    }
+    if (hasTaskRouteSchemaRepair) {
+      meta.warnings = uniqueList([...(meta.warnings || []), "analyzeEpisodeChunk 依赖 schema repair 才通过，长剧本结果需复核，不能直接进入正式完整案例或 Skill 学习沉淀。"]);
     }
     meta.usableForSkillLearning = false;
     meta.usableForLearning = false;

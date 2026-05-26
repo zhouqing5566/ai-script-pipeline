@@ -5,7 +5,7 @@ export async function callGemini({ provider, model, messages, options = {} }) {
   if (!provider?.apiKey) throw new Error("Gemini Provider 缺少 API Key");
   if (!model?.modelName) throw new Error("模型缺少真实 modelName");
 
-  const timeoutMs = options.timeoutMs || provider.timeoutMs || 60000;
+  const timeoutMs = Number(options.timeoutMs || provider.timeoutMs || 60000);
   const controller = new AbortController();
   let timedOut = false;
   const timeout = setTimeout(() => {
@@ -39,6 +39,7 @@ export async function callGemini({ provider, model, messages, options = {} }) {
     return {
       outputText: extractGeminiText(payload),
       tokenUsage: normalizeGeminiUsage(payload.usageMetadata),
+      effectiveTimeoutMs: timeoutMs,
       raw: payload
     };
   } catch (error) {

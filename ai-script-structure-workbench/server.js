@@ -297,6 +297,12 @@ async function handleApi(req, res, url) {
         serverStatus: 200,
         providerStatus: adapterResult.providerStatus || 200,
         providerRawPreview: adapterResult.providerRawPreview,
+        effectiveTimeoutMs: adapterResult.effectiveTimeoutMs,
+        routeTimeoutMs: Number(body.options?.timeoutMs) || null,
+        providerTimeoutMs: Number(provider.timeoutMs) || null,
+        effectiveMaxOutputTokens: Number(body.options?.maxOutputTokens) || null,
+        routeMaxOutputTokens: Number(body.options?.requestedMaxOutputTokens || body.options?.maxOutputTokens) || null,
+        effectiveInvocation: createEffectiveInvocationLog({ body, provider, model, requestFormat: adapterResult.requestFormat, effectiveTimeoutMs: adapterResult.effectiveTimeoutMs }),
         settingsUpdatedAt,
         providerUpdatedAt: provider.updatedAt || null,
         modelUpdatedAt: model.updatedAt || null,
@@ -322,6 +328,12 @@ async function handleApi(req, res, url) {
         serverStatus: 502,
         providerStatus: null,
         providerRawPreview: "",
+        effectiveTimeoutMs: Number(body.options?.timeoutMs || provider?.timeoutMs || 60000),
+        routeTimeoutMs: Number(body.options?.timeoutMs) || null,
+        providerTimeoutMs: Number(provider?.timeoutMs) || null,
+        effectiveMaxOutputTokens: Number(body.options?.maxOutputTokens) || null,
+        routeMaxOutputTokens: Number(body.options?.requestedMaxOutputTokens || body.options?.maxOutputTokens) || null,
+        effectiveInvocation: createEffectiveInvocationLog({ body, provider, model, requestFormat: provider && model ? resolveRequestFormat({ provider: { ...provider, requestFormat }, model }) : requestFormat, effectiveTimeoutMs: Number(body.options?.timeoutMs || provider?.timeoutMs || 60000) }),
         settingsUpdatedAt,
         providerUpdatedAt: provider?.updatedAt || null,
         modelUpdatedAt: model?.updatedAt || null,
@@ -369,6 +381,7 @@ async function performProviderCall({ provider, model, messages, options, source 
     requestFormat,
     providerStatus: 200,
     providerRawPreview: previewProviderRaw(adapterResult.raw),
+    effectiveTimeoutMs: adapterResult.effectiveTimeoutMs || Number(options.timeoutMs || provider.timeoutMs || 60000),
     source
   };
 }
@@ -423,6 +436,26 @@ function previewProviderRaw(raw) {
   } catch {
     return String(raw).slice(0, 500);
   }
+}
+
+function createEffectiveInvocationLog({ body = {}, provider = null, model = null, requestFormat = "auto", effectiveTimeoutMs = null }) {
+  const options = body.options || {};
+  return {
+    taskType: body.taskType || null,
+    routeId: body.routeId || null,
+    routeTaskType: body.taskType || null,
+    modelId: model?.id || body.modelId || null,
+    providerId: provider?.id || body.providerId || null,
+    providerName: provider?.name || "",
+    modelName: model?.displayName || model?.modelName || "",
+    routeTimeoutMs: Number(options.timeoutMs) || null,
+    providerTimeoutMs: Number(provider?.timeoutMs) || null,
+    effectiveTimeoutMs: Number(effectiveTimeoutMs || options.timeoutMs || provider?.timeoutMs || 60000),
+    routeMaxOutputTokens: Number(options.requestedMaxOutputTokens || options.maxOutputTokens) || null,
+    effectiveMaxOutputTokens: Number(options.maxOutputTokens) || null,
+    requestFormat,
+    resolvedRequestFormat: requestFormat
+  };
 }
 
 function normalizeProviderError(error, provider = null, model = null) {

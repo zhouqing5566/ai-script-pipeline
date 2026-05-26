@@ -1,4 +1,4 @@
-import { normalizeApiConfig } from "./model-config.js";
+import { defaultTimeoutForTask, normalizeApiConfig } from "./model-config.js";
 
 const demoModelId = "model-demo-rule-engine";
 const demoProviderId = "provider-demo-local";
@@ -110,7 +110,7 @@ function createSelection({ mode, route, model, provider, reason, taskType }) {
       jsonModeRequired: Boolean(route?.jsonModeRequired),
       streamingEnabled: Boolean(route?.streamingEnabled),
       retryCount: route?.retryCount || 0,
-      timeoutMs: route?.timeoutMs || provider?.timeoutMs || 60000
+      timeoutMs: route?.timeoutMs || provider?.timeoutMs || defaultTimeoutForTask(taskType || route?.taskType)
     }
   };
 }

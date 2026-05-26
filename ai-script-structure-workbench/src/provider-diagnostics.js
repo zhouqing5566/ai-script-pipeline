@@ -92,6 +92,7 @@ export function diagnoseProviderProtocol(provider = {}, model = {}, context = {}
 export function classifyProviderError(error = "") {
   const message = typeof error === "string" ? error : error?.message || String(error || "");
   if (protocolMismatchPattern.test(message) || /当前接口不接受 OpenAI Chat Completions 格式|当前接口不接受 OpenAI Chat Completions 请求体|Gemini 官方接口.*OpenAI Chat|generateContent.*openai_chat|Provider 协议预检失败/i.test(message)) return "provider_protocol_mismatch";
+  if (/未找到 Provider 配置|Provider not found|missing provider|缺少 Provider|未找到模型对应 Provider/i.test(message)) return "missing_provider";
   if (/401\b|403\b|unauthorized|forbidden|invalid api key|api key/i.test(message)) return "provider_auth_failed";
   if (/429\b|Resource exhausted|rate limit|quota|too many requests/i.test(message)) return "provider_rate_limit";
   if (/timeout|timed out|AbortError|aborted|请求被中止|signal is aborted/i.test(message)) return "provider_timeout";

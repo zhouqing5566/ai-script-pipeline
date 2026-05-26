@@ -41,6 +41,7 @@ export const coreRouteTaskTypes = [
   "analyzeEpisodeChunk",
   "aggregateScriptAnalysis",
   "schemaRepairAnalyzeEpisodeChunk",
+  "schemaRepairAnalyzeScript",
   "generateMacroOutline",
   "generateStageOutline",
   "generateEpisodeOutline",
@@ -201,7 +202,7 @@ export function createDefaultRoutes() {
       jsonModeRequired: true,
       streamingEnabled: false,
       retryCount: 1,
-      timeoutMs: 60000,
+      timeoutMs: 180000,
       allowFallback: true,
       enabled: true,
       notes: "剧本结构分析必须稳定返回 JSON。"
@@ -220,7 +221,7 @@ export function createDefaultRoutes() {
       jsonModeRequired: true,
       streamingEnabled: false,
       retryCount: 1,
-      timeoutMs: 60000,
+      timeoutMs: 180000,
       allowFallback: true,
       enabled: true,
       notes: "长剧本分集分析：只分析当前 episode/chunk，不推断后续。"
@@ -239,7 +240,7 @@ export function createDefaultRoutes() {
       jsonModeRequired: true,
       streamingEnabled: false,
       retryCount: 1,
-      timeoutMs: 90000,
+      timeoutMs: 240000,
       allowFallback: true,
       enabled: true,
       notes: "只基于分集分析结果聚合全剧结构，不重新编造原文证据。"
@@ -296,7 +297,7 @@ export function createDefaultRoutes() {
       jsonModeRequired: true,
       streamingEnabled: false,
       retryCount: 0,
-      timeoutMs: 30000,
+      timeoutMs: 120000,
       allowFallback: false,
       enabled: true,
       notes: "只修复 JSON，不扩写内容。"
@@ -315,7 +316,7 @@ export function createDefaultRoutes() {
       jsonModeRequired: true,
       streamingEnabled: false,
       retryCount: 0,
-      timeoutMs: 60000,
+      timeoutMs: 180000,
       allowFallback: false,
       enabled: true,
       notes: "把旧结构 episodeAnalysis/structuralAnalysis 重排为 EpisodeChunkAnalysis compact 根对象。"
@@ -334,7 +335,7 @@ export function createDefaultRoutes() {
       jsonModeRequired: true,
       streamingEnabled: false,
       retryCount: 0,
-      timeoutMs: 60000,
+      timeoutMs: 180000,
       allowFallback: false,
       enabled: true,
       notes: "把真实模型的剧本分析草稿重排为标准结构，不允许编造。"
@@ -440,7 +441,7 @@ export function normalizeRoute(route = {}) {
     jsonModeRequired: Boolean(route.jsonModeRequired),
     streamingEnabled: Boolean(route.streamingEnabled),
     retryCount: Number(route.retryCount) || 0,
-    timeoutMs: Number(route.timeoutMs) || 60000,
+    timeoutMs: Number(route.timeoutMs) || defaultTimeoutForTask(route.taskType),
     allowFallback: route.allowFallback !== false,
     enabled: route.enabled !== false,
     notes: route.notes || "",
@@ -586,6 +587,8 @@ export function switchCoreRoutesToModel(apiConfig, modelId) {
         primaryModelId: modelId,
         enabled: true,
         allowFallback: existing.allowFallback !== false,
+        timeoutMs: Math.max(Number(existing.timeoutMs) || 0, defaultTimeoutForTask(taskType)),
+        maxOutputTokens: existing.maxOutputTokens || defaultMaxOutputForTask(taskType),
         updatedAt: new Date().toISOString()
       });
     } else {
@@ -679,12 +682,14 @@ function createEmptyConfig() {
   };
 }
 
-function defaultTimeoutForTask(taskType) {
-  if (taskType === "aggregateScriptAnalysis") return 90000;
+export function defaultTimeoutForTask(taskType) {
+  if (taskType === "analyzeScript") return 180000;
+  if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk") return 180000;
+  if (taskType === "aggregateScriptAnalysis") return 240000;
   if (taskType === "generateEpisodeOutline") return 90000;
-  if (taskType === "schemaRepairAnalyzeScript") return 60000;
-  if (taskType === "schemaRepairAnalyzeEpisodeChunk") return 60000;
-  if (taskType === "jsonRepair") return 30000;
+  if (taskType === "schemaRepairAnalyzeScript") return 180000;
+  if (taskType === "schemaRepairAnalyzeEpisodeChunk") return 180000;
+  if (taskType === "jsonRepair") return 120000;
   return 60000;
 }
 

@@ -30,6 +30,7 @@ import {
   createModelDraft,
   createProviderDraft,
   createRouteDraft,
+  defaultTimeoutForTask,
   switchCoreRoutesToModel
 } from "../src/model-config.js";
 import { clampMaxOutputTokens, selectModelRoute } from "../src/model-router.js";
@@ -251,6 +252,13 @@ applyLongScriptGateFlags(skippedGate);
 assert.equal(skippedGate.sourceMeta.needsReview, true);
 assert.equal(skippedGate.sourceMeta.usableForSkillLearning, false);
 assert.equal(skippedGate.sourceMeta.completeAggregation, false);
+const schemaRepairRouteGate = { coverage: { inputType: "full_script" }, sourceMeta: { taskRouteHealthUsedSchemaRepair: true, failedChunks: [], missingChunks: [], evidenceValidation: { invalidEvidenceRatio: 0 } } };
+applyLongScriptGateFlags(schemaRepairRouteGate);
+assert.equal(schemaRepairRouteGate.sourceMeta.needsReview, true);
+assert.equal(schemaRepairRouteGate.sourceMeta.usableForSkillLearning, false);
+assert.equal(schemaRepairRouteGate.sourceMeta.usableForFullScriptCase, false);
+assert.equal(schemaRepairRouteGate.sourceMeta.usableForProduction, false);
+assert.ok(schemaRepairRouteGate.sourceMeta.warnings.some((item) => item.includes("依赖 schema repair 才通过")));
 const signatureA = createLongScriptInputSignature({ text: "第一集\n内容", episodeCount: 1, userConfirmedFullScript: false });
 const signatureB = createLongScriptInputSignature({ text: "第一集\n内容", episodeCount: 1, userConfirmedFullScript: false });
 const signatureC = createLongScriptInputSignature({ text: "第一集\n内容已改", episodeCount: 1, userConfirmedFullScript: false });
@@ -491,9 +499,30 @@ assert.equal(templatedConfig.providers[0].providerType, "deepseek");
 
 const switchedConfig = switchCoreRoutesToModel(apiStateLike(state.apiConfig), "model-openai-compatible-default");
 assert.equal(switchedConfig.globalDefaultModelId, "model-openai-compatible-default");
+assert.ok(coreRouteTaskTypes.includes("schemaRepairAnalyzeEpisodeChunk"));
+assert.ok(coreRouteTaskTypes.includes("schemaRepairAnalyzeScript"));
+assert.ok(coreRouteTaskTypes.includes("jsonRepair"));
 for (const taskType of coreRouteTaskTypes) {
   assert.equal(switchedConfig.routes.find((route) => route.taskType === taskType)?.primaryModelId, "model-openai-compatible-default");
 }
+const switchedRepairRoute = switchedConfig.routes.find((route) => route.taskType === "schemaRepairAnalyzeEpisodeChunk");
+assert.equal(switchedRepairRoute.primaryModelId, "model-openai-compatible-default");
+assert.ok(switchedRepairRoute.timeoutMs >= 180000);
+assert.ok(defaultTimeoutForTask("analyzeScript") >= 180000);
+assert.ok(defaultTimeoutForTask("analyzeEpisodeChunk") >= 180000);
+assert.ok(defaultTimeoutForTask("schemaRepairAnalyzeEpisodeChunk") >= 180000);
+assert.ok(defaultTimeoutForTask("aggregateScriptAnalysis") >= 240000);
+assert.ok(defaultTimeoutForTask("jsonRepair") >= 120000);
+const preserveHighTimeoutConfig = switchCoreRoutesToModel(
+  {
+    ...apiStateLike(state.apiConfig),
+    routes: apiStateLike(state.apiConfig).routes.map((route) =>
+      route.taskType === "analyzeEpisodeChunk" ? { ...route, timeoutMs: 200000 } : route
+    )
+  },
+  "model-openai-compatible-default"
+);
+assert.equal(preserveHighTimeoutConfig.routes.find((route) => route.taskType === "analyzeEpisodeChunk").timeoutMs, 200000);
 
 const demoSelection = selectModelRoute({
   state,
@@ -1037,6 +1066,18 @@ const routeProbeState = structuredClone(apiState);
 routeProbeState.apiConfig.routes = routeProbeState.apiConfig.routes.map((route) =>
   route.taskType === "analyzeScript" ? { ...route, maxOutputTokens: 200000, timeoutMs: 60000, retryCount: 1 } : route
 );
+const timeoutSelectionState = structuredClone(apiState);
+timeoutSelectionState.apiConfig.routes = timeoutSelectionState.apiConfig.routes.map((route) =>
+  route.taskType === "analyzeEpisodeChunk" ? { ...route, primaryModelId: "model-openai-compatible-default", timeoutMs: 200000 } : route
+);
+const timeoutSelection = selectModelRoute({
+  state: timeoutSelectionState,
+  project: timeoutSelectionState.currentProject,
+  taskType: "analyzeEpisodeChunk",
+  featureArea: "剧本分析中心",
+  matchedSkills: []
+});
+assert.equal(timeoutSelection.options.timeoutMs, 200000);
 const routeProbeResult = await testModelRoute({
   taskType: "analyzeScript",
   featureArea: "剧本分析中心",
@@ -1158,6 +1199,7 @@ assert.equal(shouldRetryModelError(new Error("结构校验失败：缺少 direct
 assert.equal(shouldRetryModelError(new Error("JSON 解析失败：Unexpected token 作")), false);
 assert.equal(shouldRetryModelError(new Error("Provider 请求失败：400 Unknown name \"messages\"")), false);
 assert.equal(classifyProviderError('Invalid JSON payload received. Unknown name "messages"'), "provider_protocol_mismatch");
+assert.equal(classifyProviderError("未找到 Provider 配置。请先保存 Provider，再测试或调用。"), "missing_provider");
 assert.equal(classifyProviderError("Provider 请求失败：429 Resource exhausted"), "provider_rate_limit");
 assert.equal(classifyProviderError("结构校验失败：缺少 episodeBeatLedger"), "task_schema_failed");
 const geminiMismatchDiagnostics = diagnoseProviderProtocol(
@@ -1247,6 +1289,8 @@ assert.ok(serverSource.includes("modelUpdatedAt"));
 assert.ok(serverSource.includes("serverStatus"));
 assert.ok(serverSource.includes("providerStatus"));
 assert.ok(serverSource.includes("providerRawPreview"));
+assert.ok(serverSource.includes("effectiveTimeoutMs"));
+assert.ok(serverSource.includes("createEffectiveInvocationLog"));
 assert.ok(serverSource.includes("diagnoseProviderProtocol"));
 assert.ok(serverSource.includes("provider_protocol_mismatch"));
 assert.ok(serverSource.includes("suggestions"));
@@ -1267,6 +1311,8 @@ assert.ok(modelAdapterSource.includes("requiresRouteFix"));
 assert.ok(modelAdapterSource.includes("executeApiAttemptWithRetries"));
 assert.ok(modelAdapterSource.includes("analyzeEpisodeChunk"));
 assert.ok(modelAdapterSource.includes("aggregateScriptAnalysis"));
+assert.ok(modelAdapterSource.includes("createEffectiveInvocation"));
+assert.ok(modelAdapterSource.includes("effectiveTimeoutMs"));
 assert.ok(modelAdapterSource.includes("jsonModeRequired: false"));
 assert.ok(!modelAdapterSource.includes("function resolveClientRequestFormat"));
 const requestFormatSource = await fs.readFile(new URL("../src/request-format.js", import.meta.url), "utf8");
@@ -1285,6 +1331,13 @@ assert.ok(appSource.includes("chat_smoke"));
 assert.ok(appSource.includes("json_smoke"));
 assert.ok(appSource.includes("task_smoke"));
 assert.ok(appSource.includes("ensureLongScriptTaskRoutesReady"));
+assert.ok(appSource.includes("buildLongScriptExecutionPlan"));
+assert.ok(appSource.includes("\"schemaRepairAnalyzeEpisodeChunk\", \"aggregateScriptAnalysis\""));
+assert.ok(appSource.includes("隐藏修复任务也必须可用"));
+assert.ok(appSource.includes("resolveExactTaskRouteBundle"));
+assert.ok(appSource.includes("skippedDueToMissingProvider"));
+assert.ok(appSource.includes("effectiveTimeoutMs="));
+assert.ok(appSource.includes("任务：${escapeHtml(item.taskType || \"unknown\")"));
 assert.ok(appSource.includes("validateTaskRouteHealthFresh"));
 assert.ok(appSource.includes("createTaskRouteFingerprint"));
 assert.ok(appSource.includes("baseUrlHash"));
@@ -1350,6 +1403,16 @@ assert.ok(appSource.includes("skippedDueToProbeFailure"));
 assert.ok(appSource.includes("probeFailureType"));
 assert.ok(appSource.includes("schemaRepairAnalyzeEpisodeChunk"));
 assert.ok(appSource.includes("成功（结构修复）"));
+assert.ok(appSource.includes("passed_with_schema_repair"));
+assert.ok(appSource.includes("rawTaskFailed"));
+assert.ok(appSource.includes("repairTaskType: taskRepairResult?.success ? \"schemaRepairAnalyzeEpisodeChunk\""));
+assert.ok(appSource.includes("通过（结构修复，需复核）"));
+assert.ok(appSource.includes("原始 analyzeEpisodeChunk 输出没有遵守字段结构，系统通过 schemaRepairAnalyzeEpisodeChunk 修复为标准 EpisodeChunkAnalysis"));
+assert.ok(appSource.includes("taskRouteHealthUsedSchemaRepair"));
+assert.ok(appSource.includes("依赖 schema repair 才通过，长剧本结果将标记 needsReview，不能进入正式 Skill 沉淀"));
+assert.ok(appSource.includes("result.success && (result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired) ? \"可用但需复核\""));
+assert.ok(appSource.includes("repair 后 compact schema"));
+assert.ok(appSource.indexOf("shouldAttemptEpisodeSchemaRepair(taskResult)") > appSource.indexOf("let taskResult = await callModel"));
 assert.ok(appSource.includes("模型返回字段："));
 assert.ok(appSource.includes("系统期望字段："));
 assert.ok(appSource.includes("JSON，但模型返回结构不符合 EpisodeChunkAnalysis compact schema"));
@@ -1393,9 +1456,18 @@ assert.ok(promptBuilderSource.includes("getTaskOutputContract"));
 assert.ok(promptBuilderSource.includes("你是严格 JSON 生成器，不是聊天助手"));
 assert.ok(promptBuilderSource.includes("只返回 EpisodeChunkAnalysis JSON 对象"));
 assert.ok(promptBuilderSource.includes("analyzeEpisodeChunk"));
+assert.ok(promptBuilderSource.includes("你正在执行 analyzeEpisodeChunk。"));
+assert.ok(promptBuilderSource.includes("根对象必须直接是 EpisodeChunkAnalysis。"));
+assert.ok(promptBuilderSource.includes("禁止返回 episodeAnalysis。"));
+assert.ok(promptBuilderSource.includes("禁止返回 structuralAnalysis。"));
+assert.ok(promptBuilderSource.includes("必须严格返回这个最小结构"));
+assert.ok(promptBuilderSource.indexOf("你正在执行 analyzeEpisodeChunk。") < promptBuilderSource.indexOf("当前任务：${taskType}"));
 assert.ok(taskContractSource.includes("analyzeEpisodeChunkCompact"));
 assert.ok(taskContractSource.includes("禁止输出旧结构或外层包裹字段"));
 assert.ok(taskContractSource.includes("episodeAnalysis"));
+assert.ok(taskContractSource.includes("禁止返回 result/data/output 包裹"));
+assert.ok(taskContractSource.includes("严格返回这个最小合法 EpisodeChunkAnalysis 示例结构"));
+assert.ok(taskContractSource.includes("episodeFunctionAnalysis.evidenceBeatIds 必须引用 episodeBeatLedger 中真实存在的 beatId"));
 assert.ok(taskContractSource.includes("schemaRepairAnalyzeEpisodeChunk"));
 assert.ok(taskContractSource.includes("不得包在 scriptAnalysis"));
 assert.ok(taskContractSource.includes("episodeBeatLedger"));

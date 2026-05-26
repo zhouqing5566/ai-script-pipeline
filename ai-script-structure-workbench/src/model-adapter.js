@@ -92,6 +92,7 @@ export async function callModel({
   let provider = selection.provider;
   let model = selection.model;
   let mode = selection.mode;
+  let effectiveInvocation = createEffectiveInvocation({ taskType, route: selection.route, provider, model, options: selection.options });
   const warnings = [];
   warnings.push(...(selection.optionWarnings || []));
   let schemaMeta = null;
@@ -147,6 +148,12 @@ export async function callModel({
       settingsUpdatedAt = response.settingsUpdatedAt || null;
       providerUpdatedAt = response.providerUpdatedAt || null;
       modelUpdatedAt = response.modelUpdatedAt || null;
+      effectiveInvocation = {
+        ...effectiveInvocation,
+        ...(response.effectiveInvocation || {}),
+        effectiveTimeoutMs: response.effectiveTimeoutMs ?? effectiveInvocation.effectiveTimeoutMs,
+        effectiveMaxOutputTokens: response.effectiveMaxOutputTokens ?? effectiveInvocation.effectiveMaxOutputTokens
+      };
       costEstimate = estimateCost(model, tokenUsage);
       warnings.push(...(response.schemaWarnings || []));
       schemaMeta = response.schemaMeta || schemaMeta;
@@ -161,6 +168,12 @@ export async function callModel({
       settingsUpdatedAt = mainMeta.settingsUpdatedAt || settingsUpdatedAt;
       providerUpdatedAt = mainMeta.providerUpdatedAt || providerUpdatedAt;
       modelUpdatedAt = mainMeta.modelUpdatedAt || modelUpdatedAt;
+      effectiveInvocation = {
+        ...effectiveInvocation,
+        ...(mainMeta.effectiveInvocation || {}),
+        effectiveTimeoutMs: mainMeta.effectiveTimeoutMs ?? effectiveInvocation.effectiveTimeoutMs,
+        effectiveMaxOutputTokens: mainMeta.effectiveMaxOutputTokens ?? effectiveInvocation.effectiveMaxOutputTokens
+      };
     }
     copyJsonErrorMeta(providerError, {
       setRawOutputPreview: (value) => (rawOutputPreview = value || rawOutputPreview),
@@ -221,6 +234,12 @@ export async function callModel({
           settingsUpdatedAt = response.settingsUpdatedAt || null;
           providerUpdatedAt = response.providerUpdatedAt || null;
           modelUpdatedAt = response.modelUpdatedAt || null;
+          effectiveInvocation = {
+            ...effectiveInvocation,
+            ...(response.effectiveInvocation || {}),
+            effectiveTimeoutMs: response.effectiveTimeoutMs ?? effectiveInvocation.effectiveTimeoutMs,
+            effectiveMaxOutputTokens: response.effectiveMaxOutputTokens ?? effectiveInvocation.effectiveMaxOutputTokens
+          };
           costEstimate = estimateCost(model, tokenUsage);
           warnings.push(...(response.schemaWarnings || []));
           schemaMeta = response.schemaMeta || schemaMeta;
@@ -234,6 +253,12 @@ export async function callModel({
             settingsUpdatedAt = fallbackMeta.settingsUpdatedAt || settingsUpdatedAt;
             providerUpdatedAt = fallbackMeta.providerUpdatedAt || providerUpdatedAt;
             modelUpdatedAt = fallbackMeta.modelUpdatedAt || modelUpdatedAt;
+            effectiveInvocation = {
+              ...effectiveInvocation,
+              ...(fallbackMeta.effectiveInvocation || {}),
+              effectiveTimeoutMs: fallbackMeta.effectiveTimeoutMs ?? effectiveInvocation.effectiveTimeoutMs,
+              effectiveMaxOutputTokens: fallbackMeta.effectiveMaxOutputTokens ?? effectiveInvocation.effectiveMaxOutputTokens
+            };
           }
           copyJsonErrorMeta(fallbackError, {
             setRawOutputPreview: (value) => (rawOutputPreview = value || rawOutputPreview),
@@ -301,6 +326,8 @@ export async function callModel({
     settingsUpdatedAt,
     providerUpdatedAt,
     modelUpdatedAt,
+    effectiveInvocation,
+    effectiveTimeoutMs: effectiveInvocation.effectiveTimeoutMs,
     matchedSkillIds,
     warnings,
     schemaMeta: effectiveSchemaMeta,
@@ -359,6 +386,8 @@ export async function callModel({
     settingsUpdatedAt,
     providerUpdatedAt,
     modelUpdatedAt,
+    effectiveInvocation,
+    effectiveTimeoutMs: effectiveInvocation.effectiveTimeoutMs,
     inputSummary: summarizeInput(inputMeta),
     outputSummary: outputText ? summarizeInput(outputText) : "无输出",
     success: result.success,
@@ -1238,6 +1267,9 @@ async function executeApiAttempt({ taskType, projectId, skillIds, provider, mode
     serverStatus: response.serverStatus,
     providerStatus: response.providerStatus,
     providerRawPreview: response.providerRawPreview,
+    effectiveInvocation: response.effectiveInvocation || null,
+    effectiveTimeoutMs: response.effectiveTimeoutMs ?? null,
+    effectiveMaxOutputTokens: response.effectiveMaxOutputTokens ?? null,
     rawOutputPreview: response.rawOutputPreview,
     jsonExtractionMethod: response.jsonExtractionMethod || "none",
     jsonRepairAttempted: Boolean(response.jsonRepairAttempted),
@@ -1313,6 +1345,9 @@ async function callProvider({ provider, model, messages, options, taskType, rout
       serverStatus: data.serverStatus || response.status,
       providerStatus: data.providerStatus || data.status || null,
       providerRawPreview: data.providerRawPreview || null,
+      effectiveInvocation: data.effectiveInvocation || null,
+      effectiveTimeoutMs: data.effectiveTimeoutMs ?? null,
+      effectiveMaxOutputTokens: data.effectiveMaxOutputTokens ?? null,
       settingsUpdatedAt: data.settingsUpdatedAt || null,
       providerUpdatedAt: data.providerUpdatedAt || null,
       modelUpdatedAt: data.modelUpdatedAt || null
@@ -1323,6 +1358,26 @@ async function callProvider({ provider, model, messages, options, taskType, rout
     normalized.errorType = error.errorType || error.providerPayload?.errorType || classifyProviderError(normalized.message);
     throw normalized;
   }
+}
+
+function createEffectiveInvocation({ taskType, route, provider, model, options = {} }) {
+  const requestFormat = provider && model ? resolveRequestFormat({ provider, model }) : "unknown";
+  return {
+    taskType,
+    routeId: route?.id || null,
+    routeTaskType: route?.taskType || null,
+    modelId: model?.id || null,
+    providerId: provider?.id || null,
+    providerName: provider?.name || "",
+    modelName: model?.displayName || model?.modelName || "",
+    routeTimeoutMs: Number(route?.timeoutMs || 0) || null,
+    providerTimeoutMs: Number(provider?.timeoutMs || 0) || null,
+    effectiveTimeoutMs: Number(options.timeoutMs || route?.timeoutMs || provider?.timeoutMs || 60000),
+    routeMaxOutputTokens: Number(route?.maxOutputTokens || options.requestedMaxOutputTokens || 0) || null,
+    effectiveMaxOutputTokens: Number(options.maxOutputTokens || 0) || null,
+    requestFormat,
+    resolvedRequestFormat: requestFormat
+  };
 }
 
 function featureAreaForTask(taskType) {

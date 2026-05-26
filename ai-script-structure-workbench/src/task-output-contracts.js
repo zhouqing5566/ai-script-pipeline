@@ -349,14 +349,32 @@ const contracts = {
   "confidence": 0.8,
   "needsReview": false
 }`,
-  analyzeEpisodeChunkCompact: `必须返回一个可直接 JSON.parse 的 EpisodeChunkAnalysis 根对象。只返回 JSON，不要解释。
+  analyzeEpisodeChunkCompact: `你正在执行 analyzeEpisodeChunk。
+根对象必须直接是 EpisodeChunkAnalysis。
+禁止返回 episodeAnalysis。
+禁止返回 structuralAnalysis。
+禁止返回 result/data/output 包裹。
+禁止返回数组。
+必须返回以下顶层字段：
+- episodeNo
+- title
+- evidenceLedger
+- episodeBeatLedger
+- episodeFunctionAnalysis
+- reusablePatterns
+- openQuestions
+- continuityNotes
+- confidence
+- needsReview
+
+必须返回一个可直接 JSON.parse 的 EpisodeChunkAnalysis 根对象。只返回 JSON，不要解释。
 只分析当前 episodeText，不推断后续全剧结局，不补写未输入集数。
 所有 sourceText 必须来自当前集文本，不得编造。
 长剧本分集默认使用 compact 合同，coverage / characterMentions / goldfingerEvidence / suspenseEvidence 可由本地 normalize 补齐。
 禁止输出旧结构或外层包裹字段：episodeAnalysis、structuralAnalysis、narrativeAnalysis、result、data、output。
 禁止把结果包在数组里。根对象必须直接是 EpisodeChunkAnalysis。
 必须输出字段名：episodeNo、title、evidenceLedger、episodeBeatLedger、episodeFunctionAnalysis、reusablePatterns、openQuestions、continuityNotes、confidence、needsReview。
-根对象结构：
+严格返回这个最小合法 EpisodeChunkAnalysis 示例结构：
 {
   "episodeNo": 1,
   "title": "第一集",
@@ -364,8 +382,9 @@ const contracts = {
     "hookEvidence": [
       {
         "id": "E001",
-        "sourceText": "必须来自当前集原文",
-        "summary": "证据摘要",
+        "episodeNo": 1,
+        "sourceText": "火车上，林清韵忽然吐血。",
+        "summary": "火车突发吐血危机，形成开头钩子。",
         "evidenceType": "hook",
         "relatedBeatIds": ["B001"],
         "confidence": 0.8
@@ -373,41 +392,55 @@ const contracts = {
     ],
     "conflictBeats": [],
     "suspenseEvidence": [],
-    "episodeEvidence": []
+    "episodeEvidence": [
+      {
+        "episodeNo": 1,
+        "beatIds": ["B001"],
+        "openingHookBeatIds": ["B001"],
+        "cliffhangerBeatIds": [],
+        "evidenceCompleteness": 0.8
+      }
+    ]
   },
   "episodeBeatLedger": [
     {
       "beatId": "B001",
       "episodeNo": 1,
-      "sourceText": "必须来自当前集原文",
-      "beatSummary": "",
-      "characters": [],
-      "audienceEmotion": [],
-      "suspenseQuestion": "",
-      "structureFunction": "",
+      "sceneNo": 1,
+      "sourceText": "火车上，林清韵忽然吐血。",
+      "beatSummary": "林清韵在火车上突然吐血，制造开头危机。",
+      "characters": ["林清韵"],
+      "audienceEmotion": ["紧张", "好奇"],
+      "suspenseQuestion": "她为什么突然吐血？",
+      "structureFunction": "开头钩子",
       "confidence": 0.8
     }
   ],
   "episodeFunctionAnalysis": {
     "episodeNo": 1,
-    "summary": "",
-    "openingHook": "",
-    "mainConflict": "",
-    "coolMoment": "",
-    "informationGain": "",
-    "characterFunction": "",
-    "cliffhanger": "",
+    "summary": "本集用火车吐血危机开场，引出主角识别蛊毒的能力。",
+    "openingHook": "林清韵在火车上突然吐血。",
+    "mainConflict": "突发蛊毒危机与无人能解的困境。",
+    "coolMoment": "孙大为看出蛊毒。",
+    "informationGain": "观众知道这个世界存在蛊毒与特殊医术。",
+    "characterFunction": "引出孙大为的特殊判断能力。",
+    "cliffhanger": "蛊毒来源尚未揭开。",
     "evidenceBeatIds": ["B001"],
     "inferenceLevel": "原文明确",
     "confidence": 0.8,
     "riskNotes": []
   },
   "reusablePatterns": [],
-  "openQuestions": [],
+  "openQuestions": ["蛊毒来源是谁？"],
   "continuityNotes": [],
   "confidence": 0.8,
   "needsReview": false
-}`,
+}
+
+强调：
+sourceText 必须逐字来自 episodeText。
+episodeFunctionAnalysis.evidenceBeatIds 必须引用 episodeBeatLedger 中真实存在的 beatId。
+不要输出任何其他字段名。`,
   aggregateScriptAnalysis: `必须返回标准 analyzeScript 根对象。
 只基于 episodeChunkAnalyses 的 evidenceLedger、episodeBeatLedger、episodeFunctionAnalysis 做聚合。
 不要重新编造原文证据；全剧主题/主线/人物/结局必须引用已有 evidenceIds / beatIds。

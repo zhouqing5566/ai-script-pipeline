@@ -44,6 +44,7 @@ import {
   createModelDraft,
   createProviderDraft,
   createRouteDraft,
+  defaultTimeoutForTask,
   applyProviderTemplate,
   coreRouteTaskTypes,
   featureAreas,
@@ -487,6 +488,10 @@ async function executeAnalyzeScript() {
 async function executeLongScriptAnalysis({ initialState = null, coverage = null, retryFailedOnly = false, retryAggregateOnly = false } = {}) {
   const actionLabel = retryAggregateOnly ? "重试全剧聚合" : retryFailedOnly ? "重试失败分集" : "长剧本分集分析";
   let current = initialState || commitOpenInputsBeforeAction(actionLabel);
+  if (current.apiConfig.mode === "api") {
+    await syncApiSettings({ successMessage: "分析前已同步 API 路由配置到本地服务。", show: false });
+    current = readOpenInputs(store.getState());
+  }
   const input = current.scriptInput;
   const inputSignature = createLongScriptInputSignature(input);
   const currentCoverage = coverage || detectScriptCoverage(input.text, input.episodeCount, { userConfirmedFullScript: input.userConfirmedFullScript });
@@ -538,6 +543,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   progress.currentStep = retryAggregateOnly ? "重试全剧聚合" : retryFailedOnly ? (chunks.length ? "重试失败分集" : "重试全剧聚合") : "剧本切分";
   progress.warnings = split.warnings || [];
   progress.routeReadiness = readiness;
+  progress.taskRouteHealthUsedSchemaRepair = Boolean(readiness.usedSchemaRepair);
   progress.chunkResults = previousResults;
   progress.chunks = (progress.chunks || []).map((item) => {
     if (previousResults[item.chunkKey]) return { ...item, status: "成功", error: "" };
@@ -554,6 +560,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   const missingChunks = split.missingChunks || [];
   const chunkResults = { ...previousResults };
   const logs = [];
+  const taskRouteHealthUsedSchemaRepair = Boolean(readiness.usedSchemaRepair);
   let jsonFailureStreak = 0;
   let abortedByJsonFailure = false;
   let abortedByProbeFailure = false;
@@ -614,10 +621,15 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       if (isJsonChunkFailure(failed)) jsonFailureStreak += 1;
       else jsonFailureStreak = 0;
       const providerProtocolMismatch = failed.errorType === "provider_protocol_mismatch";
+      const missingProvider = failed.errorType === "missing_provider";
+      const providerRuntimeFailure = isProviderChunkFailure(failed);
       if (providerProtocolMismatch) {
         abortedByProbeFailure = true;
         probeFailureType = "provider_protocol_mismatch";
-      } else if (isProbeChunk && ["json_parse", "schema_validation", "source_text_validation", "empty_model_structure"].includes(failed.errorType)) {
+      } else if (missingProvider) {
+        abortedByProbeFailure = true;
+        probeFailureType = "missing_provider";
+      } else if (isProbeChunk && (providerRuntimeFailure || ["json_parse", "schema_validation", "source_text_validation", "empty_model_structure"].includes(failed.errorType))) {
         abortedByProbeFailure = true;
         probeFailureType = failed.errorType;
         abortedByJsonFailure = failed.errorType === "json_parse";
@@ -628,20 +640,28 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
         const remaining = chunks.slice(chunkIndex + 1);
         for (const skipped of remaining) {
           const skippedDueToProbeFailure = Boolean(abortedByProbeFailure);
+          const skippedDueToMissingProvider = probeFailureType === "missing_provider";
+          const skippedDueToProviderFailure = skippedDueToProbeFailure && !providerProtocolMismatch && !skippedDueToMissingProvider && isProviderProbeFailureType(probeFailureType);
           const skippedItem = {
             failureStage: "episode_chunk",
             chunkKey: getChunkKey(skipped),
             episodeNo: skipped.episodeNo,
             title: skipped.title,
             detectedBy: skipped.detectedBy,
-            errorType: providerProtocolMismatch ? "skipped_due_to_provider_protocol_mismatch" : skippedDueToProbeFailure ? "skipped_due_to_probe_failure" : "skipped_due_to_json_failure",
-            skippedDueToProbeFailure: skippedDueToProbeFailure && !providerProtocolMismatch,
+            errorType: providerProtocolMismatch ? "skipped_due_to_provider_protocol_mismatch" : skippedDueToMissingProvider ? "skipped_due_to_missing_provider" : skippedDueToProviderFailure ? "skipped_due_to_provider_failure" : skippedDueToProbeFailure ? "skipped_due_to_probe_failure" : "skipped_due_to_json_failure",
+            skippedDueToProbeFailure: skippedDueToProbeFailure && !providerProtocolMismatch && !skippedDueToMissingProvider && !skippedDueToProviderFailure,
             probeFailureType: skippedDueToProbeFailure ? probeFailureType : "",
             skippedDueToProviderProtocolMismatch: providerProtocolMismatch,
+            skippedDueToMissingProvider,
+            skippedDueToProviderFailure,
             skippedDueToJsonFailure: !skippedDueToProbeFailure,
             error: skippedDueToProbeFailure
               ? providerProtocolMismatch
                 ? "skippedDueToProviderProtocolMismatch：Provider 协议不匹配，已停止后续调用。"
+                : skippedDueToMissingProvider
+                  ? "skippedDueToMissingProvider：隐藏任务缺少 Provider 配置，已停止后续调用。"
+                : skippedDueToProviderFailure
+                  ? `skippedDueToProviderFailure：第一集真实分集探针 ${probeFailureType}，已暂停后续调用。`
                 : `skippedDueToProbeFailure：第一集探针 ${probeFailureType} 失败，已暂停后续调用。`
               : "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
           };
@@ -662,6 +682,10 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
               "跳过",
               providerProtocolMismatch
                 ? "skippedDueToProviderProtocolMismatch：Provider 协议不匹配，已停止后续调用。"
+                : skippedDueToMissingProvider
+                  ? "skippedDueToMissingProvider：隐藏任务缺少 Provider 配置，已停止后续调用。"
+                : skippedDueToProviderFailure
+                  ? `skippedDueToProviderFailure：第一集真实分集探针 ${probeFailureType}，已暂停后续调用。`
                 : abortedByProbeFailure
                 ? `skippedDueToProbeFailure：第一集探针 ${probeFailureType} 失败，已暂停后续调用。`
                 : "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
@@ -671,6 +695,10 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
             ...(draft.warnings || []),
             providerProtocolMismatch
               ? "Provider 协议不匹配，已停止后续调用。"
+              : missingProvider
+                ? "隐藏修复任务缺少 Provider 配置，已停止后续调用。请检查 schemaRepairAnalyzeEpisodeChunk/jsonRepair 路由。"
+              : providerRuntimeFailure && isProbeChunk
+                ? "后台任务烟测通过，但第一集真实分集请求超时或 API 失败，已暂停后续调用。请查看 effectiveTimeoutMs、Base URL、服务商状态或提高任务超时。"
               : abortedByProbeFailure
               ? probeFailureWarning(probeFailureType)
               : "连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。"
@@ -722,10 +750,13 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     finalAnalysis.sourceMeta.abortedByProbeFailure = abortedByProbeFailure;
     finalAnalysis.sourceMeta.probeFailureType = probeFailureType;
     finalAnalysis.sourceMeta.abortedByProviderProtocolMismatch = probeFailureType === "provider_protocol_mismatch";
+    finalAnalysis.sourceMeta.abortedByMissingProvider = probeFailureType === "missing_provider";
+    finalAnalysis.sourceMeta.abortedByProviderRuntimeFailure = isProviderProbeFailureType(probeFailureType);
     finalAnalysis.sourceMeta.aggregateSkipped = true;
     finalAnalysis.sourceMeta.skippedChunks = skippedChunks;
     finalAnalysis.sourceMeta.schemaRepairedChunks = schemaRepairedChunkIds.length > 0;
     finalAnalysis.sourceMeta.schemaRepairedChunkIds = schemaRepairedChunkIds;
+    finalAnalysis.sourceMeta.taskRouteHealthUsedSchemaRepair = taskRouteHealthUsedSchemaRepair;
     finalAnalysis.sourceMeta.needsReview = true;
     finalAnalysis.sourceMeta.usableForSkillLearning = false;
     finalAnalysis.sourceMeta.usableForLearning = false;
@@ -734,9 +765,14 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       abortedByProbeFailure
         ? probeFailureType === "provider_protocol_mismatch"
           ? "Provider 协议不匹配，已停止后续调用。"
+          : probeFailureType === "missing_provider"
+            ? "隐藏修复任务缺少 Provider 配置，已停止后续调用。"
+          : isProviderProbeFailureType(probeFailureType)
+            ? "后台任务烟测通过，但第一集真实分集请求超时或 API 失败，已暂停后续调用。"
           : "分集 JSON 探针失败，已停止后续分集调用。"
-        : "连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。"
-    ];
+        : "连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。",
+      taskRouteHealthUsedSchemaRepair ? "analyzeEpisodeChunk 依赖 schema repair 才通过，长剧本结果将标记 needsReview，不能进入正式 Skill 沉淀。" : ""
+    ].filter(Boolean);
     applyLongScriptGateFlags(finalAnalysis);
   } else {
     try {
@@ -767,10 +803,12 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     finalAnalysis.sourceMeta.completeAggregation = failedChunks.length === 0 && missingChunks.length === 0;
     finalAnalysis.sourceMeta.schemaRepairedChunks = schemaRepairedChunkIds.length > 0;
     finalAnalysis.sourceMeta.schemaRepairedChunkIds = schemaRepairedChunkIds;
+    finalAnalysis.sourceMeta.taskRouteHealthUsedSchemaRepair = taskRouteHealthUsedSchemaRepair;
     finalAnalysis.sourceMeta.warnings = [
       ...(finalAnalysis.sourceMeta.warnings || []),
       missingChunks.length ? `仅切出 ${allChunks.length}/${split.expectedChunkCount || allChunks.length} 个分集/chunk，不能视为完整剧本分析完成。` : "",
-      schemaRepairedChunkIds.length ? "存在 schema repair 成功的分集，全剧结果需复核，不可直接进入 Skill 学习沉淀。" : ""
+      schemaRepairedChunkIds.length ? "存在 schema repair 成功的分集，全剧结果需复核，不可直接进入 Skill 学习沉淀。" : "",
+      taskRouteHealthUsedSchemaRepair ? "analyzeEpisodeChunk 依赖 schema repair 才通过，长剧本结果将标记 needsReview，不能进入正式 Skill 沉淀。" : ""
     ].filter(Boolean);
     applyLongScriptGateFlags(finalAnalysis);
     } catch (error) {
@@ -782,6 +820,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       finalAnalysis.sourceMeta.localAggregateFallback = true;
       finalAnalysis.sourceMeta.schemaRepairedChunks = schemaRepairedChunkIds.length > 0;
       finalAnalysis.sourceMeta.schemaRepairedChunkIds = schemaRepairedChunkIds;
+      finalAnalysis.sourceMeta.taskRouteHealthUsedSchemaRepair = taskRouteHealthUsedSchemaRepair;
       finalAnalysis.sourceMeta.needsReview = true;
       finalAnalysis.sourceMeta.usableForSkillLearning = false;
       finalAnalysis.sourceMeta.usableForLearning = false;
@@ -823,6 +862,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       abortedByJsonFailure,
       abortedByProbeFailure,
       probeFailureType,
+      taskRouteHealthUsedSchemaRepair,
       chunkResults,
       inputSignature
     };
@@ -909,7 +949,8 @@ async function repairEpisodeChunkSchema({ originalResult, chunkInput, projectId 
     needsReview: true,
     usableForSkillLearning: false,
     usableForLearning: false,
-    usableForFullScriptCase: false
+    usableForFullScriptCase: false,
+    usableForProduction: false
   };
   repairResult.parsedJson.needsReview = true;
   repairResult.schemaMeta = {
@@ -934,6 +975,12 @@ function probeFailureWarning(type = "") {
   if (type === "provider_protocol_mismatch") {
     return "Provider 协议不匹配，已停止后续调用。当前接口不接受 OpenAI Chat Completions 请求体，请改为 gemini_native，或确认 Base URL 是真正的 OpenAI-compatible /chat/completions 地址。";
   }
+  if (type === "missing_provider") {
+    return "隐藏修复任务缺少 Provider 配置，已停止长剧本分析。请确认 analyzeEpisodeChunk、schemaRepairAnalyzeEpisodeChunk、aggregateScriptAnalysis 都已绑定真实模型并完成任务链路测试。";
+  }
+  if (isProviderProbeFailureType(type)) {
+    return "后台任务烟测通过，但第一集真实分集请求超时或 API 失败，已暂停后续调用。请查看 effectiveTimeoutMs、Base URL、服务商状态，或提高任务超时后重新测试。";
+  }
   if (type === "schema_validation" || type === "empty_model_structure") {
     return "分集 JSON 探针已成功解析 JSON，但模型返回结构不符合 EpisodeChunkAnalysis compact schema，已暂停后续分集调用。";
   }
@@ -943,33 +990,127 @@ function probeFailureWarning(type = "") {
   return "分集 JSON 探针返回非 JSON，已暂停后续分集调用。";
 }
 
-function ensureLongScriptTaskRoutesReady(config = {}) {
-  if (config.mode !== "api") return { ready: true, warnings: [], requiredTasks: [] };
-  const requiredTasks = ["analyzeEpisodeChunk", "aggregateScriptAnalysis"];
+function buildLongScriptExecutionPlan(config = {}) {
+  const requiredTasks = ["analyzeEpisodeChunk", "schemaRepairAnalyzeEpisodeChunk", "aggregateScriptAnalysis"];
+  const optionalTasks = ["jsonRepair", "schemaRepairAnalyzeScript"];
+  if (config.mode !== "api") {
+    return {
+      requiredTasks,
+      optionalTasks,
+      taskBundles: {},
+      missingTasks: [],
+      staleTasks: [],
+      timeoutWarnings: [],
+      ready: true,
+      warnings: [],
+      health: {}
+    };
+  }
   const health = config.taskRouteHealth || {};
-  const missing = [];
-  const stale = [];
+  const taskBundles = {};
+  const missingTasks = [];
+  const staleTasks = [];
+  const timeoutWarnings = [];
+  const repaired = [];
   for (const taskType of requiredTasks) {
+    const bundle = resolveExactTaskRouteBundle(config, taskType);
+    taskBundles[taskType] = enrichTaskRouteBundle(bundle, taskType);
+    if (!bundle.route || !bundle.model || !bundle.provider) {
+      missingTasks.push(taskType);
+      continue;
+    }
+    const recommendedTimeout = recommendedTimeoutForLongTask(taskType);
+    if (taskBundles[taskType].effectiveTimeoutMs < recommendedTimeout) {
+      timeoutWarnings.push(`${taskType} effectiveTimeoutMs=${taskBundles[taskType].effectiveTimeoutMs}，低于建议值 ${recommendedTimeout}。请保存路由配置或重新一键切换核心任务。`);
+    }
     const item = health[taskType];
     if (!item?.checks?.task_smoke?.success) {
-      missing.push(taskType);
+      missingTasks.push(taskType);
       continue;
     }
     const freshness = validateTaskRouteHealthFresh(config, taskType, item);
-    if (!freshness.fresh) stale.push({ taskType, reasons: freshness.reasons });
+    if (!freshness.fresh) staleTasks.push({ taskType, reasons: freshness.reasons });
+    if (item.checks?.task_smoke?.repaired || item.repaired || item.status === "passed_with_schema_repair") repaired.push(taskType);
+  }
+  for (const taskType of optionalTasks) {
+    const bundle = resolveExactTaskRouteBundle(config, taskType);
+    const fallbackSource =
+      bundle.route && bundle.model && bundle.provider
+        ? ""
+        : taskType === "jsonRepair"
+          ? "schemaRepairAnalyzeEpisodeChunk"
+          : "analyzeEpisodeChunk";
+    const fallbackBundle = fallbackSource ? resolveExactTaskRouteBundle(config, fallbackSource) : null;
+    taskBundles[taskType] = enrichTaskRouteBundle(bundle.route && bundle.model && bundle.provider ? bundle : fallbackBundle || bundle, taskType, fallbackSource);
   }
   const warnings = [
-    ...missing.map((taskType) => `${taskType} task_smoke 未通过；analyzeScript 测试通过不能代替 ${taskType} 测试。`),
-    ...stale.map((item) => `${item.taskType} 的任务测试已过期，请重新执行完整任务链路测试。${item.reasons.join("；")}`)
+    "长剧本分析依赖 analyzeEpisodeChunk、schemaRepairAnalyzeEpisodeChunk、aggregateScriptAnalysis。隐藏修复任务也必须可用，否则不能开始。",
+    ...missingTasks.map((taskType) => `${taskType} 缺少可用 route/model/provider 或 task_smoke 未通过；analyzeScript 测试通过不能代替 ${taskType} 测试。`),
+    ...staleTasks.map((item) => `${item.taskType} 的任务测试已过期，请重新执行完整任务链路测试。${item.reasons.join("；")}`),
+    ...timeoutWarnings,
+    ...repaired.map((taskType) => `${taskType} 依赖 schema repair 才通过，长剧本结果将标记 needsReview，不能进入正式 Skill 沉淀。`),
+    ...optionalTasks
+      .filter((taskType) => taskBundles[taskType]?.fallbackSource)
+      .map((taskType) => `${taskType} 未配置独立 route，将 fallback 到 ${taskBundles[taskType].fallbackSource} 的同一模型。`)
   ];
   return {
-    ready: missing.length === 0 && stale.length === 0,
+    ready: missingTasks.length === 0 && staleTasks.length === 0 && timeoutWarnings.length === 0,
     requiredTasks,
-    missing,
-    stale,
-    warnings,
+    optionalTasks,
+    taskBundles,
+    missingTasks,
+    staleTasks,
+    timeoutWarnings,
+    missing: missingTasks,
+    stale: staleTasks,
+    repaired,
+    usedSchemaRepair: repaired.length > 0,
+    warnings: warnings.filter(Boolean),
     health: Object.fromEntries(requiredTasks.map((taskType) => [taskType, health[taskType] || null]))
   };
+}
+
+function ensureLongScriptTaskRoutesReady(config = {}) {
+  return buildLongScriptExecutionPlan(config);
+}
+
+function resolveExactTaskRouteBundle(config, taskType) {
+  const route = (config.routes || []).find((item) => item.enabled && item.taskType === taskType) || null;
+  const model = (config.models || []).find((item) => item.id === route?.primaryModelId && item.enabled !== false) || null;
+  const provider = (config.providers || []).find((item) => item.id === model?.providerId && item.enabled !== false) || null;
+  return { route, model, provider };
+}
+
+function enrichTaskRouteBundle(bundle = {}, taskType, fallbackSource = "") {
+  const route = bundle.route || null;
+  const provider = bundle.provider || null;
+  const model = bundle.model || null;
+  return {
+    taskType,
+    fallbackSource,
+    routeId: route?.id || null,
+    modelId: model?.id || null,
+    providerId: provider?.id || null,
+    providerName: provider?.name || "",
+    modelName: model?.displayName || model?.modelName || "",
+    routeTimeoutMs: Number(route?.timeoutMs || 0) || null,
+    providerTimeoutMs: Number(provider?.timeoutMs || 0) || null,
+    effectiveTimeoutMs: Number(route?.timeoutMs || provider?.timeoutMs || defaultTimeoutForTask(taskType)),
+    routeMaxOutputTokens: Number(route?.maxOutputTokens || 0) || null,
+    effectiveMaxOutputTokens: Number(route?.maxOutputTokens || model?.maxOutputTokens || 0) || null,
+    requestFormat: provider?.requestFormat || "auto",
+    resolvedRequestFormat: provider && model ? diagnoseProviderProtocol(provider, model).resolvedRequestFormat : "unknown"
+  };
+}
+
+function recommendedTimeoutForLongTask(taskType) {
+  if (taskType === "aggregateScriptAnalysis") return 240000;
+  if (taskType === "jsonRepair") return 120000;
+  return 180000;
+}
+
+function isProviderProbeFailureType(type = "") {
+  return ["provider_timeout", "provider_api", "provider_api_failed", "provider_rate_limit", "provider_auth_failed"].includes(type);
 }
 
 function validateTaskRouteHealthFresh(config = {}, taskType, health = {}) {
@@ -1061,15 +1202,26 @@ function createChunkFailure(error, chunk) {
   const result = error.result || {};
   const log = error.log || result.log || {};
   const errorType = error.errorType || result.errorType || log.errorType || classifyChunkError(error.message || result.error || "");
+  const taskType = result.taskType || log.taskType || (errorType === "missing_provider" && /schema repair|schemaRepairAnalyzeEpisodeChunk|分集结构修复/i.test(error.message || result.error || "") ? "schemaRepairAnalyzeEpisodeChunk" : "analyzeEpisodeChunk");
+  const failureStage = taskType === "schemaRepairAnalyzeEpisodeChunk" ? "schema_repair" : taskType === "jsonRepair" ? "json_repair" : "episode_chunk";
+  const effectiveInvocation = result.effectiveInvocation || log.effectiveInvocation || {};
   const returnedKeys = collectJsonKeyPaths(result.parsedJson || result.invalidParsedJson || log.invalidParsedJson || null);
   return {
-    failureStage: "episode_chunk",
+    failureStage,
+    taskType,
     chunkKey: getChunkKey(chunk),
     episodeNo: chunk.episodeNo,
     title: chunk.title,
     detectedBy: chunk.detectedBy,
     error: error.message || result.error || "分集分析失败",
     errorType,
+    routeId: result.routeId || log.routeId || effectiveInvocation.routeId || null,
+    providerId: result.providerId || log.providerId || effectiveInvocation.providerId || null,
+    modelId: result.modelId || log.modelId || effectiveInvocation.modelId || null,
+    effectiveTimeoutMs: result.effectiveTimeoutMs || log.effectiveTimeoutMs || effectiveInvocation.effectiveTimeoutMs || null,
+    routeTimeoutMs: effectiveInvocation.routeTimeoutMs || null,
+    providerTimeoutMs: effectiveInvocation.providerTimeoutMs || null,
+    effectiveInvocation,
     rawOutputPreview: result.rawOutputPreview || log.rawOutputPreview || error.rawOutputPreview || "",
     jsonExtractionMethod: result.jsonExtractionMethod || log.jsonExtractionMethod || error.jsonExtractionMethod || "none",
     jsonRepairAttempted: Boolean(result.jsonRepairAttempted || log.jsonRepairAttempted || error.jsonRepairAttempted),
@@ -1082,13 +1234,20 @@ function createChunkFailure(error, chunk) {
 }
 
 function classifyChunkError(message = "") {
+  if (classifyProviderError(message) === "missing_provider") return "missing_provider";
   if (classifyProviderError(message) === "provider_protocol_mismatch") return "provider_protocol_mismatch";
+  if (classifyProviderError(message) === "provider_timeout") return "provider_timeout";
+  if (["provider_api_failed", "provider_rate_limit", "provider_auth_failed"].includes(classifyProviderError(message))) return classifyProviderError(message);
   if (/JSON 解析失败|not valid JSON|未找到 JSON|Unexpected token/i.test(message)) return "json_parse";
   if (/结构空壳|compact 结构无效|有效内容不足/i.test(message)) return "empty_model_structure";
   if (/结构校验失败|schema/i.test(message)) return "schema_validation";
   if (/sourceText 校验失败|原文未命中/i.test(message)) return "source_text_validation";
   if (/Provider|API|Failed to fetch|timeout|429|500|502|503|504|请求被中止/i.test(message)) return "provider_api";
   return "unknown";
+}
+
+function isProviderChunkFailure(failed = {}) {
+  return isProviderProbeFailureType(failed.errorType) || /Provider|API|Failed to fetch|timeout|超时|429|500|502|503|504|请求被中止/i.test(failed.error || "");
 }
 
 function isJsonChunkFailure(failed = {}) {
@@ -1785,7 +1944,7 @@ async function testCurrentTaskRoute() {
 async function testCurrentTaskChain() {
   const selectedTask = document.querySelector("#route-test-task")?.value || store.getState().apiConfig.routeTestTaskType || "analyzeScript";
   const tasks = selectedTask === "analyzeScript"
-    ? ["analyzeScript", "analyzeEpisodeChunk", "aggregateScriptAnalysis"]
+    ? ["analyzeScript", "analyzeEpisodeChunk", "schemaRepairAnalyzeEpisodeChunk", "aggregateScriptAnalysis"]
     : [selectedTask];
   busyAction = "完整测试当前任务链路";
   render();
@@ -1803,8 +1962,11 @@ async function testCurrentTaskChain() {
       success: results.every((item) => item.success),
       results,
       warnings: selectedTask === "analyzeScript"
-        ? ["长剧本分析依赖 analyzeEpisodeChunk 和 aggregateScriptAnalysis，请分别测试。"]
-        : [],
+        ? [
+            "长剧本分析依赖 analyzeEpisodeChunk、schemaRepairAnalyzeEpisodeChunk 和 aggregateScriptAnalysis，请分别测试。",
+            ...results.filter((item) => item.repaired).map((item) => `${item.taskType} 依赖 schema repair 才通过，长剧本结果将标记 needsReview，不能进入正式 Skill 沉淀。`)
+          ]
+        : results.filter((item) => item.repaired).map((item) => `${item.taskType} 依赖 schema repair 才通过，长剧本结果将标记 needsReview，不能进入正式 Skill 沉淀。`),
       createdAt: new Date().toISOString()
     };
     state.apiConfig.taskRouteHealth = {
@@ -1830,7 +1992,13 @@ async function testCurrentTaskChain() {
     return state;
   }, "完整测试当前任务链路", { targetType: "settings", action: "generate", light: true });
   busyAction = null;
-  showToast(results.every((item) => item.success) ? "完整任务链路测试通过" : "完整任务链路测试未通过：路由连通通过不代表该模型可用于长剧本分集 JSON 分析。");
+  showToast(
+    results.every((item) => item.success)
+      ? results.some((item) => item.repaired)
+        ? "完整任务链路通过但需复核：部分任务依赖 schema repair。"
+        : "完整任务链路测试通过"
+      : "完整任务链路测试未通过：路由连通通过不代表该模型可用于长剧本分集 JSON 分析。"
+  );
 }
 
 async function runTaskRouteHealthCheck(taskType, current) {
@@ -1941,7 +2109,7 @@ async function runTaskRouteHealthCheck(taskType, current) {
     return finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics: payload.diagnostics || diagnostics, errorType, errorMessage, suggestions, startedAt });
   }
 
-  const taskResult = await callModel({
+  let taskResult = await callModel({
     taskType,
     featureArea: featureAreaForTaskType(taskType),
     projectId: current.currentProject.id,
@@ -1949,17 +2117,34 @@ async function runTaskRouteHealthCheck(taskType, current) {
     schema: true,
     state: current
   });
+  const rawTaskResult = taskResult;
+  let taskRepairResult = null;
+  if (!taskResult.success && taskType === "analyzeEpisodeChunk" && shouldAttemptEpisodeSchemaRepair(taskResult)) {
+    taskRepairResult = await repairEpisodeChunkSchema({
+      originalResult: taskResult,
+      chunkInput: createTaskSmokeInput(taskType, current),
+      projectId: current.currentProject.id
+    });
+    if (taskRepairResult.success) taskResult = taskRepairResult;
+  }
   checks.task_smoke = {
     ...checks.task_smoke,
     success: Boolean(taskResult.success),
+    repaired: Boolean(taskRepairResult?.success),
+    needsReview: Boolean(taskRepairResult?.success),
+    rawTaskFailed: Boolean(taskRepairResult?.success && rawTaskResult && !rawTaskResult.success),
+    repairTaskType: taskRepairResult?.success ? "schemaRepairAnalyzeEpisodeChunk" : "",
+    status: taskRepairResult?.success ? "passed_with_schema_repair" : taskResult.success ? "passed" : "failed",
     error: taskResult.error || "",
     errorType: taskResult.errorType || "",
-    rawOutputPreview: taskResult.rawOutputPreview || ""
+    rawOutputPreview: rawTaskResult.rawOutputPreview || taskResult.rawOutputPreview || "",
+    repairError: taskRepairResult && !taskRepairResult.success ? taskRepairResult.error || "" : "",
+    repairRawOutputPreview: taskRepairResult?.rawOutputPreview || ""
   };
-  errorType = taskResult.errorType || "";
-  errorMessage = taskResult.error || "";
+  errorType = taskResult.success ? "" : taskResult.errorType || "";
+  errorMessage = taskResult.success ? "" : taskResult.error || "";
   suggestions = taskResult.success ? suggestions : suggestProviderFix(errorMessage, bundle.provider, bundle.model);
-  return finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorType, errorMessage, suggestions, startedAt, log: taskResult.log });
+  return finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorType, errorMessage, suggestions, startedAt, log: taskResult.log || taskRepairResult?.log || rawTaskResult.log });
 }
 
 function createCheck(name) {
@@ -1968,6 +2153,7 @@ function createCheck(name) {
 
 function finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorType = "", errorMessage = "", suggestions = [], startedAt, log = null }) {
   const success = Boolean(checks.provider_ping.success && checks.chat_smoke.success && checks.json_smoke.success && checks.task_smoke.success);
+  const repaired = Boolean(checks.task_smoke?.repaired);
   return {
     taskType,
     routeId: bundle.route?.id || null,
@@ -1980,12 +2166,19 @@ function finalizeTaskRouteHealth({ taskType, bundle, checks, diagnostics, errorT
     baseUrlType: diagnostics.protocolGuess || "unknown",
     checks,
     success,
-    message: success ? `该模型可用于 ${taskType}。` : `该模型暂不可用于 ${taskType} 的结构化 JSON 输出。`,
+    repaired,
+    needsReview: repaired,
+    status: repaired ? "passed_with_schema_repair" : success ? "passed" : "failed",
+    message: success
+      ? repaired
+        ? `${taskType} 原始输出结构不合格，但 schemaRepairAnalyzeEpisodeChunk 修复成功。可用于长剧本测试，但结果需复核，不能直接进入 Skill 沉淀。`
+        : `该模型可用于 ${taskType}。`
+      : `该模型暂不可用于 ${taskType} 的结构化 JSON 输出。`,
     errorType,
     errorMessage,
     diagnostics,
     suggestions,
-    providerHealthStatus: success ? "ok" : errorType === "provider_protocol_mismatch" ? "protocol_error" : "task_json_failed",
+    providerHealthStatus: success ? (repaired ? "warning" : "ok") : errorType === "provider_protocol_mismatch" ? "protocol_error" : "task_json_failed",
     fingerprint: createTaskRouteFingerprintFromBundle(bundle),
     stale: false,
     staleReason: "",
@@ -2037,6 +2230,30 @@ function parseTinyJson(text = "") {
 }
 
 function createTaskSmokeInput(taskType, current) {
+  if (taskType === "schemaRepairAnalyzeEpisodeChunk") {
+    return {
+      projectTitle: current.scriptInput.title || "分集结构修复测试",
+      genre: current.scriptInput.genre || "测试",
+      episodeNo: 1,
+      episodeTitle: "第一集",
+      episodeText: "第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。",
+      rawModelJson: {
+        episodeAnalysis: [
+          {
+            episodeNo: 1,
+            structuralAnalysis: {
+              openingHook: "林清韵忽然吐血",
+              conflictProgression: "孙大为看出蛊毒",
+              pacing: "开场直接进入危机"
+            }
+          }
+        ]
+      },
+      rawOutputPreview: "{\"episodeAnalysis\":[{\"episodeNo\":1,\"structuralAnalysis\":{\"openingHook\":\"林清韵忽然吐血\"}}]}",
+      schemaIssues: ["缺少 evidenceLedger", "缺少 episodeBeatLedger", "缺少 episodeFunctionAnalysis"],
+      compactContract: "EpisodeChunkAnalysis compact root：episodeNo/title/evidenceLedger/episodeBeatLedger/episodeFunctionAnalysis/reusablePatterns/openQuestions/continuityNotes/confidence/needsReview"
+    };
+  }
   if (taskType === "analyzeEpisodeChunk" || taskType === "schemaRepairAnalyzeEpisodeChunk") {
     return {
       projectTitle: current.scriptInput.title || "分集 JSON 测试",
@@ -2084,15 +2301,8 @@ function createTaskSmokeInput(taskType, current) {
 }
 
 function resolveTaskRouteBundle(config, taskType) {
-  const route =
-    config.routes.find((item) => item.enabled && item.taskType === taskType) ||
-    config.routes.find((item) => item.enabled && item.id === config.selectedRouteId) ||
-    null;
-  const model =
-    config.models.find((item) => item.id === route?.primaryModelId) ||
-    config.models.find((item) => item.id === config.selectedModelId) ||
-    config.models.find((item) => item.id === config.globalDefaultModelId) ||
-    null;
+  const route = config.routes.find((item) => item.enabled && item.taskType === taskType) || null;
+  const model = config.models.find((item) => item.id === route?.primaryModelId) || null;
   const provider = config.providers.find((item) => item.id === model?.providerId) || null;
   return { route, model, provider };
 }
@@ -2120,6 +2330,8 @@ async function testEpisodeChunkJsonOutput() {
     state: current
   });
   const originalTestResult = result;
+  const rawCompactSchemaOk = Boolean(result.success && !result.errorType);
+  let repairAfterCompactSchemaOk = false;
   if (!result.success && shouldAttemptEpisodeSchemaRepair(result)) {
     const repairResult = await repairEpisodeChunkSchema({
       originalResult: result,
@@ -2127,6 +2339,7 @@ async function testEpisodeChunkJsonOutput() {
       projectId: current.currentProject.id
     });
     result = repairResult;
+    repairAfterCompactSchemaOk = Boolean(repairResult.success);
   }
   const validation = result.parsedJson?.sourceMeta?.evidenceValidation || null;
   const suspectedLegacyStructure = hasLegacyEpisodeChunkStructure(originalTestResult.parsedJson || originalTestResult.invalidParsedJson || result.parsedJson);
@@ -2141,7 +2354,17 @@ async function testEpisodeChunkJsonOutput() {
         provider_ping: { name: "provider_ping", success: result.mode === "demo" || !result.error?.includes("Provider") },
         chat_smoke: { name: "chat_smoke", success: result.mode === "demo" || !result.error?.includes("Provider") },
         json_smoke: { name: "json_smoke", success: Boolean(result.parsedJson || result.invalidParsedJson), error: result.error || "" },
-        task_smoke: { name: "task_smoke", success: Boolean(result.success), error: result.error || "", errorType }
+        task_smoke: {
+          name: "task_smoke",
+          success: Boolean(result.success),
+          repaired: Boolean(result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired),
+          needsReview: Boolean(result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired),
+          rawTaskFailed: Boolean((result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired) && !originalTestResult.success),
+          repairTaskType: result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired ? "schemaRepairAnalyzeEpisodeChunk" : "",
+          status: result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired ? "passed_with_schema_repair" : result.success ? "passed" : "failed",
+          error: result.error || "",
+          errorType
+        }
       },
       diagnostics,
       errorType,
@@ -2154,11 +2377,15 @@ async function testEpisodeChunkJsonOutput() {
       success: result.success,
       jsonParseSuccess: Boolean(result.parsedJson || result.invalidParsedJson || result.outputText),
       extractionMethod: result.jsonExtractionMethod || result.log?.jsonExtractionMethod || "none",
-      schemaOk: result.success && !result.errorType,
-      compactSchemaOk: result.success && !result.errorType,
+      schemaOk: rawCompactSchemaOk,
+      compactSchemaOk: rawCompactSchemaOk,
+      repairCompactSchemaOk: repairAfterCompactSchemaOk,
+      finalCompactSchemaOk: Boolean(result.success),
       suspectedLegacyStructure,
       schemaRepairAttempted: Boolean(result.schemaRepairAttempted || result.schemaRepaired),
       schemaRepairSuccess: result.success && Boolean(result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired),
+      statusLabel: result.success && (result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired) ? "可用但需复核" : result.success ? "通过" : "失败",
+      needsReview: Boolean(result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired),
       sourceTextOk: validation ? (validation.validCount || 0) > 0 && (validation.invalidEvidenceRatio || 0) <= 0.5 : false,
       requestFormat: result.requestFormat,
       modelName: result.log?.modelName || result.modelId || "未选择",
@@ -2190,7 +2417,13 @@ async function testEpisodeChunkJsonOutput() {
     return state;
   }, "测试 analyzeEpisodeChunk JSON 输出", { targetType: "settings", action: "generate", light: true });
   busyAction = null;
-  showToast(result.success ? "分集 JSON 输出测试通过" : "分集 JSON 输出测试失败：路由连通通过不代表复杂 JSON 输出可用，请更换模型、开启 JSON mode 或使用更严格 Prompt。");
+  showToast(
+    result.success
+      ? result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired
+        ? "分集 JSON 输出可用但需复核：原始结构不合格，已通过 schema repair 修复。"
+        : "分集 JSON 输出测试通过"
+      : "分集 JSON 输出测试失败：路由连通通过不代表复杂 JSON 输出可用，请更换模型、开启 JSON mode 或使用更严格 Prompt。"
+  );
 }
 
 function hasLegacyEpisodeChunkStructure(value = null) {
@@ -2585,8 +2818,11 @@ function renderLongScriptProgress(progress) {
                   (item) => `
                 <div>
                   <strong>失败阶段：${escapeHtml(failureStageLabel(item))}</strong>
+                  <span>任务：${escapeHtml(item.taskType || "unknown")}</span>
                   <span>${escapeHtml(item.title || (item.episodeNo ? `第${item.episodeNo}集` : "未知 chunk"))}</span>
                   <span>${escapeHtml(item.errorType || "unknown")}</span>
+                  ${item.effectiveTimeoutMs ? `<span>effectiveTimeoutMs=${escapeHtml(String(item.effectiveTimeoutMs))}｜routeTimeoutMs=${escapeHtml(String(item.routeTimeoutMs || "未命中"))}｜providerTimeoutMs=${escapeHtml(String(item.providerTimeoutMs || "未命中"))}</span>` : ""}
+                  ${item.routeId || item.providerId || item.modelId ? `<span>route=${escapeHtml(item.routeId || "无")}｜provider=${escapeHtml(item.providerId || "无")}｜model=${escapeHtml(item.modelId || "无")}</span>` : ""}
                   <em>${escapeHtml(item.error || "未记录错误")}</em>
                   ${item.rawOutputPreview ? `<p>模型原始输出前 300 字：${escapeHtml(String(item.rawOutputPreview).slice(0, 300))}</p>` : ""}
                   ${item.returnedKeys?.length ? `<p>模型返回字段：${item.returnedKeys.map((key) => escapeHtml(key)).join("；")}</p>` : ""}
@@ -2632,6 +2868,8 @@ function summarizeLongFailureStats(progress = {}) {
   const counts = new Map([
     ["JSON 解析失败", 0],
     ["schema 校验失败", 0],
+    ["缺少 Provider", 0],
+    ["Provider 超时", 0],
     ["Provider 协议不匹配", 0],
     ["Provider/API 失败", 0],
     ["sourceText 校验失败", 0],
@@ -2641,6 +2879,8 @@ function summarizeLongFailureStats(progress = {}) {
     const type = item.errorType || classifyChunkError(item.error || "");
     if (type === "json_parse") counts.set("JSON 解析失败", counts.get("JSON 解析失败") + 1);
     else if (type === "schema_validation") counts.set("schema 校验失败", counts.get("schema 校验失败") + 1);
+    else if (type === "missing_provider") counts.set("缺少 Provider", counts.get("缺少 Provider") + 1);
+    else if (type === "provider_timeout") counts.set("Provider 超时", counts.get("Provider 超时") + 1);
     else if (type === "provider_protocol_mismatch") counts.set("Provider 协议不匹配", counts.get("Provider 协议不匹配") + 1);
     else if (type === "source_text_validation") counts.set("sourceText 校验失败", counts.get("sourceText 校验失败") + 1);
     else if (type === "provider_api") counts.set("Provider/API 失败", counts.get("Provider/API 失败") + 1);
@@ -2655,8 +2895,9 @@ function renderLongScriptRouteReadiness(readiness = {}) {
       ${(readiness.requiredTasks || ["analyzeEpisodeChunk", "aggregateScriptAnalysis"])
         .map((taskType) => {
           const item = readiness.health?.[taskType];
+          const bundle = readiness.taskBundles?.[taskType] || {};
           const staleDetail = (readiness.stale || []).find((entry) => entry.taskType === taskType)?.reasons?.join("；") || item?.staleReason || "";
-          return `<p>${escapeHtml(taskType)}：task_smoke ${item?.checks?.task_smoke?.success ? "通过" : "未通过"}${staleDetail ? `｜测试已过期：${escapeHtml(staleDetail)}` : ""}${item?.errorMessage ? `｜${escapeHtml(item.errorMessage)}` : ""}</p>`;
+          return `<p>${escapeHtml(taskType)}：task_smoke ${item?.checks?.task_smoke?.success ? "通过" : "未通过"}｜effectiveTimeoutMs=${escapeHtml(String(bundle.effectiveTimeoutMs || "未命中"))}｜route=${escapeHtml(bundle.routeId || "无")}｜model=${escapeHtml(bundle.modelName || bundle.modelId || "无")}${staleDetail ? `｜测试已过期：${escapeHtml(staleDetail)}` : ""}${item?.errorMessage ? `｜${escapeHtml(item.errorMessage)}` : ""}</p>`;
         })
         .join("")}
       ${(readiness.warnings || []).map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
@@ -2666,6 +2907,8 @@ function renderLongScriptRouteReadiness(readiness = {}) {
 
 function failureStageLabel(item = {}) {
   if (item.failureStage === "aggregate" || item.detectedBy === "aggregate") return "全剧聚合";
+  if (item.failureStage === "schema_repair") return "分集结构修复";
+  if (item.failureStage === "json_repair") return "JSON 修复";
   return "分集分析";
 }
 
@@ -3249,12 +3492,13 @@ function renderEpisodeJsonTestResult(result) {
     <div class="suggestion-box ${result.success ? "" : "has-warning"}">
       <h3>最近分集 JSON 输出测试</h3>
       ${keyValueGrid([
+        ["结果", result.statusLabel || (result.success ? "通过" : "失败")],
         ["JSON.parse", result.jsonParseSuccess ? "成功" : "失败"],
         ["extractionMethod", result.extractionMethod || "none"],
-        ["schema", result.schemaOk ? "通过" : "失败"],
-        ["compact schema", result.compactSchemaOk ? "通过" : "失败"],
+        ["原始 compact schema", result.compactSchemaOk ? "通过" : "失败"],
         ["疑似旧结构", result.suspectedLegacyStructure ? "是" : "否"],
         ["schema repair", result.schemaRepairAttempted ? (result.schemaRepairSuccess ? "已执行并成功" : "已执行但失败") : "未执行"],
+        ["repair 后 compact schema", result.repairCompactSchemaOk || result.finalCompactSchemaOk ? "通过" : "失败"],
         ["sourceText", result.sourceTextOk ? "命中" : "未通过"],
         ["requestFormat", result.requestFormat || "未记录"],
         ["modelName", result.modelName || "未记录"],
@@ -3262,6 +3506,11 @@ function renderEpisodeJsonTestResult(result) {
         ["错误", result.errorMessage || "无"],
         ["时间", formatDate(result.createdAt)]
       ])}
+      ${
+        result.schemaRepairSuccess
+          ? `<p class="warning-text">原始 analyzeEpisodeChunk 输出没有遵守字段结构，系统通过 schemaRepairAnalyzeEpisodeChunk 修复为标准 EpisodeChunkAnalysis。可以继续测试长剧本，但结果不能直接进入正式 Skill 沉淀。</p>`
+          : ""
+      }
       ${
         result.suspectedLegacyStructure
           ? `<p class="warning-text">模型能返回 JSON，但未遵守 EpisodeChunkAnalysis 字段名。建议执行 schema repair 或更换模型/Prompt。</p>`
@@ -3289,7 +3538,8 @@ function renderTaskChainTestResult(result) {
             <div class="${item.success ? "" : "has-warning"}">
               <strong>${escapeHtml(item.taskType)}</strong>
               <span>${escapeHtml(item.message || "")}</span>
-              <small>provider_ping ${item.checks?.provider_ping?.success ? "通过" : "失败"}｜chat_smoke ${item.checks?.chat_smoke?.success ? "通过" : "失败"}｜json_smoke ${item.checks?.json_smoke?.success ? "通过" : "失败"}｜task_smoke ${item.checks?.task_smoke?.success ? "通过" : "失败"}${item.stale ? `｜测试已过期：${escapeHtml(item.staleReason || "配置已变化")}` : ""}</small>
+              <small>provider_ping ${item.checks?.provider_ping?.success ? "通过" : "失败"}｜chat_smoke ${item.checks?.chat_smoke?.success ? "通过" : "失败"}｜json_smoke ${item.checks?.json_smoke?.success ? "通过" : "失败"}｜task_smoke ${renderTaskSmokeLabel(item.checks?.task_smoke)}${item.stale ? `｜测试已过期：${escapeHtml(item.staleReason || "配置已变化")}` : ""}</small>
+              ${item.checks?.task_smoke?.repaired ? `<small class="warning-text">原始 analyzeEpisodeChunk 输出没有遵守字段结构，系统通过 schemaRepairAnalyzeEpisodeChunk 修复为标准 EpisodeChunkAnalysis。可以继续测试长剧本，但结果不能直接进入正式 Skill 沉淀。</small>` : ""}
               ${item.errorMessage ? `<small class="warning-text">${escapeHtml(item.errorMessage)}</small>` : ""}
               ${item.staleReason ? `<small class="warning-text">${escapeHtml(item.staleReason)}</small>` : ""}
               ${(item.suggestions || []).length ? `<small>建议：${escapeHtml(item.suggestions.join("；"))}</small>` : ""}
@@ -3341,6 +3591,12 @@ function renderHealthCheck(check) {
   return check.success ? "通过" : "失败";
 }
 
+function renderTaskSmokeLabel(check) {
+  if (!check) return "未测试";
+  if (check.success && check.repaired) return "通过（结构修复，需复核）";
+  return check.success ? "通过" : "失败";
+}
+
 function renderTaskHealthStatus(health, config = null, taskType = "") {
   if (!health) return "未测试";
   const freshness = config && taskType ? validateTaskRouteHealthFresh(config, taskType, health) : { fresh: !health.stale, reasons: health.staleReason ? [health.staleReason] : [] };
@@ -3348,7 +3604,7 @@ function renderTaskHealthStatus(health, config = null, taskType = "") {
     const reasons = freshness.reasons?.length ? freshness.reasons : [health.staleReason || "配置已变化"];
     return `测试已过期：${escapeHtml(reasons.join("；"))}`;
   }
-  return health.checks?.task_smoke?.success ? "通过" : "未通过";
+  return renderTaskSmokeLabel(health.checks?.task_smoke);
 }
 
 function renderProviderSettings(config) {

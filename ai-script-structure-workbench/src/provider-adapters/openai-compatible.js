@@ -3,7 +3,7 @@ export async function callOpenAICompatible({ provider, model, messages, options 
   if (!provider?.apiKey) throw new Error("OpenAI-compatible Provider 缺少 API Key");
   if (!model?.modelName) throw new Error("模型缺少真实 modelName");
 
-  const timeoutMs = options.timeoutMs || provider.timeoutMs || 60000;
+  const timeoutMs = Number(options.timeoutMs || provider.timeoutMs || 60000);
   const controller = new AbortController();
   let timedOut = false;
   const timeout = setTimeout(() => {
@@ -37,6 +37,7 @@ export async function callOpenAICompatible({ provider, model, messages, options 
     return {
       outputText: payload.choices?.[0]?.message?.content || "",
       tokenUsage: payload.usage || null,
+      effectiveTimeoutMs: timeoutMs,
       raw: payload
     };
   } catch (error) {
