@@ -948,6 +948,67 @@ assert.equal(episodeRepairResult.success, true);
 assert.equal(episodeRepairResult.parsedJson.episodeFunctionAnalysis.evidenceBeatIds[0], "B001");
 delete globalThis.__MODEL_CALL_PROXY__;
 
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => ({
+  outputText: JSON.stringify({
+    episodeNo: 1,
+    title: "第一集",
+    evidenceLedger: [
+      {
+        sourceText: "火车上，林清韵忽然吐血。",
+        observableEvent: "林清韵在火车上突然吐血",
+        possibleMeanings: ["开头危机", "强钩子"],
+        confidence: "high"
+      },
+      {
+        sourceText: "孙大为看出她中了蛊毒。",
+        claim: "孙大为具有识别蛊毒的特殊能力",
+        confidence: 0.8
+      }
+    ],
+    episodeFunctionAnalysis: {
+      episodeNo: 1,
+      summary: "火车吐血危机引出主角识别蛊毒的能力。",
+      openingHook: "林清韵突然吐血。",
+      mainConflict: "蛊毒危机与无人识破之间的冲突。",
+      informationGain: "孙大为能看出蛊毒。",
+      characterFunction: "展示孙大为的特殊判断能力。",
+      confidence: 0.78,
+      riskNotes: []
+    },
+    reusablePatterns: [],
+    openQuestions: [],
+    continuityNotes: [],
+    confidence: 0.72,
+    needsReview: false
+  }),
+  tokenUsage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+  requestFormat: payload.requestFormat,
+  endpointType: "server_proxy",
+  status: 200
+});
+const arrayEvidenceRepairResult = await callModel({
+  taskType: "schemaRepairAnalyzeEpisodeChunk",
+  featureArea: "JSON 修复",
+  inputMeta: {
+    projectTitle: "分集 JSON 测试",
+    episodeNo: 1,
+    episodeTitle: "第一集",
+    episodeText: "第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。",
+    rawModelJson: legacyEpisodeShapeResult.parsedJson,
+    schemaIssues: legacyEpisodeShapeResult.schemaIssues
+  },
+  schema: true,
+  state: apiSuccessState
+});
+assert.equal(arrayEvidenceRepairResult.success, true);
+assert.equal(Array.isArray(arrayEvidenceRepairResult.parsedJson.evidenceLedger), false);
+assert.ok(arrayEvidenceRepairResult.parsedJson.evidenceLedger.hookEvidence.length >= 1);
+assert.ok(arrayEvidenceRepairResult.parsedJson.episodeBeatLedger.length >= 1);
+assert.ok(arrayEvidenceRepairResult.parsedJson.episodeFunctionAnalysis.evidenceBeatIds.length >= 1);
+assert.equal(arrayEvidenceRepairResult.parsedJson.sourceMeta.normalizedEvidenceLedgerArray, true);
+assert.equal(arrayEvidenceRepairResult.parsedJson.needsReview, true);
+delete globalThis.__MODEL_CALL_PROXY__;
+
 const wrappedAnalysisCalls = [];
 globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
   wrappedAnalysisCalls.push(payload);

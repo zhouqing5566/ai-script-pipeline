@@ -723,10 +723,12 @@ function normalizeParsedOutputForTask(taskType, value, inputMeta = {}) {
 
 function coerceEpisodeChunkOutput(value, inputMeta = {}) {
   const base = analyzeEpisodeChunk(inputMeta);
-  const source = isPlainObject(value) ? value : {};
+  const rawSource = isPlainObject(value) ? value : {};
+  const normalizedCandidate = normalizeEpisodeChunkCandidate(rawSource, inputMeta);
+  const source = normalizedCandidate.value;
   const compactShape = evaluateEpisodeChunkCompactShape(source, { episodeText: inputMeta.episodeText || inputMeta.text || "" });
   const merged = deepMerge(base, source);
-  const warnings = [];
+  const warnings = [...normalizedCandidate.warnings];
   const missingCompactFields = compactShape.missingCompactFields || [];
   merged.episodeNo = Number(source.episodeNo) || Number(inputMeta.episodeNo) || base.episodeNo || null;
   merged.title = source.title || inputMeta.episodeTitle || base.title || `第${merged.episodeNo || "?"}集`;
@@ -743,6 +745,7 @@ function coerceEpisodeChunkOutput(value, inputMeta = {}) {
   merged.needsReview = Boolean(source.needsReview ?? base.needsReview);
   merged.sourceMeta = {
     ...(source.sourceMeta || {}),
+    ...(normalizedCandidate.meta || {}),
     normalizedEpisodeChunk: true,
     modelStructureIncomplete: !compactShape.valid,
     modelStructureIssues: compactShape.issues,
@@ -767,6 +770,282 @@ function coerceEpisodeChunkOutput(value, inputMeta = {}) {
     warnings.push("分集 evidence/sourceText 校验不足，需复核或重试。");
   }
   return { value: merged, warnings };
+}
+
+function normalizeEpisodeChunkCandidate(source = {}, inputMeta = {}) {
+  const next = { ...source };
+  const warnings = [];
+  const meta = {};
+  const episodeNo = Number(source.episodeNo) || Number(inputMeta.episodeNo) || null;
+  const episodeText = String(inputMeta.episodeText || inputMeta.text || "");
+  const evidenceArray = Array.isArray(source.evidenceLedger) ? source.evidenceLedger : [];
+  const structural = isPlainObject(source.structuralAnalysis)
+    ? source.structuralAnalysis
+    : isPlainObject(source.episodeAnalysis?.structuralAnalysis)
+      ? source.episodeAnalysis.structuralAnalysis
+      : {};
+
+  let normalizedBeats = Array.isArray(source.episodeBeatLedger)
+    ? source.episodeBeatLedger.map((beat, index) => normalizeEpisodeBeatCandidate(beat, index, episodeNo))
+    : [];
+  let normalizedEvidenceLedger = isPlainObject(source.evidenceLedger) ? normalizeEpisodeEvidenceLedger(source.evidenceLedger, episodeNo) : null;
+
+  if (evidenceArray.length) {
+    const arrayItems = evidenceArray
+      .map((item, index) => normalizeEvidenceArrayItem(item, index, episodeNo))
+      .filter((item) => item.sourceText);
+    if (arrayItems.length) {
+      normalizedEvidenceLedger = evidenceArrayToLedger(arrayItems);
+      if (!normalizedBeats.length) {
+        normalizedBeats = arrayItems.map((item, index) => evidenceItemToBeat(item, index, episodeNo));
+      }
+      warnings.push("schemaRepairAnalyzeEpisodeChunk 返回了数组型 evidenceLedger，系统已按 EpisodeChunkAnalysis compact 结构标准化，结果需复核。");
+      meta.normalizedEvidenceLedgerArray = true;
+      next.needsReview = true;
+    }
+  }
+
+  if (normalizedEvidenceLedger) next.evidenceLedger = normalizedEvidenceLedger;
+  if (normalizedBeats.length) next.episodeBeatLedger = normalizedBeats;
+
+  const beatIds = normalizedBeats.map((beat) => String(beat.beatId || "").trim()).filter(Boolean);
+  const evidenceItems = collectNormalizedEvidenceItems(next.evidenceLedger);
+  const evidenceIds = evidenceItems.map((item) => String(item.id || "").trim()).filter(Boolean);
+  const providedEpisodeFunction = isPlainObject(source.episodeFunctionAnalysis) ? source.episodeFunctionAnalysis : {};
+  const episodeFunction = { ...providedEpisodeFunction };
+  episodeFunction.episodeNo = Number(episodeFunction.episodeNo) || episodeNo;
+  episodeFunction.summary = firstText(
+    episodeFunction.summary,
+    structural.summary,
+    structural.structuralFunction,
+    source.structuralFunction,
+    evidenceItems.map((item) => item.summary).filter(Boolean).join("；")
+  );
+  episodeFunction.openingHook = firstText(
+    episodeFunction.openingHook,
+    structural.openingHook,
+    source.openingHook,
+    normalizedBeats[0]?.sourceText,
+    evidenceItems[0]?.sourceText
+  );
+  episodeFunction.mainConflict = firstText(
+    episodeFunction.mainConflict,
+    structural.mainConflict,
+    structural.conflictProgression,
+    source.mainConflict,
+    evidenceItems.find((item) => item.evidenceType === "conflict")?.summary,
+    episodeFunction.summary
+  );
+  episodeFunction.coolMoment = firstText(episodeFunction.coolMoment, structural.coolMoment, source.coolMoment, "");
+  episodeFunction.informationGain = firstText(
+    episodeFunction.informationGain,
+    structural.informationGain,
+    structural.informationIncrement,
+    source.informationGain,
+    evidenceItems[1]?.summary,
+    episodeFunction.summary
+  );
+  episodeFunction.characterFunction = firstText(
+    episodeFunction.characterFunction,
+    structural.characterFunction,
+    source.characterFunction,
+    source.characterFunctions && JSON.stringify(source.characterFunctions),
+    episodeFunction.summary
+  );
+  episodeFunction.cliffhanger = firstText(episodeFunction.cliffhanger, structural.cliffhanger, source.cliffhanger, "");
+  episodeFunction.evidenceBeatIds = arrayOrFallback(episodeFunction.evidenceBeatIds, beatIds);
+  episodeFunction.evidenceIds = arrayOrFallback(episodeFunction.evidenceIds, evidenceIds);
+  episodeFunction.inferenceLevel = episodeFunction.inferenceLevel || "原文明确";
+  episodeFunction.confidence = normalizeConfidence(episodeFunction.confidence, 0.62);
+  episodeFunction.riskNotes = arrayOrFallback(episodeFunction.riskNotes, []);
+  if (meta.normalizedEvidenceLedgerArray) {
+    episodeFunction.riskNotes = uniqueList([...episodeFunction.riskNotes, "模型返回 evidenceLedger 数组，已标准化为 compact 结构，需人工复核。"]);
+  }
+  next.episodeFunctionAnalysis = episodeFunction;
+
+  if (meta.normalizedEvidenceLedgerArray || normalizedBeats.some((beat) => beat.normalizedFromAlias)) {
+    next.sourceMeta = {
+      ...(next.sourceMeta || {}),
+      ...meta,
+      needsReview: true,
+      usableForLearning: false,
+      usableForProduction: false
+    };
+    next.needsReview = true;
+  }
+
+  // If model used a valid sourceText with ellipsis, keep it visible but avoid
+  // treating it as a precise source quote in the compact gate.
+  next.episodeBeatLedger = (next.episodeBeatLedger || []).map((beat) => ensureBeatSourceTextFromEpisode(beat, episodeText));
+  next.evidenceLedger = normalizeEpisodeEvidenceLedger(next.evidenceLedger || {}, episodeNo);
+  return { value: next, warnings, meta };
+}
+
+function normalizeEpisodeEvidenceLedger(ledger = {}, episodeNo = null) {
+  const next = isPlainObject(ledger) ? { ...ledger } : {};
+  const groups = ["hookEvidence", "conflictBeats", "suspenseEvidence", "goldfingerEvidence", "endingEvidence", "characterMentions"];
+  for (const group of groups) {
+    next[group] = Array.isArray(next[group])
+      ? next[group].map((item, index) => normalizeEvidenceArrayItem(item, index, episodeNo, group)).filter((item) => item.sourceText)
+      : [];
+  }
+  next.episodeEvidence = Array.isArray(next.episodeEvidence) ? next.episodeEvidence : [];
+  return next;
+}
+
+function normalizeEpisodeBeatCandidate(beat = {}, index = 0, episodeNo = null) {
+  if (!isPlainObject(beat)) {
+    const text = String(beat || "").trim();
+    return {
+      beatId: `B${String(index + 1).padStart(3, "0")}`,
+      episodeNo,
+      sourceText: text,
+      beatSummary: text,
+      characters: [],
+      audienceEmotion: [],
+      suspenseQuestion: "",
+      structureFunction: "模型返回的 beat",
+      confidence: 0.45,
+      normalizedFromAlias: true,
+      needsReview: true
+    };
+  }
+  const sourceText = firstText(beat.sourceText, beat.quote, beat.originalText, beat.text, beat.event);
+  const beatSummary = firstText(beat.beatSummary, beat.summary, beat.observableEvent, beat.claim, beat.function, sourceText);
+  return {
+    ...beat,
+    beatId: String(beat.beatId || beat.id || `B${String(index + 1).padStart(3, "0")}`),
+    episodeNo: Number(beat.episodeNo) || episodeNo,
+    sourceText,
+    beatSummary,
+    characters: arrayOrFallback(beat.characters, beat.relatedCharacters),
+    audienceEmotion: arrayOrFallback(beat.audienceEmotion, beat.emotions),
+    suspenseQuestion: firstText(beat.suspenseQuestion, beat.question),
+    structureFunction: firstText(beat.structureFunction, beat.function, beat.structuralFunction, "分集结构 beat"),
+    confidence: normalizeConfidence(beat.confidence, 0.58),
+    normalizedFromAlias: Boolean(!beat.beatSummary && (beat.summary || beat.observableEvent || beat.claim || beat.function))
+  };
+}
+
+function normalizeEvidenceArrayItem(item = {}, index = 0, episodeNo = null, preferredGroup = "") {
+  const raw = isPlainObject(item) ? item : { sourceText: String(item || ""), summary: String(item || "") };
+  const sourceText = firstText(raw.sourceText, raw.quote, raw.originalText, raw.text, raw.event);
+  const summary = firstText(
+    raw.summary,
+    raw.claim,
+    raw.observableEvent,
+    raw.function,
+    raw.description,
+    Array.isArray(raw.possibleMeanings) ? raw.possibleMeanings.join("；") : "",
+    sourceText
+  );
+  const beatId = String(raw.beatId || raw.id || `B${String(index + 1).padStart(3, "0")}`);
+  return {
+    ...raw,
+    id: String(raw.id || `E${String(index + 1).padStart(3, "0")}`),
+    episodeNo: Number(raw.episodeNo) || episodeNo,
+    sourceText,
+    summary,
+    evidenceType: raw.evidenceType || evidenceTypeFromGroup(preferredGroup) || "hook",
+    relatedCharacters: arrayOrFallback(raw.relatedCharacters, raw.characters),
+    relatedBeatIds: arrayOrFallback(raw.relatedBeatIds, [beatId]),
+    confidence: normalizeConfidence(raw.confidence, 0.58),
+    normalizedFromAlias: Boolean(!raw.summary && (raw.claim || raw.observableEvent || raw.function || raw.possibleMeanings))
+  };
+}
+
+function evidenceArrayToLedger(items = []) {
+  const ledger = {
+    hookEvidence: [],
+    conflictBeats: [],
+    suspenseEvidence: [],
+    goldfingerEvidence: [],
+    endingEvidence: [],
+    characterMentions: [],
+    episodeEvidence: []
+  };
+  items.forEach((item, index) => {
+    const group = evidenceGroupFromItem(item, index);
+    ledger[group].push({ ...item, evidenceType: evidenceTypeFromGroup(group) });
+  });
+  ledger.episodeEvidence.push({
+    episodeNo: Number(items[0]?.episodeNo) || null,
+    beatIds: items.flatMap((item) => item.relatedBeatIds || []).filter(Boolean),
+    openingHookBeatIds: items[0]?.relatedBeatIds || [],
+    cliffhangerBeatIds: [],
+    evidenceCompleteness: Math.min(1, items.length / 3)
+  });
+  return ledger;
+}
+
+function evidenceItemToBeat(item = {}, index = 0, episodeNo = null) {
+  const beatId = String(item.relatedBeatIds?.[0] || item.beatId || `B${String(index + 1).padStart(3, "0")}`);
+  return {
+    beatId,
+    episodeNo: Number(item.episodeNo) || episodeNo,
+    sourceText: item.sourceText || "",
+    beatSummary: item.summary || item.sourceText || "",
+    characters: arrayOrFallback(item.relatedCharacters, item.characters),
+    audienceEmotion: arrayOrFallback(item.audienceEmotion, item.emotions),
+    suspenseQuestion: item.suspenseQuestion || "",
+    structureFunction: item.structureFunction || item.function || evidenceTypeFromGroup(evidenceGroupFromItem(item, index)) || "分集结构 beat",
+    confidence: normalizeConfidence(item.confidence, 0.58),
+    normalizedFromAlias: true,
+    needsReview: true
+  };
+}
+
+function collectNormalizedEvidenceItems(ledger = {}) {
+  if (!isPlainObject(ledger)) return [];
+  return ["hookEvidence", "conflictBeats", "suspenseEvidence", "goldfingerEvidence", "endingEvidence", "characterMentions"].flatMap((group) =>
+    Array.isArray(ledger[group]) ? ledger[group] : []
+  );
+}
+
+function evidenceGroupFromItem(item = {}, index = 0) {
+  const text = `${item.evidenceType || ""} ${item.summary || ""} ${item.function || ""}`.toLowerCase();
+  if (/conflict|冲突|危机|对抗/.test(text)) return "conflictBeats";
+  if (/suspense|悬念|疑问|问题/.test(text)) return "suspenseEvidence";
+  if (/goldfinger|金手指|能力|医术|蛊毒/.test(text)) return "goldfingerEvidence";
+  if (/character|人物|角色/.test(text)) return "characterMentions";
+  if (/ending|结局/.test(text)) return "endingEvidence";
+  return index === 0 ? "hookEvidence" : "conflictBeats";
+}
+
+function evidenceTypeFromGroup(group = "") {
+  const map = {
+    hookEvidence: "hook",
+    conflictBeats: "conflict",
+    suspenseEvidence: "suspense",
+    goldfingerEvidence: "goldfinger",
+    endingEvidence: "ending",
+    characterMentions: "character"
+  };
+  return map[group] || "";
+}
+
+function ensureBeatSourceTextFromEpisode(beat = {}, episodeText = "") {
+  const sourceText = String(beat.sourceText || "").trim();
+  if (!sourceText || !episodeText || !sourceText.includes("...")) return beat;
+  const [prefix] = sourceText.split("...");
+  const cleanPrefix = prefix.trim();
+  if (cleanPrefix && episodeText.replace(/\s+/g, "").includes(cleanPrefix.replace(/\s+/g, ""))) {
+    return { ...beat, sourceText: cleanPrefix, needsReview: true, normalizedFromAlias: true };
+  }
+  return beat;
+}
+
+function normalizeConfidence(value, fallback = 0.58) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const lower = value.toLowerCase().trim();
+    if (lower === "high" || lower === "高") return 0.82;
+    if (lower === "medium" || lower === "中") return 0.62;
+    if (lower === "low" || lower === "低") return 0.42;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+  }
+  return fallback;
 }
 
 function unwrapTaskPayload(value, taskType) {
