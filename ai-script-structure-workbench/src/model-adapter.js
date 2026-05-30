@@ -784,6 +784,9 @@ function normalizeEpisodeChunkCandidate(source = {}, inputMeta = {}) {
     : isPlainObject(source.episodeAnalysis?.structuralAnalysis)
       ? source.episodeAnalysis.structuralAnalysis
       : {};
+  const hasCustomEvidenceLedgerGroups =
+    isPlainObject(source.evidenceLedger) &&
+    Object.entries(source.evidenceLedger).some(([key, value]) => !isKnownEvidenceLedgerKey(key) && Array.isArray(value));
 
   let normalizedBeats = Array.isArray(source.episodeBeatLedger)
     ? source.episodeBeatLedger.map((beat, index) => normalizeEpisodeBeatCandidate(beat, index, episodeNo))
@@ -804,8 +807,24 @@ function normalizeEpisodeChunkCandidate(source = {}, inputMeta = {}) {
       next.needsReview = true;
     }
   }
+  if (hasCustomEvidenceLedgerGroups) {
+    warnings.push("schemaRepairAnalyzeEpisodeChunk 返回了自定义 evidenceLedger 分组，系统已映射为 EpisodeChunkAnalysis compact 结构，结果需复核。");
+    meta.normalizedEvidenceLedgerCustomGroups = true;
+    next.needsReview = true;
+  }
 
   if (normalizedEvidenceLedger) next.evidenceLedger = normalizedEvidenceLedger;
+  const normalizedEvidenceItems = normalizedEvidenceLedger ? collectNormalizedEvidenceItems(normalizedEvidenceLedger) : [];
+  if (normalizedEvidenceItems.length) {
+    const beatsWithSourceText = normalizedBeats.filter((beat) => String(beat.sourceText || "").trim()).length;
+    if (!beatsWithSourceText) {
+      normalizedBeats = normalizedEvidenceItems.map((item, index) => evidenceItemToBeat(item, index, episodeNo));
+    } else if (beatsWithSourceText < normalizedBeats.length) {
+      normalizedBeats = normalizedBeats.map((beat, index) =>
+        String(beat.sourceText || "").trim() ? beat : evidenceItemToBeat(normalizedEvidenceItems[index] || normalizedEvidenceItems[0], index, episodeNo)
+      );
+    }
+  }
   if (normalizedBeats.length) next.episodeBeatLedger = normalizedBeats;
 
   const beatIds = normalizedBeats.map((beat) => String(beat.beatId || "").trim()).filter(Boolean);
@@ -858,12 +877,15 @@ function normalizeEpisodeChunkCandidate(source = {}, inputMeta = {}) {
   episodeFunction.inferenceLevel = episodeFunction.inferenceLevel || "原文明确";
   episodeFunction.confidence = normalizeConfidence(episodeFunction.confidence, 0.62);
   episodeFunction.riskNotes = arrayOrFallback(episodeFunction.riskNotes, []);
-  if (meta.normalizedEvidenceLedgerArray) {
-    episodeFunction.riskNotes = uniqueList([...episodeFunction.riskNotes, "模型返回 evidenceLedger 数组，已标准化为 compact 结构，需人工复核。"]);
+  if (meta.normalizedEvidenceLedgerArray || meta.normalizedEvidenceLedgerCustomGroups) {
+    const note = meta.normalizedEvidenceLedgerArray
+      ? "模型返回 evidenceLedger 数组，已标准化为 compact 结构，需人工复核。"
+      : "模型返回自定义 evidenceLedger 分组，已标准化为 compact 结构，需人工复核。";
+    episodeFunction.riskNotes = uniqueList([...episodeFunction.riskNotes, note]);
   }
   next.episodeFunctionAnalysis = episodeFunction;
 
-  if (meta.normalizedEvidenceLedgerArray || normalizedBeats.some((beat) => beat.normalizedFromAlias)) {
+  if (meta.normalizedEvidenceLedgerArray || meta.normalizedEvidenceLedgerCustomGroups || normalizedBeats.some((beat) => beat.normalizedFromAlias)) {
     next.sourceMeta = {
       ...(next.sourceMeta || {}),
       ...meta,
@@ -889,8 +911,33 @@ function normalizeEpisodeEvidenceLedger(ledger = {}, episodeNo = null) {
       ? next[group].map((item, index) => normalizeEvidenceArrayItem(item, index, episodeNo, group)).filter((item) => item.sourceText)
       : [];
   }
+  const customItems = Object.entries(next)
+    .filter(([key, value]) => !isKnownEvidenceLedgerKey(key) && Array.isArray(value))
+    .flatMap(([key, value]) => value.map((item, index) => normalizeEvidenceArrayItem(item, index, episodeNo, key)).filter((item) => item.sourceText));
+  if (customItems.length) {
+    const compactLedger = evidenceArrayToLedger(customItems);
+    for (const group of groups) {
+      next[group] = [...next[group], ...(compactLedger[group] || [])];
+    }
+    next.episodeEvidence = [...(Array.isArray(next.episodeEvidence) ? next.episodeEvidence : []), ...(compactLedger.episodeEvidence || [])];
+  }
+  for (const key of Object.keys(next)) {
+    if (!isKnownEvidenceLedgerKey(key)) delete next[key];
+  }
   next.episodeEvidence = Array.isArray(next.episodeEvidence) ? next.episodeEvidence : [];
   return next;
+}
+
+function isKnownEvidenceLedgerKey(key = "") {
+  return [
+    "hookEvidence",
+    "conflictBeats",
+    "suspenseEvidence",
+    "goldfingerEvidence",
+    "endingEvidence",
+    "characterMentions",
+    "episodeEvidence"
+  ].includes(key);
 }
 
 function normalizeEpisodeBeatCandidate(beat = {}, index = 0, episodeNo = null) {
@@ -910,7 +957,7 @@ function normalizeEpisodeBeatCandidate(beat = {}, index = 0, episodeNo = null) {
       needsReview: true
     };
   }
-  const sourceText = firstText(beat.sourceText, beat.quote, beat.originalText, beat.text, beat.event);
+  const sourceText = firstText(beat.sourceText, beat.quote, beat.originalText, beat.text, beat.event, beat.evidence);
   const beatSummary = firstText(beat.beatSummary, beat.summary, beat.observableEvent, beat.claim, beat.function, sourceText);
   return {
     ...beat,
@@ -929,20 +976,24 @@ function normalizeEpisodeBeatCandidate(beat = {}, index = 0, episodeNo = null) {
 
 function normalizeEvidenceArrayItem(item = {}, index = 0, episodeNo = null, preferredGroup = "") {
   const raw = isPlainObject(item) ? item : { sourceText: String(item || ""), summary: String(item || "") };
-  const sourceText = firstText(raw.sourceText, raw.quote, raw.originalText, raw.text, raw.event);
+  const rawSource = typeof raw.source === "string" && !/^(episodeText|原文|source|text)$/i.test(raw.source.trim()) ? raw.source : "";
+  const sourceText = firstText(raw.sourceText, raw.quote, raw.originalText, raw.text, raw.event, raw.evidence, rawSource);
   const summary = firstText(
     raw.summary,
     raw.claim,
     raw.observableEvent,
     raw.function,
     raw.description,
+    raw.evidence,
+    raw.notes,
     Array.isArray(raw.possibleMeanings) ? raw.possibleMeanings.join("；") : "",
     sourceText
   );
-  const beatId = String(raw.beatId || raw.id || `B${String(index + 1).padStart(3, "0")}`);
+  const evidenceId = String(raw.id || `E${String(index + 1).padStart(3, "0")}`);
+  const beatId = String(raw.beatId || (Array.isArray(raw.relatedBeatIds) && raw.relatedBeatIds[0]) || `B${String(index + 1).padStart(3, "0")}`);
   return {
     ...raw,
-    id: String(raw.id || `E${String(index + 1).padStart(3, "0")}`),
+    id: evidenceId,
     episodeNo: Number(raw.episodeNo) || episodeNo,
     sourceText,
     summary,

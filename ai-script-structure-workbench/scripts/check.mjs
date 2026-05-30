@@ -1009,6 +1009,68 @@ assert.equal(arrayEvidenceRepairResult.parsedJson.sourceMeta.normalizedEvidenceL
 assert.equal(arrayEvidenceRepairResult.parsedJson.needsReview, true);
 delete globalThis.__MODEL_CALL_PROXY__;
 
+globalThis.__MODEL_CALL_PROXY__ = async (payload) => ({
+  outputText: JSON.stringify({
+    episodeNo: 1,
+    title: "第一集",
+    evidenceLedger: {
+      蛊毒事件: [
+        {
+          evidence: "林清韵忽然吐血",
+          source: "episodeText",
+          certainty: "observed",
+          notes: "症状符合蛊毒表征，但未交代中毒原因与施害者"
+        }
+      ]
+    },
+    episodeBeatLedger: [
+      {
+        beatNo: 1,
+        type: "opening_hook",
+        description: "火车上林清韵突然吐血，制造强危机与身体异常悬念",
+        function: "吸引观众注意，暗示前世/今生阴谋"
+      }
+    ],
+    episodeFunctionAnalysis: {
+      人物功能: [{ character: "林清韵", function: "承受意外攻击" }],
+      openingHook: "林清韵忽然吐血",
+      mainConflict: "蛊毒危机与无人能解",
+      summary: "火车吐血危机开场。"
+    },
+    reusablePatterns: [],
+    openQuestions: [],
+    continuityNotes: [],
+    confidence: 0.72,
+    needsReview: false
+  }),
+  tokenUsage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+  requestFormat: payload.requestFormat,
+  endpointType: "server_proxy",
+  status: 200
+});
+const customEvidenceRepairResult = await callModel({
+  taskType: "schemaRepairAnalyzeEpisodeChunk",
+  featureArea: "JSON 修复",
+  inputMeta: {
+    projectTitle: "分集 JSON 测试",
+    episodeNo: 1,
+    episodeTitle: "第一集",
+    episodeText: "第一集\n火车上，林清韵忽然吐血。孙大为看出她中了蛊毒。",
+    rawModelJson: legacyEpisodeShapeResult.parsedJson,
+    schemaIssues: legacyEpisodeShapeResult.schemaIssues
+  },
+  schema: true,
+  state: apiSuccessState
+});
+assert.equal(customEvidenceRepairResult.success, true);
+assert.equal(Array.isArray(customEvidenceRepairResult.parsedJson.evidenceLedger), false);
+assert.ok(customEvidenceRepairResult.parsedJson.evidenceLedger.hookEvidence.length >= 1);
+assert.ok(customEvidenceRepairResult.parsedJson.episodeBeatLedger.length >= 1);
+assert.ok(customEvidenceRepairResult.parsedJson.episodeFunctionAnalysis.evidenceBeatIds.length >= 1);
+assert.equal(customEvidenceRepairResult.parsedJson.sourceMeta.normalizedEvidenceLedgerCustomGroups, true);
+assert.equal(customEvidenceRepairResult.parsedJson.needsReview, true);
+delete globalThis.__MODEL_CALL_PROXY__;
+
 const wrappedAnalysisCalls = [];
 globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
   wrappedAnalysisCalls.push(payload);
