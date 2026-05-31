@@ -87,7 +87,7 @@ function taskCandidateScore(value, taskType = "") {
 
 function directTaskCandidateScore(value, taskType = "") {
   if (!value || typeof value !== "object") return 0;
-  if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk") {
+  if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk" || taskType === "schemaRepairAnalyzeEpisodeChunk") {
     return scoreEpisodeChunkCandidate(value);
   }
   if (taskType === "analyzeScript" || taskType === "aggregateScriptAnalysis" || taskType === "mergeEvidenceLedAnalysis" || taskType === "schemaRepairAnalyzeScript") {

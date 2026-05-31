@@ -1071,6 +1071,56 @@ assert.equal(customEvidenceRepairResult.parsedJson.sourceMeta.normalizedEvidence
 assert.equal(customEvidenceRepairResult.parsedJson.needsReview, true);
 delete globalThis.__MODEL_CALL_PROXY__;
 
+const repairExtractionText =
+  "下面是修复结果：" +
+  JSON.stringify({
+    episodeNo: 3,
+    title: "第三集",
+    evidenceLedger: {
+      hookEvidence: [
+        {
+          id: "E001",
+          episodeNo: 3,
+          sourceText: "蛊师A VO（身影刺耳）：死胖子，口气不小啊！",
+          summary: "蛊师登场挑衅。",
+          evidenceType: "hook",
+          relatedBeatIds: ["B001"],
+          confidence: 0.9
+        }
+      ]
+    },
+    episodeBeatLedger: [
+      {
+        beatId: "B001",
+        episodeNo: 3,
+        sourceText: "蛊师A VO（身影刺耳）：死胖子，口气不小啊！",
+        beatSummary: "蛊师登场挑衅。",
+        structureFunction: "开头钩子",
+        confidence: 0.9
+      }
+    ],
+    episodeFunctionAnalysis: {
+      episodeNo: 3,
+      summary: "蛊师登场挑衅。",
+      openingHook: "蛊师挑衅。",
+      mainConflict: "蛊师与孙大为对峙。",
+      evidenceBeatIds: ["B001"],
+      evidenceIds: ["E001"],
+      inferenceLevel: "原文明确",
+      confidence: 0.9,
+      riskNotes: []
+    },
+    reusablePatterns: [],
+    openQuestions: [],
+    continuityNotes: [],
+    confidence: 0.9,
+    needsReview: false
+  }) +
+  "补充说明：不要选择里面的数组。";
+const repairExtraction = extractTaskJsonCandidate(repairExtractionText, "schemaRepairAnalyzeEpisodeChunk");
+assert.equal(JSON.parse(repairExtraction.candidate).episodeNo, 3);
+assert.equal(Array.isArray(JSON.parse(repairExtraction.candidate)), false);
+
 const wrappedAnalysisCalls = [];
 globalThis.__MODEL_CALL_PROXY__ = async (payload) => {
   wrappedAnalysisCalls.push(payload);
