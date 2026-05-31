@@ -147,6 +147,9 @@ for (const card of patternCards) {
   assert.ok(card.scoringRubric.length >= 1);
   assert.ok(card.evidenceDerivedFields?.observedAction);
   assert.ok(card.evidenceDerivedFields?.whyThisSceneWorks);
+  assert.equal(typeof card.evidenceDerivedScore, "number");
+  assert.ok(["evidence_derived", "mixed_with_preset", "preset_fallback"].includes(card.templateSource));
+  assert.ok(card.mechanismExplanation);
 }
 assert.equal(validateTaskOutput("extractPatternCards", patternCards).ok, true);
 const dynamicPatternAnalysis = structuredClone(analysis);
@@ -169,6 +172,9 @@ assert.ok(dynamicPatternCards.some((card) => String(card.sourceSeedType || "").s
 const weakPatternCards = extractPatternCardsDemo({ analysis: { title: "无证据案例", evidenceLedger: {}, episodeBeatLedger: [] } });
 assert.ok(weakPatternCards.some((card) => card.needsReview === true));
 assert.ok(weakPatternCards.every((card) => card.canPromoteToSkill === false));
+assert.ok(weakPatternCards.every((card) => card.templateSource === "preset_fallback"));
+assert.ok(weakPatternCards.every((card) => card.evidenceDerivedScore < 0.45));
+assert.ok(weakPatternCards.every((card) => card.confidence <= 0.45));
 
 const skillAssets = buildSkillAssetsFromPatternsDemo({ patternCards, skills: state.skills });
 assert.ok(skillAssets.length >= 1);
@@ -196,6 +202,14 @@ for (const beat of patternTransfer.adaptedPatternBeats) {
   assert.ok(beat.adaptedCharacterFunction);
   assert.ok(beat.adaptedAudiencePayoff);
   assert.ok(beat.adaptedRetentionHook);
+}
+for (const episode of patternTransfer.firstFiveEpisodes) {
+  assert.ok(episode.usedPatternCardIds?.length);
+  assert.ok(episode.mechanismUsed?.length);
+  assert.ok(episode.characterMotivation);
+  assert.ok(episode.audiencePayoff);
+  assert.ok(episode.retentionHook);
+  assert.ok(Array.isArray(episode.risks));
 }
 assert.equal(validateTaskOutput("applyPatternsToNewIdea", patternTransfer).ok, true);
 const ideaTestCases = [
@@ -245,7 +259,17 @@ const domainLeakAudit = auditPatternTransferDemo({
   transferResult: { ...patternTransfer, firstFiveEpisodes: [{ episodeNo: 1, title: "直播风水", function: "玄学主播在直播间看风水。" }] }
 });
 assert.ok(domainLeakAudit.domainMismatchRisks.some((item) => item.term === "玄学" || item.term === "风水" || item.term === "直播"));
+const missingTransferFieldsAudit = auditPatternTransferDemo({
+  idea: transferIdea,
+  patternCards,
+  transferResult: {
+    ...patternTransfer,
+    firstFiveEpisodes: [{ episodeNo: 1, title: "缺字段", function: "只写事件，不写机制。" }]
+  }
+});
+assert.ok(missingTransferFieldsAudit.episodeFunctionWeaknesses.some((item) => item.missingFields.includes("mechanismUsed")));
 
+assert.equal(clampConcurrency(undefined, 6), 3);
 assert.equal(clampConcurrency(20, 6), 6);
 assert.equal(clampConcurrency(0, 6), 1);
 let activeWorkers = 0;
@@ -274,10 +298,13 @@ const stoppedPool = await runChunkPool(
 );
 assert.equal(stoppedPool.stopped, true);
 assert.ok(stoppedPool.results.some((item) => item.skipped));
+assert.ok(stoppedPool.results.filter((item) => item.skipped).length >= 1);
 const rateLimitEvents = [];
+let rateLimitStartedAfterDowngrade = 0;
 await runChunkPool(
-  [1, 2, 3, 4].map((index) => ({ chunkKey: `R${index}`, index })),
+  [1, 2, 3, 4, 5, 6].map((index) => ({ chunkKey: `R${index}`, index })),
   async (item, pool) => {
+    if (pool.state.concurrency === 1 && item.index > 3) rateLimitStartedAfterDowngrade += 1;
     if (item.index === 1) pool.setConcurrency(1, "provider_rate_limit");
     await new Promise((resolve) => setTimeout(resolve, 1));
     return { ok: true };
@@ -289,6 +316,9 @@ await runChunkPool(
   }
 );
 assert.ok(rateLimitEvents.includes(1));
+assert.ok(rateLimitStartedAfterDowngrade >= 1);
+const probeIncludedCompleted = 1 + 4;
+assert.equal(probeIncludedCompleted, 5);
 
 const fragmentText = "毒手巫医\n\n第一集\n\n△火车上林清突然流血倒地。\n医生：已经没救了！\n孙大为：不是脑溢血，是被人害的。\n△孙大为拿出银针，金蚕飞出。";
 const fragmentCoverage = detectScriptCoverage(fragmentText, 50);
@@ -1651,11 +1681,22 @@ const patternCardsSource = await fs.readFile(new URL("../src/pattern-cards.js", 
 const workflowSource = await fs.readFile(new URL("../../.github/workflows/ai-script-structure-workbench-check.yml", import.meta.url), "utf8");
 assert.ok(workflowSource.includes("npm run check"));
 assert.ok(workflowSource.includes("ai-script-structure-workbench"));
+assert.ok(workflowSource.includes("codex/add-script-structure-workbench"));
+assert.ok(workflowSource.includes("pull_request"));
+assert.ok(workflowSource.includes("\"ai-script-structure-workbench/**\""));
+assert.ok(workflowSource.includes("working-directory: ai-script-structure-workbench"));
+assert.ok(workflowSource.includes('node-version: "20"'));
 assert.ok(redactionSource.includes("OPENAI_API_KEY"));
 assert.ok(redactionSource.includes("ANTHROPIC_API_KEY"));
 assert.ok(redactionSource.includes("DEEPSEEK_API_KEY"));
 assert.ok(redactionSource.includes("x-api-key"));
 assert.ok(patternCardsSource.includes("evidenceDerivedFields"));
+assert.ok(patternCardsSource.includes("evidenceDerivedScore"));
+assert.ok(patternCardsSource.includes("templateSource"));
+assert.ok(patternCardsSource.includes("mechanismExplanation"));
+assert.ok(patternCardsSource.includes("preset_fallback"));
+assert.ok(patternCardsSource.includes("usedPatternCardIds"));
+assert.ok(patternCardsSource.includes("episodeFunctionWeaknesses"));
 assert.ok(patternCardsSource.includes("adaptedPatternBeats"));
 assert.ok(patternCardsSource.includes("domainMismatchRisks"));
 assert.ok(patternCardsSource.includes("hardSurfaceTerms"));
@@ -1774,6 +1815,9 @@ assert.ok(appSource.includes("shouldUseLongScriptAnalysis"));
 assert.ok(appSource.includes("executeLongScriptAnalysis"));
 assert.ok(appSource.includes("runChunkPool"));
 assert.ok(appSource.includes("longScriptConcurrency"));
+assert.ok(appSource.includes("baseCompletedCount"));
+assert.ok(appSource.includes("baseCompletedCount += 1"));
+assert.ok(appSource.includes("baseCompletedCount + (poolState.completedChunks || 0)"));
 assert.ok(appSource.includes("分集并发分析中"));
 assert.ok(appSource.includes("rateLimitDowngraded"));
 assert.ok(appSource.includes("检测到 429/rate_limit，后续分集并发已自动降到 1。"));
@@ -1815,7 +1859,8 @@ assert.ok(appSource.includes("模型返回字段："));
 assert.ok(appSource.includes("系统期望字段："));
 assert.ok(appSource.includes("JSON，但模型返回结构不符合 EpisodeChunkAnalysis compact schema"));
 assert.ok(!appSource.includes("abortedByJsonFailure = true;\\n        abortedByJsonFailure = true"));
-assert.ok(appSource.includes("连续 3 个分集返回非 JSON，已暂停长剧本分析"));
+assert.ok(appSource.includes("已完成任务中累计 3 个 JSON 输出失败，已暂停长剧本分析"));
+assert.equal(appSource.includes("连续 3 个分集返回非 JSON，已暂停长剧本分析"), false);
 assert.ok(appSource.includes("rawOutputPreview"));
 assert.ok(appSource.includes('draft.steps[3].status = aggregateSkipped || aggregateFailed ? "跳过" : "成功"'));
 assert.ok(appSource.includes("chunkResults[chunkKey]"));

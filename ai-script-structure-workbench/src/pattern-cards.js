@@ -272,6 +272,62 @@ function deriveEvidenceFields(seed = {}, evidence = [], category = "hook") {
   };
 }
 
+function isPresetLikeText(value = "", preset = {}) {
+  const text = textOf(value);
+  if (!text) return true;
+  return [
+    preset.name,
+    preset.abstractTemplate,
+    preset.structuralFunction,
+    preset.characterFunction,
+    preset.audiencePsychology,
+    "可复用骨架步骤",
+    "剧情 beat 功能"
+  ].filter(Boolean).some((presetText) => text === presetText || text.includes(presetText));
+}
+
+function isGenericStructureFunction(value = "") {
+  return !textOf(value) || /待复核|剧情 beat 功能|可复用骨架步骤|hookEvidence|conflictBeats|suspenseEvidence|characterMentions|endingEvidence/.test(textOf(value));
+}
+
+function isDerivedFallback(value = "", field = "") {
+  const text = textOf(value);
+  if (!text) return true;
+  const fallbackMarkers = {
+    characterMotivation: ["原文动机不够直接", "补清主角为什么不能退出"],
+    relationshipChange: ["关系变化证据较弱", "不要只做事件爽点"],
+    audiencePayoff: ["需要在迁移版本里明确落到情绪兑现"],
+    retentionQuestion: ["下一层问题需要从本桥段自然长出来"]
+  };
+  return (fallbackMarkers[field] || ["待复核", "缺少直接证据"]).some((marker) => text.includes(marker));
+}
+
+function calculateEvidenceDerivedScore(seed = {}, evidence = [], evidenceDerivedFields = {}, preset = {}) {
+  let score = 0;
+  if (evidence.some((item) => textOf(item.sourceText))) score += 0.25;
+  if (evidence.some((item) => textOf(item.beatId || item.evidenceId))) score += 0.15;
+  if (!isPresetLikeText(seed.summary, preset)) score += 0.15;
+  if (!isGenericStructureFunction(seed.structureFunction)) score += 0.15;
+  for (const field of ["characterMotivation", "relationshipChange", "audiencePayoff", "retentionQuestion"]) {
+    if (!isDerivedFallback(evidenceDerivedFields[field], field)) score += 0.075;
+  }
+  return Math.min(1, Math.round(score * 1000) / 1000);
+}
+
+function templateSourceForScore(score = 0) {
+  if (score >= 0.75) return "evidence_derived";
+  if (score >= 0.45) return "mixed_with_preset";
+  return "preset_fallback";
+}
+
+function mechanismExplanationFromDerived(fields = {}) {
+  return [
+    fields.whyThisSceneWorks,
+    fields.audiencePayoff ? `爽点/代入：${fields.audiencePayoff}` : "",
+    fields.retentionQuestion ? `追看钩子：${fields.retentionQuestion}` : ""
+  ].filter(Boolean).join(" ");
+}
+
 function collectPatternSeeds(analysis = {}, blueprint = {}, sourceCaseId = "") {
   const sourceEvidence = collectSourceEvidence(analysis, 80);
   const seeds = [];
@@ -370,6 +426,14 @@ function patternCardFromSeed(seed, context = {}, index = 0) {
   const evidence = seed.sourceEvidence || [];
   const hasEvidence = hasUsableEvidence(evidence);
   const evidenceDerivedFields = deriveEvidenceFields(seed, evidence, seed.category);
+  const evidenceDerivedScore = calculateEvidenceDerivedScore(seed, evidence, evidenceDerivedFields, preset);
+  const templateSource = templateSourceForScore(evidenceDerivedScore);
+  const presetFallback = templateSource === "preset_fallback";
+  const confidence = presetFallback
+    ? Math.min(0.45, hasEvidence ? 0.42 + Math.min(0.03, evidence.length * 0.01) : 0.36)
+    : hasEvidence
+      ? Math.min(0.9, 0.58 + evidenceDerivedScore * 0.32)
+      : Math.min(0.5, 0.34 + evidenceDerivedScore * 0.2);
   return {
     id: stableId("pattern", `${seed.sourceCaseId}-${seed.category}-${seed.title}-${index}`),
     name: seed.title === preset.name ? preset.name : `${preset.name}｜${seed.title}`.slice(0, 60),
@@ -383,6 +447,9 @@ function patternCardFromSeed(seed, context = {}, index = 0) {
     characterFunction: firstText(evidenceDerivedFields.characterMotivation, preset.characterFunction),
     audiencePsychology: firstText(evidenceDerivedFields.audiencePayoff, preset.audiencePsychology),
     evidenceDerivedFields,
+    evidenceDerivedScore,
+    templateSource,
+    mechanismExplanation: mechanismExplanationFromDerived(evidenceDerivedFields),
     abstractTemplate: firstText(seed.abstractTemplate, preset.abstractTemplate),
     variableSlots: seed.variableSlots && typeof seed.variableSlots === "object" ? seed.variableSlots : preset.variableSlots,
     applicableGenres: context.genres.length ? context.genres : ["短剧", "漫剧", "网文改编"],
@@ -393,9 +460,9 @@ function patternCardFromSeed(seed, context = {}, index = 0) {
     transferPrompt: firstText(seed.transferPrompt, `${preset.name}：迁移 ${preset.abstractTemplate}，只替换变量槽，不复制原案例表皮。`),
     scoringRubric: seed.scoringRubric?.length ? seed.scoringRubric : preset.scoringRubric,
     nonTransferableSurface: context.nonTransferableSurface || [],
-    confidence: hasEvidence ? 0.72 + Math.min(0.14, evidence.length * 0.03) : 0.42,
-    needsReview: !hasEvidence,
-    canPromoteToSkill: hasEvidence
+    confidence,
+    needsReview: !hasEvidence || presetFallback,
+    canPromoteToSkill: Boolean(hasEvidence && !presetFallback)
   };
 }
 
@@ -824,6 +891,21 @@ function adaptPatternCardToIdea(card = {}, variables = {}, index = 0) {
     adaptedCharacterFunction: `${variables.protagonist}通过本桥段暴露“必须行动”的动机，并让${variables.rewardCharacter}或${variables.authority}改变对其判断。`,
     adaptedAudiencePayoff: firstText(derived.audiencePayoff, plan.payoff),
     adaptedRetentionHook: plan.hook,
+    mechanismUsed: uniqueList([
+      card.structuralFunction,
+      card.mechanismExplanation,
+      derived.observedAction,
+      derived.pressureBeforeAction,
+      derived.relationshipChange,
+      derived.retentionQuestion
+    ]),
+    characterMotivation: `${variables.protagonist}不能旁观${variables.crisis}，否则会失去证明自身、保护${variables.rewardCharacter}或逼近${variables.suspenseSource}的机会。`,
+    audiencePayoff: firstText(derived.audiencePayoff, plan.payoff),
+    retentionHook: plan.hook,
+    risks: [
+      card.templateSource === "preset_fallback" ? "该迁移依赖预设兜底，需复核是否真的来自原文机制。" : "",
+      `${variables.ability}的验证动作要有证据链，避免只靠主角口头解释。`
+    ].filter(Boolean),
     mechanismCarried: uniqueList([
       card.structuralFunction,
       derived.observedAction,
@@ -873,6 +955,12 @@ export function applyPatternsToNewIdeaDemo(input = {}) {
     episodeNo: index + 1,
     title: beat.episodeTitle,
     function: `${beat.adaptedBeat}｜人物功能：${beat.adaptedCharacterFunction}`,
+    usedPatternCardIds: [beat.patternCardId].filter(Boolean),
+    mechanismUsed: beat.mechanismUsed,
+    characterMotivation: beat.characterMotivation,
+    audiencePayoff: beat.audiencePayoff,
+    retentionHook: beat.retentionHook,
+    risks: beat.risks,
     patternCardIds: [beat.patternCardId].filter(Boolean),
     hook: beat.adaptedRetentionHook,
     adaptedConflict: beat.adaptedConflict,
@@ -972,20 +1060,42 @@ export function auditPatternTransferDemo(input = {}) {
       risk: `迁移结果混入了与“${variables.matchedProfile || "当前创意"}”不匹配的领域词“${term}”。`,
       repair: `改回${variables.scene}、${variables.crisis}、${variables.ability}这一组变量，不要串到其他题材。`
     }));
-  const patternIds = arrayOf(result.patternCardIds || result.patternSelection?.map?.((item) => item.patternCardId)).flat();
-  const episodeCount = Array.isArray(result.firstFiveEpisodes) ? result.firstFiveEpisodes.length : 0;
+  const episodes = Array.isArray(result.firstFiveEpisodes) ? result.firstFiveEpisodes : [];
+  const patternIds = uniqueList([
+    ...arrayOf(result.patternCardIds || result.patternSelection?.map?.((item) => item.patternCardId)).flat(),
+    ...episodes.flatMap((episode) => episode.usedPatternCardIds || episode.patternCardIds || [])
+  ]);
+  const episodeCount = episodes.length;
   const adaptedBeats = Array.isArray(result.adaptedPatternBeats) ? result.adaptedPatternBeats : [];
-  const patternMechanismCoverage = adaptedBeats.map((beat) => ({
-    patternCardId: beat.patternCardId,
-    hasSlotMapping: Boolean(beat.slotMapping && Object.keys(beat.slotMapping).length >= 6),
-    hasAdaptedBeat: Boolean(beat.adaptedBeat),
-    hasConflict: Boolean(beat.adaptedConflict),
-    hasCharacterFunction: Boolean(beat.adaptedCharacterFunction),
-    hasAudiencePayoff: Boolean(beat.adaptedAudiencePayoff),
-    hasRetentionHook: Boolean(beat.adaptedRetentionHook)
-  }));
+  const patternMechanismCoverage = adaptedBeats.map((beat, index) => {
+    const episode = episodes[index] || {};
+    return {
+      patternCardId: beat.patternCardId || episode.usedPatternCardIds?.[0] || episode.patternCardIds?.[0],
+      hasSlotMapping: Boolean(beat.slotMapping && Object.keys(beat.slotMapping).length >= 6),
+      hasAdaptedBeat: Boolean(beat.adaptedBeat),
+      hasConflict: Boolean(beat.adaptedConflict),
+      hasCharacterFunction: Boolean(episode.characterMotivation || beat.characterMotivation || beat.adaptedCharacterFunction),
+      hasAudiencePayoff: Boolean(episode.audiencePayoff || beat.audiencePayoff || beat.adaptedAudiencePayoff),
+      hasRetentionHook: Boolean(episode.retentionHook || beat.retentionHook || beat.adaptedRetentionHook),
+      hasMechanismUsed: Boolean(episode.mechanismUsed?.length || beat.mechanismUsed?.length || beat.mechanismCarried?.length)
+    };
+  });
+  const episodeFunctionWeaknesses = episodes.flatMap((episode) => {
+    const missing = [];
+    if (!arrayOf(episode.usedPatternCardIds || episode.patternCardIds).length) missing.push("usedPatternCardIds");
+    if (!arrayOf(episode.mechanismUsed).length) missing.push("mechanismUsed");
+    if (!textOf(episode.characterMotivation)) missing.push("characterMotivation");
+    if (!textOf(episode.audiencePayoff)) missing.push("audiencePayoff");
+    if (!textOf(episode.retentionHook || episode.hook)) missing.push("retentionHook");
+    return missing.length ? [{
+      episodeNo: episode.episodeNo,
+      title: episode.title || "",
+      missingFields: missing,
+      suggestion: "补齐 PatternCard 迁移标准字段，保证 UI、导出和审计能读到机制、动机、爽点和追看钩子。"
+    }] : [];
+  });
   const weakPatternMechanisms = patternMechanismCoverage.filter((item) =>
-    !item.hasSlotMapping || !item.hasAdaptedBeat || !item.hasConflict || !item.hasCharacterFunction || !item.hasAudiencePayoff || !item.hasRetentionHook
+    !item.hasSlotMapping || !item.hasAdaptedBeat || !item.hasConflict || !item.hasCharacterFunction || !item.hasAudiencePayoff || !item.hasRetentionHook || !item.hasMechanismUsed
   );
   const mechanismCoverage = {
     publicCrisis: text.includes(variables.scene) || /公共|危机|高压|现场/.test(text),
@@ -1005,18 +1115,19 @@ export function auditPatternTransferDemo(input = {}) {
     mechanismCoverage,
     patternMechanismCoverage,
     weakPatternMechanisms,
-    missingAudiencePayoff: covered < 4 || weakPatternMechanisms.length ? ["爽点、关系变化或结尾追看钩子覆盖不足，需要补足至少 4 类机制，并确保每张 PatternCard 都有迁移机制。"] : [],
+    episodeFunctionWeaknesses,
+    missingAudiencePayoff: covered < 4 || weakPatternMechanisms.length || episodeFunctionWeaknesses.length ? ["爽点、关系变化或结尾追看钩子覆盖不足，需要补足至少 4 类机制，并确保每张 PatternCard 都有迁移机制。"] : [],
     weakCharacterMotivation: text.includes("被迫") || text.includes("封杀") ? [] : ["主角为什么必须进入新故事不够清楚，需要补一个不可退出的压力。"],
     suggestedRepairs: [
       ...(copiedSurfaceRisks.length ? [`删除 ${surfaceTerms.join("、")} 等原案例表皮，换成新创意自己的${variables.scene}、${variables.crisis}和${variables.ability}。`] : []),
       ...(domainMismatchRisks.length ? [`清理领域串味词：${domainMismatchRisks.map((item) => item.term).join("、")}。`] : []),
-      ...(weakPatternMechanisms.length ? ["为每张 PatternCard 补齐 slotMapping、adaptedBeat、adaptedConflict、adaptedCharacterFunction、adaptedAudiencePayoff、adaptedRetentionHook。"] : []),
+      ...(weakPatternMechanisms.length || episodeFunctionWeaknesses.length ? ["为每集补齐 usedPatternCardIds、mechanismUsed、characterMotivation、audiencePayoff、retentionHook，并保留旧字段兼容。"] : []),
       `给${variables.ability}增加限制，例如只能识别局部真相、需要证据触发，不能直接知道所有答案。`,
       "每集结尾都要把一次小胜利转化为更高层压力或新疑问。",
       `让${variables.rewardCharacter}承担资源入口，同时也带来新的关系代价。`
     ],
     patternCardIds: patternIds,
-    needsReview: copiedSurfaceRisks.length > 0 || domainMismatchRisks.length > 0 || weakPatternMechanisms.length > 0 || covered < 4
+    needsReview: copiedSurfaceRisks.length > 0 || domainMismatchRisks.length > 0 || weakPatternMechanisms.length > 0 || episodeFunctionWeaknesses.length > 0 || covered < 4
   };
 }
 

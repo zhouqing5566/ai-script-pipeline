@@ -225,7 +225,7 @@ detectScriptCoverage
 
 探针失败会区分类型，不再把所有失败都说成“非 JSON”。如果第一集 JSON 能解析但返回了 `episodeAnalysis` / `structuralAnalysis` 这类旧结构，系统会先调用 `schemaRepairAnalyzeEpisodeChunk` 尝试重排为 EpisodeChunkAnalysis compact 根对象；修复成功的分集会显示“成功（结构修复）”，可参与聚合，但整部剧会标记 `needsReview=true`、`usableForSkillLearning=false`。如果修复失败，`progress.abortedByProbeFailure=true`，剩余分集标为 `skippedDueToProbeFailure`，不会误报为 `skippedDueToJsonFailure`。
 
-只有连续 3 个分集真正返回非 JSON、无法提取 JSON 主体或 JSON parse 失败时，系统才会熔断长剧本分析，标记 `sourceMeta.abortedByJsonFailure=true` 和 `progress.abortedByJsonFailure=true`。后续未调用分集会标为 `skippedDueToJsonFailure`，不会被记成 Provider/API 失败。失败详情会显示 `rawOutputPreview`、`jsonExtractionMethod`、`jsonRepairAttempted`、错误类型、模型返回字段和系统期望字段。
+并发模式下不再声称“连续 3 个分集”。当已完成任务中累计 3 个分集真正返回非 JSON、无法提取 JSON 主体或 JSON parse 失败时，系统才会熔断长剧本分析，标记 `sourceMeta.abortedByJsonFailure=true` 和 `progress.abortedByJsonFailure=true`。后续未调用分集会标为 `skippedDueToJsonFailure`，不会被记成 Provider/API 失败。失败详情会显示 `rawOutputPreview`、`jsonExtractionMethod`、`jsonRepairAttempted`、错误类型、模型返回字段和系统期望字段。
 
 如果模型输出里同时包含“示例 JSON”和“正式 JSON”，解析器会按 `taskType` 优先选择最像当前任务结构的候选，而不是简单选择最长 JSON。对 `analyzeEpisodeChunk`，候选必须包含有效内容：至少一个有 `beatId/sourceText/beatSummary` 且能命中本集原文的 beat，`episodeFunctionAnalysis` 至少两个核心字段非空，并且 evidence 引用能链接到模型返回的 beat/evidence；如果只返回 `{}`、`{"ok":true}`、`{"episodeBeatLedger":[{}]}` 或其他错误 JSON 壳，本地补齐只能生成待复核草稿，任务会按 `schema_validation` 失败，不会被记为真实分集分析成功。
 

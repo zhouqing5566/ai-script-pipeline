@@ -559,7 +559,8 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   progress.concurrency = longScriptConcurrency;
   progress.runningChunks = [];
   progress.queuedChunks = chunks.map((chunk) => getChunkKey(chunk));
-  progress.completedChunks = Object.keys(previousResults).length;
+  let baseCompletedCount = Object.keys(previousResults).length;
+  progress.completedChunks = baseCompletedCount;
   progress.averageChunkLatencyMs = 0;
   progress.startedAt = new Date().toISOString();
   progress.completedAt = null;
@@ -612,7 +613,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
             ? `skippedDueToProviderFailure：真实分集请求 ${reason}，已暂停后续调用。`
             : skippedDueToProbeFailure
               ? `skippedDueToProbeFailure：第一集探针 ${probeType || reason} 失败，已暂停后续调用。`
-              : "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
+              : "skippedDueToJsonFailure：已完成任务中累计 3 个 JSON 输出失败，已暂停后续调用。"
     };
   };
 
@@ -712,7 +713,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
               : isProbeChunk
                 ? "分集 JSON 探针失败，已暂停"
                 : abortedByJsonFailure
-                  ? "连续 3 个分集返回非 JSON，已暂停"
+                  ? "累计 3 个 JSON 输出失败，已暂停"
                   : "停止派发新分集，等待已运行任务完成";
           draft.failedChunks = failedChunks;
           draft.warnings = [
@@ -725,7 +726,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
                 ? "后台任务烟测通过，但第一集真实分集请求超时或 API 失败，已暂停后续调用。请查看 effectiveTimeoutMs、Base URL、服务商状态或提高任务超时。"
               : abortedByProbeFailure
               ? probeFailureWarning(probeFailureType)
-              : "连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。"
+              : "已完成任务中累计 3 个 JSON 输出失败，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。"
           ];
         });
       }
@@ -746,6 +747,10 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     if (shouldProbe) {
       const probeChunk = chunks[0];
       const probeResult = await analyzeSingleChunk(probeChunk, { isProbeChunk: true });
+      baseCompletedCount += 1;
+      updateLongProgress((draft) => {
+        draft.completedChunks = baseCompletedCount;
+      });
       remainingChunks = chunks.slice(1);
       if (!probeResult.ok && (abortedByJsonFailure || abortedByProbeFailure)) {
         markSkippedChunks(remainingChunks, probeFailureType || probeResult.stopReason || "json_parse", probeFailureType);
@@ -772,7 +777,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
             draft.concurrency = poolState.concurrency;
             draft.runningChunks = poolState.runningChunks || [];
             draft.queuedChunks = poolState.queuedChunks || [];
-            draft.completedChunks = poolState.completedChunks || 0;
+            draft.completedChunks = baseCompletedCount + (poolState.completedChunks || 0);
             draft.averageChunkLatencyMs = poolState.averageChunkLatencyMs || 0;
             draft.rateLimitDowngraded = Boolean(poolState.rateLimitDowngraded || draft.rateLimitDowngraded);
             draft.currentStep = poolState.stopped ? "停止派发新分集，等待已运行任务完成" : "分集并发分析中";
@@ -849,7 +854,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
           : isProviderProbeFailureType(probeFailureType)
             ? "后台任务烟测通过，但第一集真实分集请求超时或 API 失败，已暂停后续调用。"
           : "分集 JSON 探针失败，已停止后续分集调用。"
-        : "连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。",
+        : "已完成任务中累计 3 个 JSON 输出失败，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。",
       taskRouteHealthUsedSchemaRepair ? "analyzeEpisodeChunk 依赖 schema repair 才通过，长剧本结果将标记 needsReview，不能进入正式 Skill 沉淀。" : ""
     ].filter(Boolean);
     applyLongScriptGateFlags(finalAnalysis);
@@ -945,6 +950,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       taskRouteHealthUsedSchemaRepair,
       chunkResults,
       inputSignature,
+      completedChunks: Object.keys(chunkResults || {}).length + failedChunks.filter((item) => (item.failureStage || "episode_chunk") !== "aggregate").length,
       completedAt: new Date().toISOString()
     };
     return state;
@@ -953,7 +959,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     abortedByProbeFailure
       ? probeFailureWarning(probeFailureType)
       : abortedByJsonFailure
-        ? "连续分集返回非 JSON，已暂停长剧本分析。请先测试 analyzeEpisodeChunk JSON 输出。"
+        ? "已完成任务中累计 3 个 JSON 输出失败，已暂停长剧本分析。请先测试 analyzeEpisodeChunk JSON 输出。"
         : failedChunks.length || missingChunks.length
           ? `长剧本分析完成，但有 ${failedChunks.length} 个失败 chunk、${missingChunks.length} 个缺失分集，需复核。`
           : "完成长剧本分集分析"
@@ -3008,7 +3014,7 @@ function renderLongScriptProgress(progress) {
         progress.abortedByProbeFailure
           ? `<div class="warning-list strong-warning"><p>${escapeHtml(probeFailureWarning(progress.probeFailureType || ""))}</p></div>`
           : progress.abortedByJsonFailure
-          ? `<div class="warning-list strong-warning"><p>连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。</p></div>`
+          ? `<div class="warning-list strong-warning"><p>已完成任务中累计 3 个 JSON 输出失败，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。</p></div>`
           : ""
       }
       ${
@@ -4246,6 +4252,9 @@ function renderLearningPatternCard(card) {
         <dt>人物功能</dt><dd>${formatValue(card.characterFunction)}</dd>
         <dt>观众心理</dt><dd>${formatValue(card.audiencePsychology)}</dd>
         <dt>证据派生机制</dt><dd>${formatValue(card.evidenceDerivedFields)}</dd>
+        <dt>证据派生分</dt><dd>${formatValue(card.evidenceDerivedScore)}</dd>
+        <dt>模板来源</dt><dd>${formatValue(card.templateSource)}</dd>
+        <dt>机制解释</dt><dd>${formatValue(card.mechanismExplanation)}</dd>
         <dt>抽象模板</dt><dd>${formatValue(card.abstractTemplate)}</dd>
         <dt>变量槽</dt><dd>${formatValue(card.variableSlots)}</dd>
         <dt>反例</dt><dd>${formatValue(card.antiPatterns)}</dd>
@@ -4286,8 +4295,10 @@ function renderPatternTransferResult(result) {
           patternCardId: item.patternCardId,
           adaptedBeat: item.adaptedBeat,
           adaptedConflict: item.adaptedConflict,
-          adaptedAudiencePayoff: item.adaptedAudiencePayoff,
-          adaptedRetentionHook: item.adaptedRetentionHook
+          mechanismUsed: item.mechanismUsed,
+          characterMotivation: item.characterMotivation,
+          audiencePayoff: item.audiencePayoff,
+          retentionHook: item.retentionHook
         }))],
         ["主角循环", result.newProtagonistLoop],
         ["大纲种子", result.outlineSeed],
@@ -4305,8 +4316,11 @@ function renderLearningEpisodeSeed(episode) {
       <div>
         <h3>${escapeHtml(episode.title || "")}</h3>
         <p>${escapeHtml(episode.function || episode.summary || "")}</p>
-        <span>Pattern：${formatValue(episode.patternCardIds)}</span>
-        <span>钩子：${formatValue(episode.hook)}</span>
+        <span>Pattern：${formatValue(episode.usedPatternCardIds || episode.patternCardIds)}</span>
+        <span>机制：${formatValue(episode.mechanismUsed)}</span>
+        <span>人物动机：${formatValue(episode.characterMotivation)}</span>
+        <span>爽点回报：${formatValue(episode.audiencePayoff)}</span>
+        <span>钩子：${formatValue(episode.retentionHook || episode.hook)}</span>
       </div>
     </article>
   `;
@@ -4323,6 +4337,7 @@ function renderPatternTransferAudit(audit) {
         ["照搬表皮风险", (audit.copiedSurfaceRisks || []).map((item) => item.risk || item.term || item)],
         ["领域串味风险", (audit.domainMismatchRisks || []).map((item) => item.risk || item.term || item)],
         ["弱迁移机制", audit.weakPatternMechanisms],
+        ["分集字段缺失", audit.episodeFunctionWeaknesses],
         ["缺失情绪兑现", audit.missingAudiencePayoff],
         ["人物动机弱点", audit.weakCharacterMotivation],
         ["修复建议", audit.suggestedRepairs]

@@ -111,7 +111,7 @@ const taskShapeRules = {
   extractPatternCards: {
     type: "array",
     minItems: 5,
-    itemRequired: ["name", "sourceEvidence", "structuralFunction", "audiencePsychology", "abstractTemplate", "variableSlots", "transferPrompt", "scoringRubric"]
+    itemRequired: ["name", "sourceEvidence", "structuralFunction", "audiencePsychology", "evidenceDerivedScore", "templateSource", "mechanismExplanation", "abstractTemplate", "variableSlots", "transferPrompt", "scoringRubric"]
   },
   buildSkillAssetsFromPatterns: {
     type: "array",
@@ -124,7 +124,8 @@ const taskShapeRules = {
   },
   auditPatternTransfer: {
     type: "object",
-    required: ["transferScore", "copiedSurfaceRisks", "mechanismCoverage", "suggestedRepairs"]
+    required: ["transferScore", "copiedSurfaceRisks", "mechanismCoverage", "episodeFunctionWeaknesses", "suggestedRepairs"],
+    allowEmptyArrays: ["copiedSurfaceRisks", "episodeFunctionWeaknesses", "suggestedRepairs"]
   },
   evaluateIdea: {
     type: "object",

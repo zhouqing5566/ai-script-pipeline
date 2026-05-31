@@ -455,16 +455,17 @@ episodeFunctionAnalysis.evidenceBeatIds 必须引用 episodeBeatLedger 中真实
 必须解释这个剧本为什么可能让人继续看，禁止只写“节奏快、爽点强、人物鲜明”。
 必须包含 audienceNeeds、addictiveDrivers、coolPointMechanisms、curiosityDrivers、identificationPath、emotionalPayoffChain、retentionHooks、noveltySources、fatigueRisks、whyItCanWork、whyItMayFail、sourceEvidence、confidence、needsReview。`,
   extractPatternCards: `返回 PatternCard 数组，至少 5 张：开局钩子、主角能力验证、冲突升级、人物关系入口、悬念/追看。
-每张卡必须包含 name、sourceCaseId、sourceEpisodes、sourceEvidence、surfacePlot、structuralFunction、characterFunction、audiencePsychology、abstractTemplate、variableSlots、applicableGenres、applicableStages、usageConstraints、antiPatterns、transferPrompt、scoringRubric、confidence、needsReview、canPromoteToSkill。
+每张卡必须包含 name、sourceCaseId、sourceEpisodes、sourceEvidence、surfacePlot、structuralFunction、characterFunction、audiencePsychology、evidenceDerivedScore、templateSource、mechanismExplanation、abstractTemplate、variableSlots、applicableGenres、applicableStages、usageConstraints、antiPatterns、transferPrompt、scoringRubric、confidence、needsReview、canPromoteToSkill。
 PatternCard 是可迁移机制，不是剧情复述；必须区分可迁移机制和不可照搬表皮。sourceEvidence 不足时 needsReview=true，canPromoteToSkill=false。`,
   buildSkillAssetsFromPatterns: `返回 SkillAsset 数组或更新建议。
 每个 SkillAsset 必须由多个 PatternCard 组合，包含 id、name、purpose、patternCardIds、taskScope、genreScope、audienceNeedScope、promptAdditions、positiveExamples、negativeExamples、evaluationCriteria、usageConstraints、riskWarnings、modelPreference、version、status、changelog。
 如果任一 PatternCard needsReview=true，status 必须是“待复核”，不能直接启用。`,
   applyPatternsToNewIdea: `返回 Pattern 迁移结果根对象。
 必须包含 patternSelection、variableMapping、newStoryEngine、newProtagonistLoop、firstFiveEpisodes、outlineSeed、risks、patternCardIds。
+firstFiveEpisodes 每集必须包含 episodeNo、title、function、usedPatternCardIds、mechanismUsed、characterMotivation、audiencePayoff、retentionHook、risks。
 明确“旧案例元素 -> 新创意变量”的映射。保留机制，不抄火车、蛊毒、医生等表皮。`,
   auditPatternTransfer: `返回迁移审计根对象。
-必须包含 transferScore、copiedSurfaceRisks、mechanismCoverage、missingAudiencePayoff、weakCharacterMotivation、suggestedRepairs、patternCardIds。
+必须包含 transferScore、copiedSurfaceRisks、mechanismCoverage、episodeFunctionWeaknesses、missingAudiencePayoff、weakCharacterMotivation、suggestedRepairs、patternCardIds。
 重点审计是否只是换皮抄剧情、是否真正复用机制、人物动机是否成立、爽点与追看钩子是否足够。`
 };
 

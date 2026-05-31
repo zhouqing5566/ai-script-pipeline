@@ -635,14 +635,14 @@ schema repair 失败：progress.abortedByProbeFailure=true，probeFailureType=sc
 连续 JSON 失败熔断：
 
 ```text
-连续 3 个 episode_chunk 失败，且错误类型为 json_parse / not valid JSON / 未找到 JSON：
+并发模式下，已完成任务中累计 3 个 episode_chunk 失败，且错误类型为 json_parse / not valid JSON / 未找到 JSON：
 progress.aborted = true
 sourceMeta.abortedByJsonFailure = true
 剩余 chunk 标记 skippedDueToJsonFailure
-UI 提示：连续 3 个分集返回非 JSON，已暂停长剧本分析。
+UI 提示：已完成任务中累计 3 个 JSON 输出失败，已暂停长剧本分析。
 ```
 
-probe schema/sourceText 失败不应显示“连续 3 个分集返回非 JSON”。这类失败应写入：
+probe schema/sourceText 失败不应显示“累计 3 个 JSON 输出失败”。这类失败应写入：
 
 ```text
 progress.abortedByProbeFailure = true
