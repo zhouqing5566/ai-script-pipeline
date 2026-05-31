@@ -25,6 +25,14 @@ import { classifyProviderError } from "./provider-diagnostics.js";
 import { applyEvidenceValidationToAnalysis } from "./evidence-validator.js";
 import { aggregateScriptAnalysis, analyzeEpisodeChunk, mergeEvidenceLedAnalysis } from "./long-script-analysis.js";
 import { evaluateEpisodeChunkCompactShape } from "./episode-chunk-shape.js";
+import {
+  analyzeViralMechanismDemo,
+  applyPatternsToNewIdeaDemo,
+  auditPatternTransferDemo,
+  buildSkillAssetsFromPatternsDemo,
+  extractPatternCardsDemo,
+  extractStoryBlueprintDemo
+} from "./pattern-cards.js";
 
 export async function callModel({
   taskType,
@@ -618,6 +626,18 @@ function dispatchTask(taskType, input, state) {
       return aggregateScriptAnalysis(input);
     case "mergeEvidenceLedAnalysis":
       return mergeEvidenceLedAnalysis(input);
+    case "extractStoryBlueprint":
+      return extractStoryBlueprintDemo(input);
+    case "analyzeViralMechanism":
+      return analyzeViralMechanismDemo(input);
+    case "extractPatternCards":
+      return extractPatternCardsDemo(input);
+    case "buildSkillAssetsFromPatterns":
+      return buildSkillAssetsFromPatternsDemo(input);
+    case "applyPatternsToNewIdea":
+      return applyPatternsToNewIdeaDemo(input);
+    case "auditPatternTransfer":
+      return auditPatternTransferDemo(input);
     case "evaluateIdea":
       return evaluateIdea(project);
     case "generateDirections":
@@ -1717,6 +1737,12 @@ function featureAreaForTask(taskType) {
     analyzeEpisodeChunk: "剧本分析中心",
     aggregateScriptAnalysis: "剧本分析中心",
     mergeEvidenceLedAnalysis: "剧本分析中心",
+    extractStoryBlueprint: "案例学习 / 爆款模式",
+    analyzeViralMechanism: "案例学习 / 爆款模式",
+    extractPatternCards: "案例学习 / 爆款模式",
+    buildSkillAssetsFromPatterns: "案例学习 / 爆款模式",
+    applyPatternsToNewIdea: "案例学习 / 爆款模式",
+    auditPatternTransfer: "案例学习 / 爆款模式",
     extractPatterns: "模式资产中心",
     classifyCase: "分类与标签",
     generateSkillSuggestion: "Skill 进化中心",

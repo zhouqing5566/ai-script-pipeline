@@ -67,7 +67,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/health") {
     sendJson(res, 200, {
       ok: true,
-      product: "AI 剧本结构学习与细纲生产系统",
+      product: "AI 剧本结构学习、爆款模式提炼与新创意迁移工作台",
       mode: "demo",
       now: new Date().toISOString()
     });
@@ -555,5 +555,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`AI 剧本结构学习与细纲生产系统已启动：http://${host}:${port}`);
+  console.log(`AI 剧本结构学习、爆款模式提炼与新创意迁移工作台已启动：http://${host}:${port}`);
 });

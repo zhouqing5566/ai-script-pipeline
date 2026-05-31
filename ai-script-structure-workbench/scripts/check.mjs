@@ -64,6 +64,14 @@ import { labelForKey } from "../src/schemas.js";
 import { extractJsonCandidate, extractJsonCandidates, extractTaskJsonCandidate } from "../src/json-extractor.js";
 import { evaluateEpisodeChunkCompactShape, scoreEpisodeChunkCandidate } from "../src/episode-chunk-shape.js";
 import { classifyProviderError, diagnoseProviderProtocol, suggestProviderFix } from "../src/provider-diagnostics.js";
+import {
+  analyzeViralMechanismDemo,
+  applyPatternsToNewIdeaDemo,
+  auditPatternTransferDemo,
+  buildSkillAssetsFromPatternsDemo,
+  extractPatternCardsDemo,
+  extractStoryBlueprintDemo
+} from "../src/pattern-cards.js";
 
 const state = createSeedState();
 const analysis = analyzeScript(state.scriptInput);
@@ -111,6 +119,60 @@ assert.equal(labelForKey("mainlineStrengthScore"), "主线强度");
 assert.equal(labelForKey("reversalStrengthScore"), "大反差强度");
 assert.equal(labelForKey("endingStrengthScore"), "结局强度");
 assert.equal(labelForKey("unknownFutureField"), "补充字段");
+
+const storyBlueprint = extractStoryBlueprintDemo({ analysis, caseId: "case-check" });
+assert.ok(storyBlueprint.storyEngine);
+assert.ok(storyBlueprint.protagonistLoop.length >= 3);
+assert.ok(storyBlueprint.reusableSkeleton.length >= 3);
+assert.ok(storyBlueprint.nonTransferableSurface.join("、").includes("火车"));
+assert.equal(validateTaskOutput("extractStoryBlueprint", storyBlueprint).ok, true);
+
+const mechanismAnalysis = analyzeViralMechanismDemo({ analysis, blueprint: storyBlueprint });
+assert.ok(mechanismAnalysis.whyItCanWork.includes("危机"));
+assert.ok(mechanismAnalysis.whyItMayFail.includes("重复") || mechanismAnalysis.whyItMayFail.includes("疲劳"));
+assert.ok(mechanismAnalysis.audienceNeeds.length >= 1);
+assert.ok(mechanismAnalysis.retentionHooks.length >= 1);
+assert.equal(validateTaskOutput("analyzeViralMechanism", mechanismAnalysis).ok, true);
+
+const patternCards = extractPatternCardsDemo({ analysis, blueprint: storyBlueprint, mechanism: mechanismAnalysis });
+assert.ok(patternCards.length >= 5);
+for (const card of patternCards) {
+  assert.ok(card.variableSlots && typeof card.variableSlots === "object");
+  assert.ok(card.antiPatterns.length >= 1);
+  assert.ok(card.transferPrompt);
+  assert.ok(card.scoringRubric.length >= 1);
+}
+assert.equal(validateTaskOutput("extractPatternCards", patternCards).ok, true);
+const weakPatternCards = extractPatternCardsDemo({ analysis: { title: "无证据案例", evidenceLedger: {}, episodeBeatLedger: [] } });
+assert.ok(weakPatternCards.some((card) => card.needsReview === true));
+assert.ok(weakPatternCards.every((card) => card.canPromoteToSkill === false));
+
+const skillAssets = buildSkillAssetsFromPatternsDemo({ patternCards, skills: state.skills });
+assert.ok(skillAssets.length >= 1);
+assert.ok(skillAssets[0].promptAdditions.length >= 1);
+assert.ok(skillAssets[0].positiveExamples.length >= 1);
+assert.ok(skillAssets[0].negativeExamples.length >= 1);
+assert.ok(skillAssets[0].evaluationCriteria.length >= 1);
+assert.equal(validateTaskOutput("buildSkillAssetsFromPatterns", skillAssets).ok, true);
+const weakSkillAssets = buildSkillAssetsFromPatternsDemo({ patternCards: weakPatternCards, skills: state.skills });
+assert.ok(weakSkillAssets.every((skill) => skill.status === "待复核"));
+
+const transferIdea = "一个被封杀的天才 AI 编剧进入短剧公司，用数据预测爆款，被所有老编剧嘲笑";
+const patternTransfer = applyPatternsToNewIdeaDemo({ idea: transferIdea, patternCards, skillAssets });
+assert.ok(patternTransfer.variableMapping);
+assert.ok(patternTransfer.newStoryEngine.includes("AI 编剧") || patternTransfer.newStoryEngine.includes("数据"));
+assert.ok(patternTransfer.firstFiveEpisodes.length >= 5);
+assert.ok(patternTransfer.patternCardIds.length >= 1);
+assert.equal(validateTaskOutput("applyPatternsToNewIdea", patternTransfer).ok, true);
+
+const transferAudit = auditPatternTransferDemo({
+  idea: transferIdea,
+  patternCards,
+  transferResult: { ...patternTransfer, outlineSeed: "火车上蛊毒爆发，医生误判后主角处理蜈蚣。" }
+});
+assert.ok(transferAudit.copiedSurfaceRisks.some((item) => item.term === "火车"));
+assert.ok(transferAudit.suggestedRepairs.length >= 1);
+assert.equal(validateTaskOutput("auditPatternTransfer", transferAudit).ok, true);
 
 const fragmentText = "毒手巫医\n\n第一集\n\n△火车上林清突然流血倒地。\n医生：已经没救了！\n孙大为：不是脑溢血，是被人害的。\n△孙大为拿出银针，金蚕飞出。";
 const fragmentCoverage = detectScriptCoverage(fragmentText, 50);
@@ -1690,7 +1752,7 @@ assert.ok(modelAdapterSource.includes("模型返回非 JSON"));
 assert.ok(modelAdapterSource.includes("meta.usableForLearning = meta.usableForSkillLearning"));
 assert.ok(!modelAdapterSource.includes("sourceMeta.usableForLearning = !sourceMeta.blockedSave"));
 
-console.log("check passed: V1.2 evidence-led script analysis, API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");
+console.log("check passed: V1.3 evidence-led analysis, pattern learning, API safety, editable Skill assets, model routing, redaction, and docx parsing are coherent");
 
 function apiStateLike(apiConfig) {
   const next = structuredClone(apiConfig);

@@ -100,6 +100,32 @@ const taskShapeRules = {
     required: ["episodeNo", "title", "evidenceLedger", "episodeBeatLedger", "episodeFunctionAnalysis", "reusablePatterns", "openQuestions", "continuityNotes", "confidence", "needsReview"],
     allowEmptyArrays: ["reusablePatterns", "openQuestions", "continuityNotes"]
   },
+  extractStoryBlueprint: {
+    type: "object",
+    required: ["storyEngine", "protagonistLoop", "emotionalLoop", "reusableSkeleton", "nonTransferableSurface", "sourceEvidence", "confidence", "needsReview"]
+  },
+  analyzeViralMechanism: {
+    type: "object",
+    required: ["audienceNeeds", "coolPointMechanisms", "retentionHooks", "whyItCanWork", "whyItMayFail", "sourceEvidence", "confidence", "needsReview"]
+  },
+  extractPatternCards: {
+    type: "array",
+    minItems: 5,
+    itemRequired: ["name", "sourceEvidence", "structuralFunction", "audiencePsychology", "abstractTemplate", "variableSlots", "transferPrompt", "scoringRubric"]
+  },
+  buildSkillAssetsFromPatterns: {
+    type: "array",
+    minItems: 1,
+    itemRequired: ["id", "name", "purpose", "patternCardIds", "promptAdditions", "positiveExamples", "negativeExamples", "evaluationCriteria", "status"]
+  },
+  applyPatternsToNewIdea: {
+    type: "object",
+    required: ["patternSelection", "variableMapping", "newStoryEngine", "firstFiveEpisodes", "risks", "patternCardIds"]
+  },
+  auditPatternTransfer: {
+    type: "object",
+    required: ["transferScore", "copiedSurfaceRisks", "mechanismCoverage", "suggestedRepairs"]
+  },
   evaluateIdea: {
     type: "object",
     required: ["logline", "coreHook", "potentialAudienceNeeds", "commercialPotentialScore", "risks", "suggestions"]
@@ -187,6 +213,8 @@ export function validateTaskOutput(taskType, value) {
   if (taskType === "analyzeEpisodeChunk" || taskType === "analyzeScriptChunk" || taskType === "schemaRepairAnalyzeEpisodeChunk") {
     issues.push(...validateEpisodeChunkContract(value));
   }
+  if (taskType === "extractPatternCards") issues.push(...validatePatternCardsContract(value));
+  if (taskType === "buildSkillAssetsFromPatterns") issues.push(...validatePatternSkillContract(value));
   return { ok: issues.length === 0, issues };
 }
 
@@ -257,6 +285,29 @@ function validateAnalyzeScriptContract(value) {
       if (item?.id && !item.sourceText) issues.push(`evidenceLedger.${group}[${index}] 缺少 sourceText`);
     });
   }
+  return issues;
+}
+
+function validatePatternCardsContract(cards) {
+  if (!Array.isArray(cards)) return [];
+  const issues = [];
+  cards.forEach((card, index) => {
+    const hasEvidence = arrayHasItems(card.sourceEvidence);
+    if (!hasEvidence && card.needsReview !== true) issues.push(`PatternCard[${index}] sourceEvidence 不足时必须 needsReview=true`);
+    if (!hasEvidence && card.canPromoteToSkill === true) issues.push(`PatternCard[${index}] sourceEvidence 不足时不能 canPromoteToSkill=true`);
+    if (card.variableSlots && (typeof card.variableSlots !== "object" || Array.isArray(card.variableSlots))) {
+      issues.push(`PatternCard[${index}] variableSlots 必须是对象`);
+    }
+  });
+  return issues;
+}
+
+function validatePatternSkillContract(skills) {
+  if (!Array.isArray(skills)) return [];
+  const issues = [];
+  skills.forEach((skill, index) => {
+    if (skill.needsReview && skill.status === "已启用") issues.push(`SkillAsset[${index}] needsReview=true 时不能是已启用`);
+  });
   return issues;
 }
 

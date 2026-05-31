@@ -22,12 +22,13 @@ export function exportProjectJson(state) {
   return JSON.stringify(
     {
       exportedAt: new Date().toISOString(),
-      product: "AI 剧本结构学习与细纲生产系统",
+      product: "AI 剧本结构学习、爆款模式提炼与新创意迁移工作台",
       mode: safeState.mode,
       currentProject: safeState.currentProject,
       cases: safeState.cases,
       assets: safeState.assets,
       skills: safeState.skills,
+      patternLearning: safeState.patternLearning,
       apiConfig: redactApiConfig(safeState.apiConfig),
       modelLogs: safeState.modelLogs
     },
@@ -73,6 +74,19 @@ export function exportAnalysisMarkdown(analysis) {
         analysis.episodeBeatLedger
           .map((beat) => `### ${beat.beatId}\n- 原文：${line(beat.sourceText)}\n- 摘要：${line(beat.beatSummary)}\n- 结构功能：${line(beat.structureFunction)}\n- 可复用价值：${line(beat.reusableValue)}`)
           .join("\n\n")
+      )
+    );
+  }
+  if (analysis.storyBlueprint || analysis.mechanismAnalysis || analysis.patternCards?.length) {
+    parts.push(
+      section(
+        "爆款模式学习",
+        [
+          `- StoryBlueprint：${line(analysis.storyBlueprint?.storyEngine || analysis.storyBlueprint)}`,
+          `- MechanismAnalysis：${line(analysis.mechanismAnalysis?.whyItCanWork || analysis.mechanismAnalysis)}`,
+          `- PatternCards：${line((analysis.patternCards || []).map((item) => item.name || item.title))}`,
+          `- SkillAssets：${line((analysis.skillAssets || []).map((item) => item.name))}`
+        ].join("\n")
       )
     );
   }
@@ -144,6 +158,58 @@ export function exportAnalysisMarkdown(analysis) {
         .join("\n\n")
     )
   );
+  return `${parts.join("\n")}\n`;
+}
+
+export function exportPatternLearningMarkdown(patternLearning = {}) {
+  const parts = ["# 爆款模式学习与迁移报告"];
+  const blueprint = patternLearning.storyBlueprint || {};
+  const mechanism = patternLearning.mechanismAnalysis || {};
+  parts.push(
+    section(
+      "StoryBlueprint",
+      [
+        `- 故事发动机：${line(blueprint.storyEngine)}`,
+        `- 主角循环：${line(blueprint.protagonistLoop)}`,
+        `- 可复用骨架：${line(blueprint.reusableSkeleton)}`,
+        `- 不可照搬表皮：${line(blueprint.nonTransferableSurface)}`
+      ].join("\n")
+    )
+  );
+  parts.push(
+    section(
+      "MechanismAnalysis",
+      [
+        `- 观众需求：${line(mechanism.audienceNeeds)}`,
+        `- 爽点机制：${line(mechanism.coolPointMechanisms)}`,
+        `- 留存钩子：${line(mechanism.retentionHooks)}`,
+        `- 为什么可能有效：${line(mechanism.whyItCanWork)}`,
+        `- 为什么可能失败：${line(mechanism.whyItMayFail)}`
+      ].join("\n")
+    )
+  );
+  parts.push(
+    section(
+      "Pattern Cards",
+      (patternLearning.patternCards || [])
+        .map((card) => `### ${line(card.name)}\n- 结构功能：${line(card.structuralFunction)}\n- 抽象模板：${line(card.abstractTemplate)}\n- 变量槽：${line(card.variableSlots)}\n- 迁移 Prompt：${line(card.transferPrompt)}`)
+        .join("\n\n") || "暂无"
+    )
+  );
+  parts.push(
+    section(
+      "SkillAssets",
+      (patternLearning.skillAssets || [])
+        .map((skill) => `### ${line(skill.name)}\n- 状态：${line(skill.status)}\n- Pattern：${line(skill.patternCardIds)}\n- 评分标准：${line(skill.evaluationCriteria)}`)
+        .join("\n\n") || "暂无"
+    )
+  );
+  if (patternLearning.patternTransferResult) {
+    parts.push(section("迁移结果", line(patternLearning.patternTransferResult)));
+  }
+  if (patternLearning.patternTransferAudit) {
+    parts.push(section("迁移审计", line(patternLearning.patternTransferAudit)));
+  }
   return `${parts.join("\n")}\n`;
 }
 

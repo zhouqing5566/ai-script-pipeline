@@ -1,4 +1,4 @@
-# AI 剧本结构学习与细纲生产系统
+# AI 剧本结构学习、爆款模式提炼与新创意迁移工作台
 
 面向 AI 漫剧、短剧、网文改编和爽剧内容生产的本地结构化工作台。
 
@@ -8,6 +8,7 @@
 剧本分析
 → 案例库保存
 → 模式资产沉淀
+→ 爆款骨架与 Pattern Card 提炼
 → 创作决策
 → 人类锁定关键锚点
 → 宏观结构与分集细纲
@@ -20,6 +21,7 @@
 
 - 剧本粘贴 / 上传入口，支持 txt / md / docx 正文解析
 - 结构化剧本分析：开头钩子、观众情绪、主题、人物、金手指、阻碍、主线骨架、大反差、结局、分集功能、可复用模式
+- 案例学习 / 爆款模式：从已分析剧本提炼 StoryBlueprint、MechanismAnalysis、PatternCard、SkillAsset，并迁移到新创意
 - 案例库与模式资产中心
 - Skill 版本管理、优化建议、回归对比演示
 - 创作决策：创意评估、5 类方向方案、主题与情绪、主线大反差、结局、大节点
@@ -33,6 +35,32 @@
 - Skill 可编辑资产系统：新增、编辑、复制、停用、启用、回滚、Demo 合并入口、版本记录、适用范围、规则、Prompt 补充、正反例、评估标准、风险提示、模型偏好
 - API 与模型配置中心：多 Provider、多模型、任务路由、功能区路由、Skill 模型偏好、项目级覆盖预留、备用模型、调用日志、安全说明
 - 长剧本分集分析：完整 5 集以上或长文本剧本会自动切换为“分集/切块分析 → 全剧聚合 → 证据校验”，不再依赖单次超大 `analyzeScript`
+
+## 爆款模式学习与迁移
+
+系统现在不只回答“剧情是什么”，还会回答“这个剧本为什么可能有效，以及哪些机制能迁移到新故事”。
+
+`StoryBlueprint` 是剧本的可复用骨架，不是普通大纲。它会记录故事发动机、主角循环、冲突升级、情绪循环、关系发动机、悬念发动机、兑现设计、分集功能图、可复用骨架和不可照搬表皮。
+
+`MechanismAnalysis` 解释爆款机制：观众需求、爽点如何制造、好奇心来自哪里、观众如何代入、情绪如何压低再兑现、每集为什么继续看，以及重复使用时的疲劳风险。
+
+`PatternCard` 是案例到 Skill 的中间层。它不是剧情复述，而是一个可迁移模式，必须包含来源证据、表层剧情、结构功能、人物功能、观众心理、抽象模板、变量槽、使用条件、反例、迁移 Prompt 和评分标准。
+
+`PatternCard` 和 `Skill` 的区别：PatternCard 记录单个可迁移桥段机制；SkillAsset 会组合多个 PatternCard，形成可执行的 Prompt 规则、正反例、评估标准、适用任务和风险提示。
+
+使用路径：
+
+```text
+剧本分析
+→ 案例学习 / 爆款模式
+→ 提炼当前分析
+→ 得到 Blueprint / Mechanism / Pattern Cards / Skill 草稿
+→ 输入新创意
+→ 套用已选 Pattern 生成故事发动机、前 5 集、大纲种子
+→ 审计迁移结果是否抄表皮
+```
+
+如果 PatternCard 缺少 `sourceEvidence`，或 `needsReview=true`，它不能直接进入已启用 Skill，只能生成“待复核”Skill 草稿。迁移审计会检查是否照搬了原案例的人名、场景、道具、火车/蛊毒/医生等表皮元素。
 
 ## 运行方式
 
@@ -77,6 +105,9 @@ npm run check
 - 完整项目导出和快照不会泄漏 API Key
 - 真实 API JSON 返回会按 taskType 做结构校验
 - docx 上传会解析 Word 正文，不再按二进制文本读取造成乱码
+- StoryBlueprint / MechanismAnalysis / PatternCard / SkillAsset / Pattern 迁移 / 迁移审计闭环可用
+- PatternCard 不足证据时必须 `needsReview=true`，生成的 Skill 只能是“待复核”
+- Pattern 迁移审计能识别照搬火车、蛊毒、医生等原剧本表皮的风险
 - 真实 API 调用经过本地 `/api/model-call` server proxy，不从浏览器直连外部 Provider
 - `requestFormat=openai_chat` 时即使模型名包含 Gemini 也走 OpenAI-compatible
 - DeepSeek 模板默认 `requestFormat=openai_chat`

@@ -24,7 +24,8 @@ const prohibitions = [
   "不要擅自修改已锁定主题、主线大反差、结局和大节点。",
   "不要把没有原文证据的推断写成事实。",
   "不要在输入不完整时生成确定性的完整主线、结局或全剧分集功能。",
-  "不要编造 sourceText；sourceText 必须能在用户输入中找到。"
+  "不要编造 sourceText；sourceText 必须能在用户输入中找到。",
+  "做模式迁移时只迁移机制，不要照搬原案例的人名、场景、道具和桥段表皮。"
 ];
 
 const strictJsonTaskTypes = new Set([
@@ -35,6 +36,12 @@ const strictJsonTaskTypes = new Set([
   "mergeEvidenceLedAnalysis",
   "schemaRepairAnalyzeScript",
   "schemaRepairAnalyzeEpisodeChunk",
+  "extractStoryBlueprint",
+  "analyzeViralMechanism",
+  "extractPatternCards",
+  "buildSkillAssetsFromPatterns",
+  "applyPatternsToNewIdea",
+  "auditPatternTransfer",
   "jsonRepair"
 ]);
 

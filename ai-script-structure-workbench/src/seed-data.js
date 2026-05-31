@@ -117,7 +117,21 @@ export function createSeedState() {
     assets: createSeedAssets(),
     skills: normalizeSkillList(createSeedSkills()),
     apiConfig: createSeedApiConfig(),
+    patternLearning: createSeedPatternLearning(),
     modelLogs: []
+  };
+}
+
+function createSeedPatternLearning() {
+  return {
+    storyBlueprint: null,
+    mechanismAnalysis: null,
+    patternCards: [],
+    skillAssets: [],
+    newIdea: "一个被封杀的天才 AI 编剧进入短剧公司，用数据预测爆款，被所有老编剧嘲笑",
+    patternTransferResult: null,
+    patternTransferAudit: null,
+    updatedAt: null
   };
 }
 

@@ -159,6 +159,15 @@ async function handleAction(payload) {
       case "save-case":
         saveCurrentAnalysisAsCase();
         break;
+      case "run-case-learning":
+        await runCaseLearningPipeline();
+        break;
+      case "apply-patterns":
+        await applyPatternsToNewIdeaAction();
+        break;
+      case "audit-pattern-transfer":
+        await auditPatternTransferAction();
+        break;
       case "export-analysis":
         await exportContent("剧本结构分析报告", "md", exportAnalysisMarkdown(store.getState().currentAnalysis));
         break;
@@ -1282,6 +1291,117 @@ async function executeTask(taskType, inputFactory, applyOutput, summary, options
   showToast(result?.warnings?.length ? `${summary}。${result.warnings[0]}` : summary);
 }
 
+async function runCaseLearningPipeline() {
+  let current = commitOpenInputsBeforeAction("案例学习流水线");
+  const analysis = current.currentAnalysis;
+  if (!analysis) {
+    showToast("请先完成剧本分析，再提炼爆款模式。");
+    return;
+  }
+  busyAction = "案例学习流水线";
+  render();
+  const logs = [];
+  const learning = ensurePatternLearning(current);
+  const blueprint = await runModelTask("extractStoryBlueprint", { analysis, caseId: analysis.id || current.cases?.[0]?.id, project: current.currentProject }, current);
+  learning.storyBlueprint = blueprint.output;
+  logs.unshift(blueprint.log);
+  current.patternLearning = learning;
+
+  const mechanism = await runModelTask("analyzeViralMechanism", { analysis, blueprint: learning.storyBlueprint, project: current.currentProject }, current);
+  learning.mechanismAnalysis = mechanism.output;
+  logs.unshift(mechanism.log);
+  current.patternLearning = learning;
+
+  const cards = await runModelTask("extractPatternCards", { analysis, blueprint: learning.storyBlueprint, mechanism: learning.mechanismAnalysis, project: current.currentProject }, current);
+  learning.patternCards = cards.output;
+  logs.unshift(cards.log);
+  current.patternLearning = learning;
+
+  const skills = await runModelTask("buildSkillAssetsFromPatterns", { patternCards: learning.patternCards, skills: current.skills, project: current.currentProject }, current);
+  learning.skillAssets = skills.output;
+  learning.updatedAt = new Date().toISOString();
+  logs.unshift(skills.log);
+
+  current.patternLearning = learning;
+  current.modelLogs = [...logs, ...current.modelLogs].slice(0, 80);
+  current.view = "learning";
+  busyAction = null;
+  store.setState(current, "完成案例学习与爆款模式提炼", { targetType: "patternLearning", action: "generate" });
+  showToast("已提炼 Blueprint、爆款机制、Pattern Card 和 Skill 草稿");
+}
+
+async function applyPatternsToNewIdeaAction() {
+  let current = commitOpenInputsBeforeAction("Pattern 迁移到新创意");
+  const learning = ensurePatternLearning(current);
+  if (!learning.patternCards?.length) {
+    showToast("请先提炼 Pattern Cards。");
+    return;
+  }
+  busyAction = "Pattern 迁移";
+  render();
+  const result = await runModelTask(
+    "applyPatternsToNewIdea",
+    {
+      idea: learning.newIdea,
+      patternCards: learning.patternCards,
+      skillAssets: learning.skillAssets,
+      project: current.currentProject,
+      constraints: current.currentProject.creativeConstraints
+    },
+    current
+  );
+  learning.patternTransferResult = result.output;
+  learning.updatedAt = new Date().toISOString();
+  current.patternLearning = learning;
+  current.modelLogs = [result.log, ...current.modelLogs].slice(0, 80);
+  busyAction = null;
+  store.setState(current, "套用 Pattern 生成新创意大纲种子", { targetType: "patternTransfer", action: "generate" });
+  showToast("已完成 Pattern 迁移");
+}
+
+async function auditPatternTransferAction() {
+  let current = commitOpenInputsBeforeAction("审计 Pattern 迁移结果");
+  const learning = ensurePatternLearning(current);
+  if (!learning.patternTransferResult) {
+    showToast("请先套用 Pattern 生成新创意。");
+    return;
+  }
+  busyAction = "迁移审计";
+  render();
+  const result = await runModelTask(
+    "auditPatternTransfer",
+    {
+      idea: learning.newIdea,
+      patternCards: learning.patternCards,
+      skillAssets: learning.skillAssets,
+      transferResult: learning.patternTransferResult,
+      project: current.currentProject
+    },
+    current
+  );
+  learning.patternTransferAudit = result.output;
+  learning.updatedAt = new Date().toISOString();
+  current.patternLearning = learning;
+  current.modelLogs = [result.log, ...current.modelLogs].slice(0, 80);
+  busyAction = null;
+  store.setState(current, "完成 Pattern 迁移审计", { targetType: "patternTransfer", action: "generate" });
+  showToast("已完成迁移审计");
+}
+
+function ensurePatternLearning(state) {
+  state.patternLearning = {
+    storyBlueprint: null,
+    mechanismAnalysis: null,
+    patternCards: [],
+    skillAssets: [],
+    newIdea: "一个被封杀的天才 AI 编剧进入短剧公司，用数据预测爆款，被所有老编剧嘲笑",
+    patternTransferResult: null,
+    patternTransferAudit: null,
+    ...(state.patternLearning || {})
+  };
+  return state.patternLearning;
+}
+
 function commitOpenInputsBeforeAction(actionName = "执行操作") {
   const current = store.getState();
   const next = readOpenInputs(current);
@@ -1298,7 +1418,8 @@ function openInputsChanged(current, next) {
       creativeInput: state.currentProject.creativeInput,
       episodeCount: state.currentProject.creativeConstraints?.episodeCount,
       targetAudience: state.currentProject.creativeConstraints?.targetAudience,
-      tone: state.currentProject.creativeConstraints?.tone
+      tone: state.currentProject.creativeConstraints?.tone,
+      patternIdea: state.patternLearning?.newIdea
     }
   });
   return JSON.stringify(pick(current)) !== JSON.stringify(pick(next));
@@ -1306,6 +1427,12 @@ function openInputsChanged(current, next) {
 
 function inputMetaForTask(state, taskType) {
   if (taskType === "analyzeScript") return state.scriptInput;
+  if (taskType === "extractStoryBlueprint") return { analysis: state.currentAnalysis, caseId: state.currentAnalysis?.id, project: state.currentProject };
+  if (taskType === "analyzeViralMechanism") return { analysis: state.currentAnalysis, blueprint: state.patternLearning?.storyBlueprint, project: state.currentProject };
+  if (taskType === "extractPatternCards") return { analysis: state.currentAnalysis, blueprint: state.patternLearning?.storyBlueprint, mechanism: state.patternLearning?.mechanismAnalysis, project: state.currentProject };
+  if (taskType === "buildSkillAssetsFromPatterns") return { patternCards: state.patternLearning?.patternCards || [], skills: state.skills, project: state.currentProject };
+  if (taskType === "applyPatternsToNewIdea") return { idea: state.patternLearning?.newIdea, patternCards: state.patternLearning?.patternCards || [], skillAssets: state.patternLearning?.skillAssets || [], project: state.currentProject };
+  if (taskType === "auditPatternTransfer") return { idea: state.patternLearning?.newIdea, patternCards: state.patternLearning?.patternCards || [], transferResult: state.patternLearning?.patternTransferResult, project: state.currentProject };
   if (taskType === "generateDraft") return { project: state.currentProject, episodeNo: state.selectedEpisodeNo || 1 };
   if (taskType === "auditDraft") return { draft: state.currentProject.draftEpisodes?.[0] || null, project: state.currentProject };
   if (taskType === "jsonRepair") return { project: state.currentProject, brokenText: "{\"ok\":true", errors: ["测试 JSON 修复"] };
@@ -1332,6 +1459,7 @@ function readOpenInputs(baseState) {
   const episodeCount = document.querySelector("#project-episode-count");
   const targetAudience = document.querySelector("#project-target-audience");
   const tone = document.querySelector("#project-tone");
+  const patternIdea = document.querySelector("#pattern-transfer-idea");
   if (ideaText) state.currentProject.creativeInput = ideaText.value;
   if (projectTitle) {
     state.currentProject.title = projectTitle.value;
@@ -1340,6 +1468,10 @@ function readOpenInputs(baseState) {
   if (episodeCount) state.currentProject.creativeConstraints.episodeCount = Number(episodeCount.value) || 24;
   if (targetAudience) state.currentProject.creativeConstraints.targetAudience = targetAudience.value;
   if (tone) state.currentProject.creativeConstraints.tone = tone.value;
+  if (patternIdea) {
+    ensurePatternLearning(state);
+    state.patternLearning.newIdea = patternIdea.value;
+  }
   return state;
 }
 
@@ -2621,6 +2753,7 @@ function renderMain(state) {
     analysis: renderAnalysis,
     cases: renderCases,
     assets: renderAssets,
+    learning: renderLearning,
     skills: renderSkills,
     decision: renderDecision,
     outline: renderOutline,
@@ -2637,7 +2770,7 @@ function renderHome(state) {
   return `
     <section class="page-head">
       <div>
-        <h1>AI 剧本结构学习与细纲生产系统</h1>
+        <h1>AI 剧本结构学习、爆款模式提炼与新创意迁移工作台</h1>
         <p>从成功剧本拆解，到模式沉淀、创作决策、锁定锚点、细纲生产、审计修复和导出。</p>
       </div>
       <div class="head-actions">
@@ -3115,6 +3248,63 @@ function renderAssets(state) {
       <div class="asset-cards">
         ${list.map(renderAssetCard).join("")}
       </div>
+    </section>
+  `;
+}
+
+function renderLearning(state) {
+  const learning = {
+    storyBlueprint: null,
+    mechanismAnalysis: null,
+    patternCards: [],
+    skillAssets: [],
+    newIdea: "一个被封杀的天才 AI 编剧进入短剧公司，用数据预测爆款，被所有老编剧嘲笑",
+    ...(state.patternLearning || {})
+  };
+  return `
+    <section class="page-head compact">
+      <div>
+        <h1>案例学习 / 爆款模式</h1>
+        <p>把已有剧本拆成可复用骨架、爆款机制、Pattern Card 和可迁移 Skill，再套用到新创意。</p>
+      </div>
+      <div class="top-actions">
+        <button class="primary-button" data-action="run-case-learning">${icon("spark")}提炼当前分析</button>
+        <button class="secondary-button" data-action="apply-patterns">迁移到新创意</button>
+        <button class="secondary-button" data-action="audit-pattern-transfer">审计迁移结果</button>
+      </div>
+    </section>
+    ${!state.currentAnalysis ? `<section class="callout warn">请先在“剧本分析”完成一个案例分析，再提炼爆款模式。</section>` : ""}
+    <section class="learning-grid">
+      <article class="info-card">
+        <h2>剧本骨架 Blueprint</h2>
+        ${learning.storyBlueprint ? renderBlueprint(learning.storyBlueprint) : emptyState("暂无 Blueprint", "点击“提炼当前分析”，从 evidence 和 beat 中抽可复用骨架。")}
+      </article>
+      <article class="info-card">
+        <h2>爆款机制 Mechanism</h2>
+        ${learning.mechanismAnalysis ? renderMechanism(learning.mechanismAnalysis) : emptyState("暂无机制分析", "系统会解释为什么可能让人继续看，也会指出疲劳风险。")}
+      </article>
+    </section>
+    <section class="panel-block">
+      <div class="section-title"><h2>Pattern Cards</h2><span>${learning.patternCards?.length || 0} 张</span></div>
+      <div class="asset-cards">
+        ${(learning.patternCards || []).length ? learning.patternCards.map(renderLearningPatternCard).join("") : emptyState("暂无 Pattern Card", "Pattern Card 是案例到 Skill 的中间层，负责抽象可迁移机制。")}
+      </div>
+    </section>
+    <section class="panel-block">
+      <div class="section-title"><h2>Skill 沉淀</h2><span>${learning.skillAssets?.length || 0} 个</span></div>
+      <div class="asset-cards">
+        ${(learning.skillAssets || []).length ? learning.skillAssets.map(renderPatternSkillAsset).join("") : emptyState("暂无 Skill 草稿", "证据不足的 Pattern 只能生成“待复核”Skill，不能直接启用。")}
+      </div>
+    </section>
+    <section class="panel-block">
+      <div class="section-title"><h2>新创意迁移</h2><span>保留机制，不抄表皮</span></div>
+      <textarea id="pattern-transfer-idea" rows="4" placeholder="输入新创意">${escapeHtml(learning.newIdea || "")}</textarea>
+      <div class="toolbar-row">
+        <button class="primary-button" data-action="apply-patterns">套用已选 Pattern 生成故事发动机 / 前5集</button>
+        <button class="secondary-button" data-action="audit-pattern-transfer">审计迁移结果</button>
+      </div>
+      ${learning.patternTransferResult ? renderPatternTransferResult(learning.patternTransferResult) : ""}
+      ${learning.patternTransferAudit ? renderPatternTransferAudit(learning.patternTransferAudit) : ""}
     </section>
   `;
 }
@@ -3929,6 +4119,120 @@ function renderObjectSection(title, object, skip = []) {
         .filter(([key]) => !skip.includes(key))
         .map(([key, value]) => `<div><span>${labelForKey(key)}</span><strong>${formatValue(value)}</strong></div>`)
         .join("")}
+    </div>
+  `;
+}
+
+function renderBlueprint(blueprint) {
+  return `
+    ${keyValueGrid([
+      ["故事发动机", blueprint.storyEngine],
+      ["主角循环", blueprint.protagonistLoop],
+      ["冲突升级", blueprint.conflictEscalation],
+      ["情绪循环", blueprint.emotionalLoop],
+      ["悬念发动机", blueprint.suspenseEngine],
+      ["可复用骨架", blueprint.reusableSkeleton],
+      ["不可照搬表皮", blueprint.nonTransferableSurface]
+    ])}
+    <p class="${blueprint.needsReview ? "warn" : ""}">信心 ${Math.round((blueprint.confidence || 0) * 100)}%${blueprint.needsReview ? "｜证据不足，需复核" : ""}</p>
+  `;
+}
+
+function renderMechanism(mechanism) {
+  return `
+    ${keyValueGrid([
+      ["观众需求", mechanism.audienceNeeds],
+      ["爽点机制", mechanism.coolPointMechanisms],
+      ["追看驱动力", mechanism.addictiveDrivers],
+      ["留存钩子", mechanism.retentionHooks],
+      ["情绪兑现链", mechanism.emotionalPayoffChain],
+      ["为什么可能有效", mechanism.whyItCanWork],
+      ["为什么可能失败", mechanism.whyItMayFail]
+    ])}
+    <p class="${mechanism.needsReview ? "warn" : ""}">信心 ${Math.round((mechanism.confidence || 0) * 100)}%${mechanism.needsReview ? "｜证据不足，需复核" : ""}</p>
+  `;
+}
+
+function renderLearningPatternCard(card) {
+  return `
+    <article class="info-card pattern-card">
+      <h3>${escapeHtml(card.name)}<span>${card.canPromoteToSkill ? "可沉淀" : "需复核"}</span></h3>
+      <p>${escapeHtml(card.surfacePlot || "")}</p>
+      <dl>
+        <dt>结构功能</dt><dd>${formatValue(card.structuralFunction)}</dd>
+        <dt>人物功能</dt><dd>${formatValue(card.characterFunction)}</dd>
+        <dt>观众心理</dt><dd>${formatValue(card.audiencePsychology)}</dd>
+        <dt>抽象模板</dt><dd>${formatValue(card.abstractTemplate)}</dd>
+        <dt>变量槽</dt><dd>${formatValue(card.variableSlots)}</dd>
+        <dt>反例</dt><dd>${formatValue(card.antiPatterns)}</dd>
+        <dt>迁移提示词</dt><dd>${formatValue(card.transferPrompt)}</dd>
+        <dt>评分标准</dt><dd>${formatValue(card.scoringRubric)}</dd>
+        <dt>来源证据</dt><dd>${formatValue((card.sourceEvidence || []).map((item) => item.sourceText || item.beatId || item.evidenceId))}</dd>
+      </dl>
+    </article>
+  `;
+}
+
+function renderPatternSkillAsset(skill) {
+  return `
+    <article class="info-card">
+      <h3>${escapeHtml(skill.name)}<span>${escapeHtml(skill.status)}</span></h3>
+      <p>${escapeHtml(skill.purpose || "")}</p>
+      <dl>
+        <dt>Pattern</dt><dd>${formatValue(skill.patternCardIds)}</dd>
+        <dt>适用任务</dt><dd>${formatValue(skill.taskScope)}</dd>
+        <dt>Prompt 补充</dt><dd>${formatValue(skill.promptAdditions)}</dd>
+        <dt>正例</dt><dd>${formatValue(skill.positiveExamples)}</dd>
+        <dt>反例</dt><dd>${formatValue(skill.negativeExamples)}</dd>
+        <dt>评分标准</dt><dd>${formatValue(skill.evaluationCriteria)}</dd>
+      </dl>
+    </article>
+  `;
+}
+
+function renderPatternTransferResult(result) {
+  return `
+    <div class="analysis-section">
+      <h3>迁移结果</h3>
+      ${keyValueGrid([
+        ["选用 Pattern", result.patternSelection?.map((item) => item.name || item.patternCardId)],
+        ["变量映射", result.variableMapping],
+        ["新故事发动机", result.newStoryEngine],
+        ["主角循环", result.newProtagonistLoop],
+        ["大纲种子", result.outlineSeed],
+        ["风险", result.risks]
+      ])}
+      <div class="episode-list">${(result.firstFiveEpisodes || []).map((episode) => renderLearningEpisodeSeed(episode)).join("")}</div>
+    </div>
+  `;
+}
+
+function renderLearningEpisodeSeed(episode) {
+  return `
+    <article class="episode-row">
+      <strong>${episode.episodeNo}</strong>
+      <div>
+        <h3>${escapeHtml(episode.title || "")}</h3>
+        <p>${escapeHtml(episode.function || episode.summary || "")}</p>
+        <span>Pattern：${formatValue(episode.patternCardIds)}</span>
+        <span>钩子：${formatValue(episode.hook)}</span>
+      </div>
+    </article>
+  `;
+}
+
+function renderPatternTransferAudit(audit) {
+  return `
+    <div class="analysis-section">
+      <h3>迁移审计</h3>
+      ${scoreCard("迁移质量", audit.transferScore || 0)}
+      ${keyValueGrid([
+        ["机制覆盖", audit.mechanismCoverage],
+        ["照搬表皮风险", (audit.copiedSurfaceRisks || []).map((item) => item.risk || item.term || item)],
+        ["缺失情绪兑现", audit.missingAudiencePayoff],
+        ["人物动机弱点", audit.weakCharacterMotivation],
+        ["修复建议", audit.suggestedRepairs]
+      ])}
     </div>
   `;
 }
