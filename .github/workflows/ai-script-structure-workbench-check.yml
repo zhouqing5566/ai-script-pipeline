@@ -1,0 +1,24 @@
+name: ai-script-structure-workbench-check
+
+on:
+  push:
+    branches:
+      - codex/add-script-structure-workbench
+      - main
+  pull_request:
+    paths:
+      - "ai-script-structure-workbench/**"
+      - ".github/workflows/ai-script-structure-workbench-check.yml"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-script-structure-workbench
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm run check

@@ -1,5 +1,6 @@
 import { createStore } from "./state.js";
 import { callModel, runModelTask, testModelRoute } from "./model-adapter.js";
+import { clampConcurrency, runChunkPool } from "./concurrency.js";
 import { repairEpisode } from "./repair.js";
 import { auditDraft } from "./audit.js";
 import { loadRuntimeSettings, mergeRuntimeApiConfig, resetLocalState, syncRuntimeSettings, writeExport } from "./storage.js";
@@ -547,6 +548,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     }
   }
   const progress = createLongAnalysisProgress(allChunks, split);
+  const longScriptConcurrency = clampConcurrency(current.apiConfig.longScriptConcurrency || 3, 6);
   progress.inputSignature = inputSignature;
   progress.steps[1].status = "成功";
   progress.currentStep = retryAggregateOnly ? "重试全剧聚合" : retryFailedOnly ? (chunks.length ? "重试失败分集" : "重试全剧聚合") : "剧本切分";
@@ -554,6 +556,14 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   progress.routeReadiness = readiness;
   progress.taskRouteHealthUsedSchemaRepair = Boolean(readiness.usedSchemaRepair);
   progress.chunkResults = previousResults;
+  progress.concurrency = longScriptConcurrency;
+  progress.runningChunks = [];
+  progress.queuedChunks = chunks.map((chunk) => getChunkKey(chunk));
+  progress.completedChunks = Object.keys(previousResults).length;
+  progress.averageChunkLatencyMs = 0;
+  progress.startedAt = new Date().toISOString();
+  progress.completedAt = null;
+  progress.rateLimitDowngraded = false;
   progress.chunks = (progress.chunks || []).map((item) => {
     if (previousResults[item.chunkKey]) return { ...item, status: "成功", error: "" };
     return item;
@@ -575,9 +585,51 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
   let abortedByProbeFailure = false;
   let probeFailureType = "";
   const skippedChunks = [];
-  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-    const chunk = chunks[chunkIndex];
-    const isProbeChunk = !retryFailedOnly && !retryAggregateOnly && chunkIndex === 0 && !Object.keys(previousResults).length;
+
+  const createSkippedItem = (skipped, reason = "", probeType = "") => {
+    const providerProtocolMismatch = reason === "provider_protocol_mismatch";
+    const skippedDueToMissingProvider = reason === "missing_provider";
+    const skippedDueToProviderFailure = isProviderProbeFailureType(reason);
+    const skippedDueToProbeFailure = Boolean(probeType) || providerProtocolMismatch || skippedDueToMissingProvider || skippedDueToProviderFailure;
+    return {
+      failureStage: "episode_chunk",
+      chunkKey: getChunkKey(skipped),
+      episodeNo: skipped.episodeNo,
+      title: skipped.title,
+      detectedBy: skipped.detectedBy,
+      errorType: providerProtocolMismatch ? "skipped_due_to_provider_protocol_mismatch" : skippedDueToMissingProvider ? "skipped_due_to_missing_provider" : skippedDueToProviderFailure ? "skipped_due_to_provider_failure" : skippedDueToProbeFailure ? "skipped_due_to_probe_failure" : "skipped_due_to_json_failure",
+      skippedDueToProbeFailure: skippedDueToProbeFailure && !providerProtocolMismatch && !skippedDueToMissingProvider && !skippedDueToProviderFailure,
+      probeFailureType: probeType || reason || "",
+      skippedDueToProviderProtocolMismatch: providerProtocolMismatch,
+      skippedDueToMissingProvider,
+      skippedDueToProviderFailure,
+      skippedDueToJsonFailure: !skippedDueToProbeFailure,
+      error: providerProtocolMismatch
+        ? "skippedDueToProviderProtocolMismatch：Provider 协议不匹配，已停止后续调用。"
+        : skippedDueToMissingProvider
+          ? "skippedDueToMissingProvider：隐藏任务缺少 Provider 配置，已停止后续调用。"
+          : skippedDueToProviderFailure
+            ? `skippedDueToProviderFailure：真实分集请求 ${reason}，已暂停后续调用。`
+            : skippedDueToProbeFailure
+              ? `skippedDueToProbeFailure：第一集探针 ${probeType || reason} 失败，已暂停后续调用。`
+              : "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
+    };
+  };
+
+  const markSkippedChunks = (remaining = [], reason = "", probeType = "") => {
+    for (const skipped of remaining) {
+      const skippedItem = createSkippedItem(skipped, reason, probeType);
+      skippedChunks.push(skippedItem);
+    }
+    updateLongProgress((draft) => {
+      draft.skippedChunks = skippedChunks;
+      for (const skipped of remaining) {
+        markChunkStatus(draft, skipped, "跳过", createSkippedItem(skipped, reason, probeType).error);
+      }
+    });
+  };
+
+  const analyzeSingleChunk = async (chunk, { isProbeChunk = false } = {}) => {
     const chunkKey = getChunkKey(chunk);
     updateLongProgress((draft) => {
       draft.currentStep = isProbeChunk ? "分集 JSON 探针中" : `第 ${chunk.episodeNo || "?"} 集分析中`;
@@ -618,6 +670,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
         markChunkStatus(draft, chunk, result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired ? "成功（结构修复）" : "成功", "");
       });
       jsonFailureStreak = 0;
+      return { ok: true, chunkKey, schemaRepaired: Boolean(result.schemaRepaired || result.parsedJson?.sourceMeta?.schemaRepaired) };
     } catch (error) {
       const failed = createChunkFailure(error, chunk);
       failedChunks.push(failed);
@@ -645,61 +698,23 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       } else if (jsonFailureStreak >= 3) {
         abortedByJsonFailure = true;
       }
-      if (abortedByJsonFailure || abortedByProbeFailure) {
-        const remaining = chunks.slice(chunkIndex + 1);
-        for (const skipped of remaining) {
-          const skippedDueToProbeFailure = Boolean(abortedByProbeFailure);
-          const skippedDueToMissingProvider = probeFailureType === "missing_provider";
-          const skippedDueToProviderFailure = skippedDueToProbeFailure && !providerProtocolMismatch && !skippedDueToMissingProvider && isProviderProbeFailureType(probeFailureType);
-          const skippedItem = {
-            failureStage: "episode_chunk",
-            chunkKey: getChunkKey(skipped),
-            episodeNo: skipped.episodeNo,
-            title: skipped.title,
-            detectedBy: skipped.detectedBy,
-            errorType: providerProtocolMismatch ? "skipped_due_to_provider_protocol_mismatch" : skippedDueToMissingProvider ? "skipped_due_to_missing_provider" : skippedDueToProviderFailure ? "skipped_due_to_provider_failure" : skippedDueToProbeFailure ? "skipped_due_to_probe_failure" : "skipped_due_to_json_failure",
-            skippedDueToProbeFailure: skippedDueToProbeFailure && !providerProtocolMismatch && !skippedDueToMissingProvider && !skippedDueToProviderFailure,
-            probeFailureType: skippedDueToProbeFailure ? probeFailureType : "",
-            skippedDueToProviderProtocolMismatch: providerProtocolMismatch,
-            skippedDueToMissingProvider,
-            skippedDueToProviderFailure,
-            skippedDueToJsonFailure: !skippedDueToProbeFailure,
-            error: skippedDueToProbeFailure
-              ? providerProtocolMismatch
-                ? "skippedDueToProviderProtocolMismatch：Provider 协议不匹配，已停止后续调用。"
-                : skippedDueToMissingProvider
-                  ? "skippedDueToMissingProvider：隐藏任务缺少 Provider 配置，已停止后续调用。"
-                : skippedDueToProviderFailure
-                  ? `skippedDueToProviderFailure：第一集真实分集探针 ${probeFailureType}，已暂停后续调用。`
-                : `skippedDueToProbeFailure：第一集探针 ${probeFailureType} 失败，已暂停后续调用。`
-              : "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
-          };
-          skippedChunks.push(skippedItem);
-        }
+      const shouldStop = abortedByJsonFailure || abortedByProbeFailure;
+      if (shouldStop) {
         updateLongProgress((draft) => {
           draft.aborted = true;
           draft.abortedByJsonFailure = abortedByJsonFailure;
           draft.abortedByProbeFailure = abortedByProbeFailure;
           draft.probeFailureType = probeFailureType;
-          draft.currentStep = isProbeChunk ? "分集 JSON 探针失败，已暂停" : "连续 3 个分集返回非 JSON，已暂停";
-          draft.skippedChunks = skippedChunks;
+          draft.currentStep = providerProtocolMismatch
+            ? "Provider 协议不匹配，已停止派发"
+            : missingProvider
+              ? "隐藏任务缺少 Provider，已停止派发"
+              : isProbeChunk
+                ? "分集 JSON 探针失败，已暂停"
+                : abortedByJsonFailure
+                  ? "连续 3 个分集返回非 JSON，已暂停"
+                  : "停止派发新分集，等待已运行任务完成";
           draft.failedChunks = failedChunks;
-          for (const skipped of remaining) {
-            markChunkStatus(
-              draft,
-              skipped,
-              "跳过",
-              providerProtocolMismatch
-                ? "skippedDueToProviderProtocolMismatch：Provider 协议不匹配，已停止后续调用。"
-                : skippedDueToMissingProvider
-                  ? "skippedDueToMissingProvider：隐藏任务缺少 Provider 配置，已停止后续调用。"
-                : skippedDueToProviderFailure
-                  ? `skippedDueToProviderFailure：第一集真实分集探针 ${probeFailureType}，已暂停后续调用。`
-                : abortedByProbeFailure
-                ? `skippedDueToProbeFailure：第一集探针 ${probeFailureType} 失败，已暂停后续调用。`
-                : "skippedDueToJsonFailure：连续分集 JSON 输出失败，已暂停后续调用。"
-            );
-          }
           draft.warnings = [
             ...(draft.warnings || []),
             providerProtocolMismatch
@@ -713,8 +728,63 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
               : "连续 3 个分集返回非 JSON，已暂停长剧本分析。请先执行严格 JSON 输出测试、调整 Prompt 或更换模型。"
           ];
         });
-        break;
       }
+      return {
+        ok: false,
+        failed,
+        errorType: failed.errorType,
+        stopScheduling: shouldStop,
+        stopReason: abortedByProbeFailure ? probeFailureType || failed.errorType : abortedByJsonFailure ? "json_parse" : "",
+        rateLimitDowngraded: failed.errorType === "provider_rate_limit"
+      };
+    }
+  };
+
+  if (!retryAggregateOnly && chunks.length) {
+    const shouldProbe = !retryFailedOnly && !Object.keys(previousResults).length;
+    let remainingChunks = chunks;
+    if (shouldProbe) {
+      const probeChunk = chunks[0];
+      const probeResult = await analyzeSingleChunk(probeChunk, { isProbeChunk: true });
+      remainingChunks = chunks.slice(1);
+      if (!probeResult.ok && (abortedByJsonFailure || abortedByProbeFailure)) {
+        markSkippedChunks(remainingChunks, probeFailureType || probeResult.stopReason || "json_parse", probeFailureType);
+        remainingChunks = [];
+      }
+    }
+
+    if (remainingChunks.length && !(abortedByJsonFailure || abortedByProbeFailure)) {
+      await runChunkPool(remainingChunks, async (chunk, pool) => {
+        const result = await analyzeSingleChunk(chunk, { isProbeChunk: false });
+        if (result.rateLimitDowngraded) {
+          pool.setConcurrency(1, "provider_rate_limit");
+          updateLongProgress((draft) => {
+            draft.rateLimitDowngraded = true;
+            draft.warnings = [...(draft.warnings || []), "检测到 429/rate_limit，后续分集并发已自动降到 1。"];
+          });
+        }
+        return result;
+      }, {
+        concurrency: longScriptConcurrency,
+        maxConcurrency: 6,
+        onProgress: (poolState) => {
+          updateLongProgress((draft) => {
+            draft.concurrency = poolState.concurrency;
+            draft.runningChunks = poolState.runningChunks || [];
+            draft.queuedChunks = poolState.queuedChunks || [];
+            draft.completedChunks = poolState.completedChunks || 0;
+            draft.averageChunkLatencyMs = poolState.averageChunkLatencyMs || 0;
+            draft.rateLimitDowngraded = Boolean(poolState.rateLimitDowngraded || draft.rateLimitDowngraded);
+            draft.currentStep = poolState.stopped ? "停止派发新分集，等待已运行任务完成" : "分集并发分析中";
+          });
+        }
+      }).then((poolResult) => {
+        const skipped = (poolResult.results || []).filter((item) => item?.skipped).map((item) => item.item);
+        if (skipped.length) {
+          const reason = poolResult.stopReason || (abortedByProbeFailure ? probeFailureType : abortedByJsonFailure ? "json_parse" : "stopped");
+          markSkippedChunks(skipped, reason, abortedByProbeFailure ? probeFailureType : "");
+        }
+      });
     }
   }
   const episodeChunkAnalyses = Object.values(chunkResults)
@@ -852,6 +922,7 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
     draft.skippedChunks = skippedChunks;
     draft.chunkResults = chunkResults;
     draft.active = false;
+    draft.completedAt = new Date().toISOString();
   });
   busyAction = null;
   current = readOpenInputs(store.getState());
@@ -873,7 +944,8 @@ async function executeLongScriptAnalysis({ initialState = null, coverage = null,
       probeFailureType,
       taskRouteHealthUsedSchemaRepair,
       chunkResults,
-      inputSignature
+      inputSignature,
+      completedAt: new Date().toISOString()
     };
     return state;
   }, failedChunks.length ? "完成长剧本分集分析（需复核失败分集）" : "完成长剧本分集分析", { targetType: "analysis", action: "generate" });
@@ -1766,6 +1838,7 @@ async function saveApiMode() {
     state.apiConfig.globalDefaultModelId = document.querySelector("#global-default-model")?.value || "model-demo-rule-engine";
     state.apiConfig.selectedModelId = selectedModelId;
     state.apiConfig.allowDemoInApiMode = allowDemoInApiMode;
+    state.apiConfig.longScriptConcurrency = clampConcurrency(document.querySelector("#long-script-concurrency")?.value || state.apiConfig.longScriptConcurrency || 3, 6);
     state.mode = state.apiConfig.mode;
     markTaskRouteHealthStale(state.apiConfig, "API Mode 或全局模型配置已变化，请重新执行完整任务链路测试。");
     state.apiConfig.updatedAt = new Date().toISOString();
@@ -2918,6 +2991,11 @@ function renderLongScriptProgress(progress) {
       </div>
       <p class="muted">当前步骤：${escapeHtml(progress.currentStep || "待分析")}</p>
       <div class="long-progress-summary">
+        <span>并发数：${progress.concurrency || 1}</span>
+        <span>运行中：${(progress.runningChunks || []).length}</span>
+        <span>待分析：${(progress.queuedChunks || []).length}</span>
+        <span>已完成：${progress.completedChunks || Object.keys(progress.chunkResults || {}).length}</span>
+        <span>平均耗时：${progress.averageChunkLatencyMs ? `${Math.round(progress.averageChunkLatencyMs / 1000)}s` : "暂无"}</span>
         <span>声明/预期：${progress.expectedChunkCount || (progress.chunks || []).length}</span>
         <span>系统切出：${progress.detectedChunkCount || (progress.chunks || []).length}</span>
         <span>成功分析：${Object.keys(progress.chunkResults || {}).length}</span>
@@ -3586,6 +3664,9 @@ function renderApiStatus(state) {
           <label>API Mode 允许 Demo 兜底
             <input id="allow-demo-in-api-mode" type="checkbox" ${config.allowDemoInApiMode ? "checked" : ""} />
           </label>
+          <label>长剧本分集并发数
+            <input id="long-script-concurrency" type="number" min="1" max="6" value="${clampConcurrency(config.longScriptConcurrency || 3, 6)}" />
+          </label>
         </div>
         <div class="panel-actions"><button class="primary-button" data-action="set-api-mode">保存基础状态</button></div>
         ${keyValueGrid([
@@ -3952,6 +4033,8 @@ function renderSecurityNotes() {
       <div class="notice-list">
         <p>API Key 在输入框中以 password 方式录入，页面不会长期明文展示完整 Key。</p>
         <p>本地保存仅用于本机运行，配置会进入 localStorage 和 data/settings，本项目的 .gitignore 已排除本地密钥配置。</p>
+        <p>data/settings/model-settings.json 属于本机敏感文件，不要同步、分享或提交；真实 Key 只应保留在本机运行时配置中。</p>
+        <p>服务端日志会使用 deepRedactSecrets 脱敏 Authorization、Bearer、token、secret、x-api-key、OPENAI_API_KEY、DEEPSEEK_API_KEY、GEMINI_API_KEY 等字段和行内密钥。</p>
         <p>不要把真实 API Key 写入 seed-data.js、README 示例或提交到 GitHub。</p>
         <p>真实 API 调用失败时不会静默切换 Demo；只有任务路由配置的备用真实模型可 fallback，日志会记录 usedFallback。</p>
       </div>
@@ -4162,6 +4245,7 @@ function renderLearningPatternCard(card) {
         <dt>结构功能</dt><dd>${formatValue(card.structuralFunction)}</dd>
         <dt>人物功能</dt><dd>${formatValue(card.characterFunction)}</dd>
         <dt>观众心理</dt><dd>${formatValue(card.audiencePsychology)}</dd>
+        <dt>证据派生机制</dt><dd>${formatValue(card.evidenceDerivedFields)}</dd>
         <dt>抽象模板</dt><dd>${formatValue(card.abstractTemplate)}</dd>
         <dt>变量槽</dt><dd>${formatValue(card.variableSlots)}</dd>
         <dt>反例</dt><dd>${formatValue(card.antiPatterns)}</dd>
@@ -4198,6 +4282,13 @@ function renderPatternTransferResult(result) {
         ["选用 Pattern", result.patternSelection?.map((item) => item.name || item.patternCardId)],
         ["变量映射", result.variableMapping],
         ["新故事发动机", result.newStoryEngine],
+        ["逐卡迁移 Beat", result.adaptedPatternBeats?.map((item) => ({
+          patternCardId: item.patternCardId,
+          adaptedBeat: item.adaptedBeat,
+          adaptedConflict: item.adaptedConflict,
+          adaptedAudiencePayoff: item.adaptedAudiencePayoff,
+          adaptedRetentionHook: item.adaptedRetentionHook
+        }))],
         ["主角循环", result.newProtagonistLoop],
         ["大纲种子", result.outlineSeed],
         ["风险", result.risks]
@@ -4228,7 +4319,10 @@ function renderPatternTransferAudit(audit) {
       ${scoreCard("迁移质量", audit.transferScore || 0)}
       ${keyValueGrid([
         ["机制覆盖", audit.mechanismCoverage],
+        ["逐卡机制覆盖", audit.patternMechanismCoverage],
         ["照搬表皮风险", (audit.copiedSurfaceRisks || []).map((item) => item.risk || item.term || item)],
+        ["领域串味风险", (audit.domainMismatchRisks || []).map((item) => item.risk || item.term || item)],
+        ["弱迁移机制", audit.weakPatternMechanisms],
         ["缺失情绪兑现", audit.missingAudiencePayoff],
         ["人物动机弱点", audit.weakCharacterMotivation],
         ["修复建议", audit.suggestedRepairs]

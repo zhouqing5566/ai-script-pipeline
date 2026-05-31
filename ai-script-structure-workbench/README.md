@@ -34,7 +34,7 @@
 - 导出：完整项目 JSON、剧本分析 Markdown、分集细纲 Markdown、人物小传 Markdown、审计报告 Markdown、成稿 Markdown
 - Skill 可编辑资产系统：新增、编辑、复制、停用、启用、回滚、Demo 合并入口、版本记录、适用范围、规则、Prompt 补充、正反例、评估标准、风险提示、模型偏好
 - API 与模型配置中心：多 Provider、多模型、任务路由、功能区路由、Skill 模型偏好、项目级覆盖预留、备用模型、调用日志、安全说明
-- 长剧本分集分析：完整 5 集以上或长文本剧本会自动切换为“分集/切块分析 → 全剧聚合 → 证据校验”，不再依赖单次超大 `analyzeScript`
+- 长剧本分集分析：完整 5 集以上或长文本剧本会自动切换为“分集/切块分析 → 全剧聚合 → 证据校验”，第一集探针后用限流并发池分析剩余分集，不再依赖单次超大 `analyzeScript`
 
 ## 爆款模式学习与迁移
 
@@ -44,7 +44,7 @@
 
 `MechanismAnalysis` 解释爆款机制：观众需求、爽点如何制造、好奇心来自哪里、观众如何代入、情绪如何压低再兑现、每集为什么继续看，以及重复使用时的疲劳风险。
 
-`PatternCard` 是案例到 Skill 的中间层。它不是剧情复述，也不是固定五类预设；系统会从 `evidenceLedger`、`episodeBeatLedger` 和 `reusablePatterns` 中抽取候选，再归类为开局钩子、能力验证、冲突升级、关系入口和追看悬念等可迁移机制。每张卡必须包含来源证据、表层剧情、结构功能、人物功能、观众心理、抽象模板、变量槽、使用条件、反例、迁移 Prompt 和评分标准。
+`PatternCard` 是案例到 Skill 的中间层。它不是剧情复述，也不是固定五类预设；系统会从 `evidenceLedger`、`episodeBeatLedger` 和 `reusablePatterns` 中抽取候选，再归类为开局钩子、能力验证、冲突升级、关系入口和追看悬念等可迁移机制。每张卡必须包含来源证据、表层剧情、结构功能、人物功能、观众心理、抽象模板、变量槽、使用条件、反例、迁移 Prompt 和评分标准，并增加 `evidenceDerivedFields` 来记录 observedAction、pressureBeforeAction、relationshipChange、audiencePayoff、retentionQuestion、whyThisSceneWorks 等证据派生机制。
 
 `PatternCard` 和 `Skill` 的区别：PatternCard 记录单个可迁移桥段机制；SkillAsset 会组合多个 PatternCard，形成可执行的 Prompt 规则、正反例、评估标准、适用任务和风险提示。
 
@@ -60,7 +60,7 @@
 → 审计迁移结果是否抄表皮
 ```
 
-如果 PatternCard 缺少 `sourceEvidence`，或 `needsReview=true`，它不能直接进入已启用 Skill，只能生成“待复核”Skill 草稿。迁移审计会读取来源案例的 `nonTransferableSurface`，动态检查是否照搬人名、场景、道具、职业设定或原文桥段表皮，而不是只写死检查某几个词。
+如果 PatternCard 缺少 `sourceEvidence`，或 `needsReview=true`，它不能直接进入已启用 Skill，只能生成“待复核”Skill 草稿。迁移审计会读取来源案例的 `nonTransferableSurface`，动态检查是否照搬人名、场景、道具、职业设定或原文桥段表皮，并区分硬表皮与软表皮；同时检查新创意是否出现领域串味、每张 PatternCard 是否完成 slotMapping / adaptedBeat / adaptedConflict / adaptedAudiencePayoff / adaptedRetentionHook。
 
 ## 运行方式
 
@@ -128,6 +128,7 @@ npm run check
 - 保存 Provider、模型、路由、API Mode 或“一键切换核心任务”后，前端会等待 `/api/settings` 同步完成；看到“配置已同步到本地服务”后再测试，能避免服务端读取旧配置。
 - 系统会按任务类型限制过大的 `maxOutputTokens`，避免把 `200000` 这类输出上限直接发给 Provider 导致长任务超时；调用日志会记录对应警告。
 - 路由保存时也会提前按安全上限 clamp：`analyzeScript=12000`、`analyzeEpisodeChunk=6000`、`aggregateScriptAnalysis=12000`。完整剧本不会靠单次超大输出完成，而是自动进入分集分析流程。
+- 长剧本分集分析默认并发数为 3，最大 6；可在“系统设置 → 基础状态 → 长剧本分集并发数”调整。第一集 JSON 探针仍然串行，聚合仍然串行；遇到 429/rate_limit 时后续并发会自动降到 1。
 - 真实 API 调用失败时不会静默切回 Demo。
 - 只有路由中配置了可用备用真实模型时才会 fallback，并在调用日志中记录 `usedFallback`。
 - 如果某个任务实际选择了 DemoRuleEngine，系统会在 UI、调用日志和 `ModelCallResult.warnings` 中提示：当前为真实 API Mode，但该任务路由仍指向 Demo 模型。
@@ -355,10 +356,12 @@ Fallback 策略：补充人工说明
 - 不要把真实 API Key 写入 `seed-data.js`、README 示例或任何提交文件。
 - 前端输入框使用 password，不长期明文展示完整 API Key。
 - 本地保存仅用于本机运行，可能进入 `localStorage` 和 `data/settings/`。
+- `data/settings/model-settings.json` 会保存本机真实 API 配置，属于敏感文件。它已被 `.gitignore` 排除，不要同步、分享或提交。
 - 真实模型调用和 Provider 测试请求体不携带完整 Provider/API Key，只携带 `providerId/modelId`；保存设置时才会把 Key 写入本机运行时配置。
 - 启动时会自动从 `data/settings/model-settings.json` 恢复有用的 API/模型配置，换端口后也能带回服务端保存的配置。
 - “重置 Demo 数据”只重置项目 Demo 状态，会保留 API Provider、模型和路由配置。
 - `data/projects/current-snapshot.json` 和完整项目导出会脱敏 `apiKey`，真实 Key 只保留在本机 localStorage / `data/settings/`。
+- 服务端日志会通过 `deepRedactSecrets` 脱敏 `Authorization`、`Bearer`、`token`、`secret`、`x-api-key`、`OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`GEMINI_API_KEY` 等字段和行内密钥文本。
 - `.gitignore` 已排除 `.env`、`config.local.json`、`data/settings/*.json`、`data/api-config*.json`、`data/model-config*.json`。
 
 ## 目录结构

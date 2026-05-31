@@ -362,6 +362,7 @@ export function normalizeApiConfig(config = {}) {
   return {
     mode: merged.mode === "api" ? "api" : "demo",
     allowDemoInApiMode: Boolean(merged.allowDemoInApiMode),
+    longScriptConcurrency: Math.max(1, Math.min(Number(merged.longScriptConcurrency) || 3, 6)),
     globalDefaultModelId: merged.globalDefaultModelId || "model-demo-rule-engine",
     providers: (merged.providers || []).map(normalizeProvider),
     models: (merged.models || []).map(normalizeModel),

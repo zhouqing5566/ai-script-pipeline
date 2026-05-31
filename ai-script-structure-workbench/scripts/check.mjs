@@ -61,6 +61,7 @@ import {
 import { buildGeminiGenerateContentUrl, messagesToGeminiRequestBody, shouldUseGeminiNative } from "../src/provider-adapters/gemini.js";
 import { buildOpenAIChatRequestBody } from "../src/provider-adapters/openai-compatible.js";
 import { labelForKey } from "../src/schemas.js";
+import { clampConcurrency, runChunkPool } from "../src/concurrency.js";
 import { extractJsonCandidate, extractJsonCandidates, extractTaskJsonCandidate } from "../src/json-extractor.js";
 import { evaluateEpisodeChunkCompactShape, scoreEpisodeChunkCandidate } from "../src/episode-chunk-shape.js";
 import { classifyProviderError, diagnoseProviderProtocol, suggestProviderFix } from "../src/provider-diagnostics.js";
@@ -144,6 +145,8 @@ for (const card of patternCards) {
   assert.ok(card.antiPatterns.length >= 1);
   assert.ok(card.transferPrompt);
   assert.ok(card.scoringRubric.length >= 1);
+  assert.ok(card.evidenceDerivedFields?.observedAction);
+  assert.ok(card.evidenceDerivedFields?.whyThisSceneWorks);
 }
 assert.equal(validateTaskOutput("extractPatternCards", patternCards).ok, true);
 const dynamicPatternAnalysis = structuredClone(analysis);
@@ -185,6 +188,15 @@ assert.ok(patternTransfer.variableMapping.slots.antagonistSystem);
 assert.ok(patternTransfer.variableMapping.slots.suspenseSource);
 assert.ok(patternTransfer.firstFiveEpisodes.length >= 5);
 assert.ok(patternTransfer.patternCardIds.length >= 1);
+assert.ok(patternTransfer.adaptedPatternBeats.length >= 5);
+for (const beat of patternTransfer.adaptedPatternBeats) {
+  assert.ok(beat.slotMapping?.protagonist);
+  assert.ok(beat.adaptedBeat);
+  assert.ok(beat.adaptedConflict);
+  assert.ok(beat.adaptedCharacterFunction);
+  assert.ok(beat.adaptedAudiencePayoff);
+  assert.ok(beat.adaptedRetentionHook);
+}
 assert.equal(validateTaskOutput("applyPatternsToNewIdea", patternTransfer).ok, true);
 const ideaTestCases = [
   { label: "女法医", idea: "一个被停职的女法医回到刑侦队，在案发现场用尸检细节推翻队长判断。" },
@@ -204,7 +216,11 @@ for (const item of ideaTestCases) {
   assert.equal(transfer.variableMapping.slots.scene, variables.scene);
   assert.equal(transfer.variableMapping.slots.suspenseSource, variables.suspenseSource);
   assert.ok(transfer.firstFiveEpisodes.length >= 5);
+  assert.ok(transfer.adaptedPatternBeats.every((beat) => beat.adaptedBeat && beat.adaptedRetentionHook));
   if (item.label !== "AI 编剧") assert.equal(JSON.stringify(transfer).includes("短剧公司项目会"), false);
+  if (item.label === "女法医") assert.equal(/玄学|风水|直播/.test(JSON.stringify(transfer)), false);
+  if (item.label === "复仇千金") assert.equal(/尸检|案发现场/.test(JSON.stringify(transfer)), false);
+  if (item.label === "末世囤货") assert.equal(/董事会|股权/.test(JSON.stringify(transfer)), false);
 }
 
 const transferAudit = auditPatternTransferDemo({
@@ -214,6 +230,7 @@ const transferAudit = auditPatternTransferDemo({
 });
 assert.ok(transferAudit.copiedSurfaceRisks.some((item) => item.term === "火车"));
 assert.ok(transferAudit.suggestedRepairs.length >= 1);
+assert.ok(Array.isArray(transferAudit.patternMechanismCoverage));
 assert.equal(validateTaskOutput("auditPatternTransfer", transferAudit).ok, true);
 const dynamicTransferAudit = auditPatternTransferDemo({
   idea: "一个复仇千金在董事会上验明母亲遗物。",
@@ -222,6 +239,56 @@ const dynamicTransferAudit = auditPatternTransferDemo({
   transferResult: { ...patternTransfer, outlineSeed: "祖传玉佩在白塔寺发光，千金发现继妹阴谋。" }
 });
 assert.ok(dynamicTransferAudit.copiedSurfaceRisks.some((item) => item.term === "祖传玉佩" || item.term === "白塔寺"));
+const domainLeakAudit = auditPatternTransferDemo({
+  idea: "一个被停职的女法医回到刑侦队，在案发现场用尸检细节推翻队长判断。",
+  patternCards,
+  transferResult: { ...patternTransfer, firstFiveEpisodes: [{ episodeNo: 1, title: "直播风水", function: "玄学主播在直播间看风水。" }] }
+});
+assert.ok(domainLeakAudit.domainMismatchRisks.some((item) => item.term === "玄学" || item.term === "风水" || item.term === "直播"));
+
+assert.equal(clampConcurrency(20, 6), 6);
+assert.equal(clampConcurrency(0, 6), 1);
+let activeWorkers = 0;
+let maxActiveWorkers = 0;
+const poolResult = await runChunkPool(
+  Array.from({ length: 10 }, (_, index) => ({ chunkKey: `C${index + 1}`, index })),
+  async (item) => {
+    activeWorkers += 1;
+    maxActiveWorkers = Math.max(maxActiveWorkers, activeWorkers);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    activeWorkers -= 1;
+    return { ok: true, value: item.index };
+  },
+  { concurrency: 3, maxConcurrency: 6 }
+);
+assert.equal(poolResult.results.filter((item) => item.status === "fulfilled").length, 10);
+assert.ok(maxActiveWorkers <= 3);
+const stoppedPool = await runChunkPool(
+  Array.from({ length: 8 }, (_, index) => ({ chunkKey: `S${index + 1}`, index })),
+  async (item) => {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    if (item.index === 1) return { ok: false, errorType: "provider_protocol_mismatch", stopScheduling: true, stopReason: "provider_protocol_mismatch" };
+    return { ok: true };
+  },
+  { concurrency: 2, maxConcurrency: 6 }
+);
+assert.equal(stoppedPool.stopped, true);
+assert.ok(stoppedPool.results.some((item) => item.skipped));
+const rateLimitEvents = [];
+await runChunkPool(
+  [1, 2, 3, 4].map((index) => ({ chunkKey: `R${index}`, index })),
+  async (item, pool) => {
+    if (item.index === 1) pool.setConcurrency(1, "provider_rate_limit");
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    return { ok: true };
+  },
+  {
+    concurrency: 3,
+    maxConcurrency: 6,
+    onProgress: (state) => rateLimitEvents.push(state.concurrency)
+  }
+);
+assert.ok(rateLimitEvents.includes(1));
 
 const fragmentText = "毒手巫医\n\n第一集\n\n△火车上林清突然流血倒地。\n医生：已经没救了！\n孙大为：不是脑溢血，是被人害的。\n△孙大为拿出银针，金蚕飞出。";
 const fragmentCoverage = detectScriptCoverage(fragmentText, 50);
@@ -1579,6 +1646,19 @@ for (const file of files) {
 }
 
 const serverSource = await fs.readFile(new URL("../server.js", import.meta.url), "utf8");
+const redactionSource = await fs.readFile(new URL("../src/redaction.js", import.meta.url), "utf8");
+const patternCardsSource = await fs.readFile(new URL("../src/pattern-cards.js", import.meta.url), "utf8");
+const workflowSource = await fs.readFile(new URL("../../.github/workflows/ai-script-structure-workbench-check.yml", import.meta.url), "utf8");
+assert.ok(workflowSource.includes("npm run check"));
+assert.ok(workflowSource.includes("ai-script-structure-workbench"));
+assert.ok(redactionSource.includes("OPENAI_API_KEY"));
+assert.ok(redactionSource.includes("ANTHROPIC_API_KEY"));
+assert.ok(redactionSource.includes("DEEPSEEK_API_KEY"));
+assert.ok(redactionSource.includes("x-api-key"));
+assert.ok(patternCardsSource.includes("evidenceDerivedFields"));
+assert.ok(patternCardsSource.includes("adaptedPatternBeats"));
+assert.ok(patternCardsSource.includes("domainMismatchRisks"));
+assert.ok(patternCardsSource.includes("hardSurfaceTerms"));
 assert.ok(serverSource.includes('url.pathname === "/api/model-call"'));
 assert.ok(serverSource.includes("MAX_BODY_BYTES"));
 assert.ok(serverSource.includes("error.statusCode = 413"));
@@ -1692,6 +1772,15 @@ assert.ok(appSource.includes("Beat 账本"));
 assert.ok(appSource.includes("确认这是完整剧本"));
 assert.ok(appSource.includes("shouldUseLongScriptAnalysis"));
 assert.ok(appSource.includes("executeLongScriptAnalysis"));
+assert.ok(appSource.includes("runChunkPool"));
+assert.ok(appSource.includes("longScriptConcurrency"));
+assert.ok(appSource.includes("分集并发分析中"));
+assert.ok(appSource.includes("rateLimitDowngraded"));
+assert.ok(appSource.includes("检测到 429/rate_limit，后续分集并发已自动降到 1。"));
+assert.ok(appSource.includes("并发数："));
+assert.ok(appSource.includes("运行中："));
+assert.ok(appSource.includes("待分析："));
+assert.ok(appSource.includes("平均耗时："));
 assert.ok(appSource.includes("长剧本分析进度"));
 assert.ok(appSource.includes("用户声明集数"));
 assert.ok(appSource.includes("系统检测集数"));
