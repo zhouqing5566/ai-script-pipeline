@@ -28,9 +28,17 @@
 ↓
 保存案例
 ↓
+提炼 StoryBlueprint / MechanismAnalysis
+↓
+生成 PatternCard
+↓
+组合为 SkillAsset
+↓
 提炼可复用模式
 ↓
 输入新创意
+↓
+Pattern 迁移与迁移审计
 ↓
 生成方向、主题、大反差、结局方案
 ↓
@@ -45,7 +53,7 @@
 导出 Markdown / JSON
 ```
 
-## 六大中心
+## 七大中心
 
 1. 剧本分析中心
 2. 模式资产中心
@@ -53,6 +61,92 @@
 4. 创作决策中心
 5. 细纲生产中心
 6. 审计修复与反馈中心
+7. 案例学习 / 爆款模式中心
+
+## 爆款模式学习与迁移
+
+V1.3 增加“案例学习 / 爆款模式中心”，用于把单个成功案例从“剧情复述”提升为可迁移资产。
+
+### StoryBlueprint
+
+StoryBlueprint 是从案例中提取的可复用骨架，关注故事发动机、主角循环、冲突升级、情绪循环、关系入口、悬念发动和不可照搬表皮。它回答：
+
+```text
+这个案例的结构为什么能跑起来？
+哪些机制可以迁移？
+哪些人物、场景、道具、台词属于表皮，不能照搬？
+```
+
+### MechanismAnalysis
+
+MechanismAnalysis 解释案例为什么可能有效，而不是只给“爽点强、节奏快”这类空泛结论。它必须拆出观众需求、爽点机制、追看驱动力、情绪兑现链、疲劳风险和失效原因。
+
+### PatternCard
+
+PatternCard 是“案例 → Skill”的中间层。它从 analysis 的 evidenceLedger、episodeBeatLedger、reusablePatterns 中提取候选，再归类为开局钩子、主角能力验证、冲突升级、人物关系入口、悬念/追看等模式。
+
+每张 PatternCard 必须包含：
+
+```text
+sourceEvidence
+evidenceDerivedFields
+evidenceDerivedScore
+templateSource
+mechanismExplanation
+abstractTemplate
+variableSlots
+antiPatterns
+transferPrompt
+scoringRubric
+```
+
+其中 `templateSource` 用于区分：
+
+```text
+evidence_derived：主要来自原文证据
+mixed_with_preset：原文证据 + 通用模板混合
+preset_fallback：证据不足，只能作为待复核预设
+```
+
+`preset_fallback` 不允许直接沉淀为 Skill，必须 `needsReview=true`、`canPromoteToSkill=false`。
+
+### SkillAsset
+
+SkillAsset 是多个 PatternCard 组合后的写作资产。它不是模型微调数据，而是带有适用任务、Prompt 补充、正例、反例、评分标准、风险提示和状态的可编辑 Skill 资产。任一 PatternCard 需要复核时，对应 SkillAsset 也必须保持待复核，不能直接启用。
+
+### Pattern 迁移与迁移审计
+
+Pattern 迁移会把新创意抽取为：
+
+```text
+主角 / 场景 / 危机 / 权威 / 能力 / 奖励角色 / 反派系统 / 悬念源
+```
+
+再把 PatternCard 迁移成稳定分集字段：
+
+```text
+episodeNo
+title
+function
+usedPatternCardIds
+mechanismUsed
+characterMotivation
+audiencePayoff
+retentionHook
+risks
+```
+
+迁移审计必须检查：
+
+```text
+是否照搬原案例表皮
+是否发生领域串味
+是否缺少 mechanismUsed
+是否缺少 characterMotivation
+是否缺少 audiencePayoff
+是否缺少 retentionHook
+是否只是换皮抄剧情而没有继承机制
+```
 
 ## 关键设计原则
 

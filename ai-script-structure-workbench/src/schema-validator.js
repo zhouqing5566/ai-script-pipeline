@@ -292,10 +292,24 @@ function validateAnalyzeScriptContract(value) {
 function validatePatternCardsContract(cards) {
   if (!Array.isArray(cards)) return [];
   const issues = [];
+  const allowedTemplateSources = new Set(["evidence_derived", "mixed_with_preset", "preset_fallback"]);
   cards.forEach((card, index) => {
-    const hasEvidence = arrayHasItems(card.sourceEvidence);
+    const hasEvidence = hasPatternSourceEvidence(card.sourceEvidence);
+    const score = Number(card.evidenceDerivedScore);
     if (!hasEvidence && card.needsReview !== true) issues.push(`PatternCard[${index}] sourceEvidence 不足时必须 needsReview=true`);
     if (!hasEvidence && card.canPromoteToSkill === true) issues.push(`PatternCard[${index}] sourceEvidence 不足时不能 canPromoteToSkill=true`);
+    if (!Number.isFinite(score) || score < 0 || score > 1) issues.push(`PatternCard[${index}] evidenceDerivedScore 必须是 0-1 之间的数字`);
+    if (!allowedTemplateSources.has(card.templateSource)) issues.push(`PatternCard[${index}] templateSource 非法`);
+    if (!card.mechanismExplanation) issues.push(`PatternCard[${index}] mechanismExplanation 不能为空`);
+    if (card.templateSource === "preset_fallback") {
+      if (card.needsReview !== true) issues.push(`PatternCard[${index}] preset_fallback 必须 needsReview=true`);
+      if (card.canPromoteToSkill !== false) issues.push(`PatternCard[${index}] preset_fallback 不能 canPromoteToSkill=true`);
+      if (Number(card.confidence) > 0.45) issues.push(`PatternCard[${index}] preset_fallback confidence 必须 <= 0.45`);
+    }
+    if (Number.isFinite(score) && score < 0.45) {
+      if (card.needsReview !== true) issues.push(`PatternCard[${index}] evidenceDerivedScore < 0.45 时必须 needsReview=true`);
+      if (card.canPromoteToSkill !== false) issues.push(`PatternCard[${index}] evidenceDerivedScore < 0.45 时不能 canPromoteToSkill=true`);
+    }
     if (card.variableSlots && (typeof card.variableSlots !== "object" || Array.isArray(card.variableSlots))) {
       issues.push(`PatternCard[${index}] variableSlots 必须是对象`);
     }
@@ -334,4 +348,13 @@ function validateEpisodeChunkContract(value) {
 
 function arrayHasItems(value) {
   return Array.isArray(value) && value.length > 0;
+}
+
+function hasPatternSourceEvidence(value) {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  return value.some((item) => {
+    if (typeof item === "string") return item.trim().length > 0;
+    if (!item || typeof item !== "object") return false;
+    return Boolean(item.sourceText || item.beatId || item.evidenceId || item.id || item.summary);
+  });
 }

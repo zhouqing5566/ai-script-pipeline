@@ -152,6 +152,52 @@ for (const card of patternCards) {
   assert.ok(card.mechanismExplanation);
 }
 assert.equal(validateTaskOutput("extractPatternCards", patternCards).ok, true);
+const basePatternCard = structuredClone(patternCards[0]);
+const invalidScoreAndSourceCard = {
+  ...basePatternCard,
+  evidenceDerivedScore: 1.2,
+  templateSource: "bad",
+  needsReview: false,
+  canPromoteToSkill: true
+};
+const invalidPatternResult = validateTaskOutput("extractPatternCards", [invalidScoreAndSourceCard, ...structuredClone(patternCards.slice(1, 5))]);
+assert.equal(validateTaskOutput("extractPatternCards", [invalidScoreAndSourceCard]).ok, false);
+assert.equal(invalidPatternResult.ok, false);
+assert.ok(invalidPatternResult.issues.some((issue) => issue.includes("evidenceDerivedScore")));
+assert.ok(invalidPatternResult.issues.some((issue) => issue.includes("templateSource")));
+const invalidPresetFallbackCard = {
+  ...basePatternCard,
+  evidenceDerivedScore: 0.3,
+  templateSource: "preset_fallback",
+  needsReview: true,
+  canPromoteToSkill: true,
+  confidence: 0.5
+};
+const invalidPresetResult = validateTaskOutput("extractPatternCards", [invalidPresetFallbackCard, ...structuredClone(patternCards.slice(1, 5))]);
+assert.equal(invalidPresetResult.ok, false);
+assert.ok(invalidPresetResult.issues.some((issue) => issue.includes("preset_fallback")));
+const invalidLowScoreCard = {
+  ...basePatternCard,
+  evidenceDerivedScore: 0.2,
+  templateSource: "preset_fallback",
+  needsReview: false,
+  canPromoteToSkill: true,
+  confidence: 0.4
+};
+const invalidLowScoreResult = validateTaskOutput("extractPatternCards", [invalidLowScoreCard, ...structuredClone(patternCards.slice(1, 5))]);
+assert.equal(invalidLowScoreResult.ok, false);
+assert.ok(invalidLowScoreResult.issues.some((issue) => issue.includes("evidenceDerivedScore < 0.45")));
+const noEvidencePromotionCard = {
+  ...basePatternCard,
+  sourceEvidence: [],
+  evidenceDerivedScore: 0.7,
+  templateSource: "mixed_with_preset",
+  needsReview: false,
+  canPromoteToSkill: true
+};
+const noEvidencePromotionResult = validateTaskOutput("extractPatternCards", [noEvidencePromotionCard, ...structuredClone(patternCards.slice(1, 5))]);
+assert.equal(noEvidencePromotionResult.ok, false);
+assert.ok(noEvidencePromotionResult.issues.some((issue) => issue.includes("sourceEvidence 不足")));
 const dynamicPatternAnalysis = structuredClone(analysis);
 dynamicPatternAnalysis.reusablePatterns = [
   {
