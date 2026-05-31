@@ -35,7 +35,7 @@ import {
 } from "../src/model-config.js";
 import { clampMaxOutputTokens, selectModelRoute } from "../src/model-router.js";
 import { callModel, shouldRetryModelError, testModelRoute } from "../src/model-adapter.js";
-import { sanitizeStateForSnapshot } from "../src/redaction.js";
+import { deepRedactSecrets, sanitizeStateForSnapshot } from "../src/redaction.js";
 import { schemaValidationMessage, validateTaskOutput } from "../src/schema-validator.js";
 import { extractDocxTextFromArrayBuffer, parseScriptFile } from "../src/file-parser.js";
 import { hasUsefulRuntimeSettings, mergeRuntimeApiConfig, syncRuntimeSettings } from "../src/storage.js";
@@ -69,6 +69,7 @@ import {
   applyPatternsToNewIdeaDemo,
   auditPatternTransferDemo,
   buildSkillAssetsFromPatternsDemo,
+  extractIdeaVariables,
   extractPatternCardsDemo,
   extractStoryBlueprintDemo
 } from "../src/pattern-cards.js";
@@ -136,6 +137,8 @@ assert.equal(validateTaskOutput("analyzeViralMechanism", mechanismAnalysis).ok, 
 
 const patternCards = extractPatternCardsDemo({ analysis, blueprint: storyBlueprint, mechanism: mechanismAnalysis });
 assert.ok(patternCards.length >= 5);
+assert.ok(patternCards.some((card) => card.sourceSeedType === "reusablePatterns"));
+assert.ok(patternCards.some((card) => String(card.sourceSeedType || "").startsWith("episodeBeatLedger") || String(card.sourceSeedType || "").startsWith("evidenceLedger")));
 for (const card of patternCards) {
   assert.ok(card.variableSlots && typeof card.variableSlots === "object");
   assert.ok(card.antiPatterns.length >= 1);
@@ -143,6 +146,23 @@ for (const card of patternCards) {
   assert.ok(card.scoringRubric.length >= 1);
 }
 assert.equal(validateTaskOutput("extractPatternCards", patternCards).ok, true);
+const dynamicPatternAnalysis = structuredClone(analysis);
+dynamicPatternAnalysis.reusablePatterns = [
+  {
+    id: "pattern-jade-check",
+    title: "祖传玉佩当众验真",
+    patternType: "hook",
+    sourceBeatIds: [analysis.episodeBeatLedger[0].beatId],
+    sourceEvidenceIds: [],
+    variableSlots: { object: ["玉佩"], authority: ["鉴定师"], scene: ["拍卖会"] },
+    structureSteps: ["公开质疑", "道具验真", "权威反转"],
+    reusePrompt: "替换 object/authority/scene，生成一个当众验真的开头破局桥段。",
+    whyItWorks: "道具验真把身份质疑变成可视化证明。"
+  }
+];
+const dynamicPatternCards = extractPatternCardsDemo({ analysis: dynamicPatternAnalysis, blueprint: storyBlueprint, mechanism: mechanismAnalysis });
+assert.ok(dynamicPatternCards.some((card) => card.sourceSeedType === "reusablePatterns" && card.name.includes("祖传玉佩")));
+assert.ok(dynamicPatternCards.some((card) => String(card.sourceSeedType || "").startsWith("episodeBeatLedger") || String(card.sourceSeedType || "").startsWith("evidenceLedger")));
 const weakPatternCards = extractPatternCardsDemo({ analysis: { title: "无证据案例", evidenceLedger: {}, episodeBeatLedger: [] } });
 assert.ok(weakPatternCards.some((card) => card.needsReview === true));
 assert.ok(weakPatternCards.every((card) => card.canPromoteToSkill === false));
@@ -161,9 +181,31 @@ const transferIdea = "一个被封杀的天才 AI 编剧进入短剧公司，用
 const patternTransfer = applyPatternsToNewIdeaDemo({ idea: transferIdea, patternCards, skillAssets });
 assert.ok(patternTransfer.variableMapping);
 assert.ok(patternTransfer.newStoryEngine.includes("AI 编剧") || patternTransfer.newStoryEngine.includes("数据"));
+assert.ok(patternTransfer.variableMapping.slots.antagonistSystem);
+assert.ok(patternTransfer.variableMapping.slots.suspenseSource);
 assert.ok(patternTransfer.firstFiveEpisodes.length >= 5);
 assert.ok(patternTransfer.patternCardIds.length >= 1);
 assert.equal(validateTaskOutput("applyPatternsToNewIdea", patternTransfer).ok, true);
+const ideaTestCases = [
+  { label: "女法医", idea: "一个被停职的女法医回到刑侦队，在案发现场用尸检细节推翻队长判断。" },
+  { label: "玄学主播", idea: "一个落魄玄学主播在直播间连麦凶宅求助者，用风水线索反杀打假博主。" },
+  { label: "复仇千金", idea: "一个重生复仇千金在豪门订婚宴被继妹羞辱，靠前世记忆夺回家产。" },
+  { label: "商战操盘手", idea: "一个被踢出局的商战操盘手回到董事会，用股权结构推演拯救濒危公司。" },
+  { label: "末世囤货", idea: "一个提前知道灾变的末世囤货者在社区仓库对抗道德绑架和掠夺团伙。" },
+  { label: "AI 编剧", idea: transferIdea }
+];
+for (const item of ideaTestCases) {
+  const variables = extractIdeaVariables(item.idea);
+  for (const key of ["protagonist", "scene", "crisis", "authority", "ability", "rewardCharacter", "antagonistSystem", "suspenseSource"]) {
+    assert.ok(variables[key], `${item.label} missing ${key}`);
+  }
+  const transfer = applyPatternsToNewIdeaDemo({ idea: item.idea, patternCards, skillAssets });
+  assert.equal(transfer.variableMapping.slots.protagonist, variables.protagonist);
+  assert.equal(transfer.variableMapping.slots.scene, variables.scene);
+  assert.equal(transfer.variableMapping.slots.suspenseSource, variables.suspenseSource);
+  assert.ok(transfer.firstFiveEpisodes.length >= 5);
+  if (item.label !== "AI 编剧") assert.equal(JSON.stringify(transfer).includes("短剧公司项目会"), false);
+}
 
 const transferAudit = auditPatternTransferDemo({
   idea: transferIdea,
@@ -173,6 +215,13 @@ const transferAudit = auditPatternTransferDemo({
 assert.ok(transferAudit.copiedSurfaceRisks.some((item) => item.term === "火车"));
 assert.ok(transferAudit.suggestedRepairs.length >= 1);
 assert.equal(validateTaskOutput("auditPatternTransfer", transferAudit).ok, true);
+const dynamicTransferAudit = auditPatternTransferDemo({
+  idea: "一个复仇千金在董事会上验明母亲遗物。",
+  blueprint: { nonTransferableSurface: ["祖传玉佩/白塔寺"] },
+  patternCards,
+  transferResult: { ...patternTransfer, outlineSeed: "祖传玉佩在白塔寺发光，千金发现继妹阴谋。" }
+});
+assert.ok(dynamicTransferAudit.copiedSurfaceRisks.some((item) => item.term === "祖传玉佩" || item.term === "白塔寺"));
 
 const fragmentText = "毒手巫医\n\n第一集\n\n△火车上林清突然流血倒地。\n医生：已经没救了！\n孙大为：不是脑溢血，是被人害的。\n△孙大为拿出银针，金蚕飞出。";
 const fragmentCoverage = detectScriptCoverage(fragmentText, 50);
@@ -1460,6 +1509,25 @@ assert.ok(exportedProject.includes("[已脱敏]"));
 const snapshot = JSON.stringify(sanitizeStateForSnapshot(secretState));
 assert.ok(!snapshot.includes("sk-real-secret"));
 assert.ok(snapshot.includes("[已脱敏]"));
+const deeplyNestedSecretPayload = {
+  apiKey: "sk-nested-secret-123456",
+  headers: {
+    authorization: "Bearer abc.def.ghi",
+    cookie: "session=private"
+  },
+  nested: {
+    password: "plain-password",
+    url: "https://proxy.example/v1?key=AIzaSecretValueShouldHide"
+  },
+  text: "Authorization: Bearer xyz.123\nplain sk-inline-secret-123456"
+};
+const deeplyRedactedText = JSON.stringify(deepRedactSecrets(deeplyNestedSecretPayload));
+assert.ok(!deeplyRedactedText.includes("sk-nested-secret"));
+assert.ok(!deeplyRedactedText.includes("Bearer abc.def"));
+assert.ok(!deeplyRedactedText.includes("plain-password"));
+assert.ok(!deeplyRedactedText.includes("AIzaSecretValueShouldHide"));
+assert.ok(!deeplyRedactedText.includes("sk-inline-secret"));
+assert.ok(deeplyRedactedText.includes("[已脱敏]"));
 
 const localApiConfig = structuredClone(state.apiConfig);
 localApiConfig.providers[1].apiKey = "sk-local-browser";
@@ -1512,6 +1580,12 @@ for (const file of files) {
 
 const serverSource = await fs.readFile(new URL("../server.js", import.meta.url), "utf8");
 assert.ok(serverSource.includes('url.pathname === "/api/model-call"'));
+assert.ok(serverSource.includes("MAX_BODY_BYTES"));
+assert.ok(serverSource.includes("error.statusCode = 413"));
+assert.ok(serverSource.includes("parseError.statusCode = 400"));
+assert.ok(serverSource.includes("deepRedactSecrets({ ...body"));
+assert.ok(serverSource.includes("deepRedactSecrets(entry)"));
+assert.ok(serverSource.includes("deepRedactSecrets(raw)"));
 assert.ok(serverSource.includes("resolveProviderModel"));
 assert.ok(serverSource.includes("providerId"));
 assert.ok(!serverSource.includes("body.provider?.id"));

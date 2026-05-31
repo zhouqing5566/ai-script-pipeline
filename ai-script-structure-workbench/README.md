@@ -44,7 +44,7 @@
 
 `MechanismAnalysis` 解释爆款机制：观众需求、爽点如何制造、好奇心来自哪里、观众如何代入、情绪如何压低再兑现、每集为什么继续看，以及重复使用时的疲劳风险。
 
-`PatternCard` 是案例到 Skill 的中间层。它不是剧情复述，而是一个可迁移模式，必须包含来源证据、表层剧情、结构功能、人物功能、观众心理、抽象模板、变量槽、使用条件、反例、迁移 Prompt 和评分标准。
+`PatternCard` 是案例到 Skill 的中间层。它不是剧情复述，也不是固定五类预设；系统会从 `evidenceLedger`、`episodeBeatLedger` 和 `reusablePatterns` 中抽取候选，再归类为开局钩子、能力验证、冲突升级、关系入口和追看悬念等可迁移机制。每张卡必须包含来源证据、表层剧情、结构功能、人物功能、观众心理、抽象模板、变量槽、使用条件、反例、迁移 Prompt 和评分标准。
 
 `PatternCard` 和 `Skill` 的区别：PatternCard 记录单个可迁移桥段机制；SkillAsset 会组合多个 PatternCard，形成可执行的 Prompt 规则、正反例、评估标准、适用任务和风险提示。
 
@@ -60,7 +60,7 @@
 → 审计迁移结果是否抄表皮
 ```
 
-如果 PatternCard 缺少 `sourceEvidence`，或 `needsReview=true`，它不能直接进入已启用 Skill，只能生成“待复核”Skill 草稿。迁移审计会检查是否照搬了原案例的人名、场景、道具、火车/蛊毒/医生等表皮元素。
+如果 PatternCard 缺少 `sourceEvidence`，或 `needsReview=true`，它不能直接进入已启用 Skill，只能生成“待复核”Skill 草稿。迁移审计会读取来源案例的 `nonTransferableSurface`，动态检查是否照搬人名、场景、道具、职业设定或原文桥段表皮，而不是只写死检查某几个词。
 
 ## 运行方式
 

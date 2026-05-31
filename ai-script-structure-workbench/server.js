@@ -7,11 +7,13 @@ import { resolveRequestFormat } from "./src/request-format.js";
 import { classifyProviderError, diagnoseProviderProtocol, suggestProviderFix } from "./src/provider-diagnostics.js";
 import { callGemini } from "./src/provider-adapters/gemini.js";
 import { callOpenAICompatible } from "./src/provider-adapters/openai-compatible.js";
+import { deepRedactSecrets } from "./src/redaction.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = __dirname;
 const port = Number(process.env.PORT || 4178);
 const host = process.env.HOST || "127.0.0.1";
+const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 25 * 1024 * 1024);
 
 const contentTypes = {
   ".html": "text/html; charset=utf-8",
@@ -47,12 +49,27 @@ function sendJson(res, statusCode, body) {
   res.end(payload);
 }
 
-async function readBody(req) {
+async function readBody(req, { maxBytes = MAX_BODY_BYTES } = {}) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    totalBytes += chunk.length;
+    if (totalBytes > maxBytes) {
+      const error = new Error(`请求体超过限制：${maxBytes} bytes`);
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw) return {};
-  return JSON.parse(raw);
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    const parseError = new Error(`请求体不是合法 JSON：${error.message}`);
+    parseError.statusCode = 400;
+    throw parseError;
+  }
 }
 
 function safeExportName(name, fallback = "export") {
@@ -88,14 +105,14 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/snapshot" && req.method === "POST") {
     const body = await readBody(req);
     const filePath = path.join(rootDir, "data/projects/current-snapshot.json");
-    await fs.writeFile(filePath, JSON.stringify(redactSecrets(body), null, 2), "utf8");
+    await fs.writeFile(filePath, JSON.stringify(deepRedactSecrets(body), null, 2), "utf8");
     sendJson(res, 200, { ok: true, path: filePath });
     return true;
   }
 
   if (url.pathname === "/api/model-call-log" && req.method === "POST") {
-    const body = await readBody(req);
-    const line = JSON.stringify({ ...body, receivedAt: new Date().toISOString() });
+    const body = await readBody(req, { maxBytes: 4 * 1024 * 1024 });
+    const line = JSON.stringify(deepRedactSecrets({ ...body, receivedAt: new Date().toISOString() }));
     await fs.appendFile(path.join(rootDir, "data/logs/model-calls.jsonl"), `${line}\n`, "utf8");
     sendJson(res, 200, { ok: true });
     return true;
@@ -420,10 +437,11 @@ async function loadSettingsConfig() {
 }
 
 async function appendServerProxyLog(entry) {
+  const safeEntry = deepRedactSecrets(entry);
   const line = JSON.stringify({
-    ...entry,
-    outputText: entry.outputText ? String(entry.outputText).slice(0, 240) : undefined,
-    providerRawPreview: entry.providerRawPreview ? String(entry.providerRawPreview).slice(0, 500) : undefined,
+    ...safeEntry,
+    outputText: safeEntry.outputText ? String(safeEntry.outputText).slice(0, 240) : undefined,
+    providerRawPreview: safeEntry.providerRawPreview ? String(safeEntry.providerRawPreview).slice(0, 500) : undefined,
     receivedAt: new Date().toISOString()
   });
   await fs.appendFile(path.join(rootDir, "data/logs/model-server-proxy.jsonl"), `${line}\n`, "utf8");
@@ -432,9 +450,9 @@ async function appendServerProxyLog(entry) {
 function previewProviderRaw(raw) {
   if (!raw) return "";
   try {
-    return JSON.stringify(redactSecrets(raw)).slice(0, 500);
+    return JSON.stringify(deepRedactSecrets(raw)).slice(0, 500);
   } catch {
-    return String(raw).slice(0, 500);
+    return String(deepRedactSecrets(String(raw))).slice(0, 500);
   }
 }
 
@@ -494,17 +512,6 @@ function normalizeProviderError(error, provider = null, model = null) {
   return { message: raw, errorType, diagnostics, suggestions };
 }
 
-function redactSecrets(value) {
-  if (Array.isArray(value)) return value.map(redactSecrets);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => {
-      if (key.toLowerCase() === "apikey") return [key, item ? "[已脱敏]" : ""];
-      return [key, redactSecrets(item)];
-    })
-  );
-}
-
 async function serveStatic(req, res, url) {
   const decoded = decodeURIComponent(url.pathname);
   const relativePath = decoded === "/" ? "index.html" : decoded.replace(/^\/+/, "");
@@ -550,7 +557,8 @@ const server = http.createServer(async (req, res) => {
     }
     await serveStatic(req, res, url);
   } catch (error) {
-    sendJson(res, 500, { ok: false, error: error.message });
+    const statusCode = Number(error.statusCode || 500);
+    sendJson(res, statusCode, { ok: false, error: error.message });
   }
 });
 

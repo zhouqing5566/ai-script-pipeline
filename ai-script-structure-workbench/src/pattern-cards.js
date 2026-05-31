@@ -26,6 +26,26 @@ function firstText(...values) {
   return "";
 }
 
+function uniqueList(items = []) {
+  return [...new Set(items.map((item) => textOf(item)).filter(Boolean))];
+}
+
+function normalizeSurfaceTerms(items = []) {
+  const raw = Array.isArray(items) ? items : [items];
+  const generic = new Set(["具体人物姓名", "原剧本表皮", "原文台词", "特定场景调度", "等", "表皮", "元素", "不要照搬", "原案例"]);
+  return uniqueList(
+    raw
+      .flatMap((item) =>
+        textOf(item)
+          .replace(/^不要照搬[:：]/, "")
+          .replace(/等原剧本表皮/g, "")
+          .split(/[、，,；;\/\s]+|和|及/)
+      )
+      .map((item) => item.trim())
+      .filter((item) => item.length > 1 && !generic.has(item))
+  );
+}
+
 function collectSourceEvidence(analysis = {}, limit = 8) {
   const ledger = analysis.evidenceLedger || {};
   const beats = Array.isArray(analysis.episodeBeatLedger) ? analysis.episodeBeatLedger : [];
@@ -104,6 +124,238 @@ function primaryAudienceNeeds(analysis = {}) {
 
 function primaryGenres(analysis = {}) {
   return [...(analysis.basicInfo?.genre || []), ...(analysis.classificationTags?.genre || [])].filter(Boolean).slice(0, 4);
+}
+
+function evidenceMatchesId(item, id) {
+  if (!id) return false;
+  return item.evidenceId === id || item.beatId === id || item.id === id || item.relatedBeatIds?.includes?.(id);
+}
+
+function evidenceForPattern(analysis = {}, pattern = {}, fallback = []) {
+  const ids = [...(pattern.sourceEvidenceIds || []), ...(pattern.sourceBeatIds || []), ...(pattern.evidenceIds || []), ...(pattern.evidenceBeatIds || [])];
+  if (!ids.length) return fallback;
+  const all = collectSourceEvidence(analysis, 80);
+  const matched = all.filter((item) => ids.some((id) => evidenceMatchesId(item, id)));
+  return matched.length ? matched : fallback;
+}
+
+function categoryForPatternSeed(seed = {}, index = 0) {
+  const text = `${seed.title || ""} ${seed.summary || ""} ${seed.structureFunction || ""} ${seed.sourceText || ""}`;
+  if (/开头|钩子|危机|公共|高压|权威|误判|羞辱|退婚/.test(text)) return "hook";
+  if (/能力|金手指|验证|识破|看见|识别|系统|医术|玄术|数据/.test(text)) return "ability";
+  if (/升级|反派|敌人|压力|更大|背后|代价|阻碍/.test(text)) return "escalation";
+  if (/关系|被救|见证|入口|信任|资源|盟友|奖励/.test(text)) return "relationship";
+  if (/悬念|追看|结尾|真相|伏笔|反转|疑问|来源/.test(text)) return "retention";
+  return ["hook", "ability", "escalation", "relationship", "retention"][index % 5];
+}
+
+const patternCategoryPresets = {
+  hook: {
+    name: "开局钩子模式",
+    structuralFunction: "快速建立危机、误判、主角低位和观众追问。",
+    characterFunction: "把主角推到必须行动的位置，让能力或原则通过行动被看见。",
+    audiencePsychology: "危机压低和被质疑延迟兑现，放大尊严修复和专业崇拜。",
+    abstractTemplate: "高压场景 -> 权威/大众误判 -> 主角被质疑 -> 反常判断 -> 破局 -> 新悬念",
+    variableSlots: {
+      scene: ["公共场景", "专业现场", "家族宴会", "项目会", "直播间"],
+      crisis: ["突发危机", "专业难题", "身份羞辱", "舆论事故"],
+      authority: ["专家", "上位者", "资深同行", "规则制定者"],
+      ability: ["主角独特判断", "专业技能", "隐藏身份", "系统能力"]
+    },
+    applicableStages: ["开局", "前5集"],
+    usageConstraints: ["危机必须一眼可懂", "权威误判要有经验或利益逻辑", "主角破局必须可验证"],
+    antiPatterns: ["只让群众震惊但没有信息增量", "权威集体降智", "照搬原案例场景和道具"],
+    scoringRubric: ["钩子是否立即成立", "主角低位是否清楚", "破局是否可视化", "结尾是否打开下一问"]
+  },
+  ability: {
+    name: "主角能力验证模式",
+    structuralFunction: "把设定展示转化为冲突行动，让能力在压力下被验证。",
+    characterFunction: "暴露主角的专业能力、行动原则、隐藏代价或误判。",
+    audiencePsychology: "观众提前知道主角更接近真相，获得认知优越感和期待。",
+    abstractTemplate: "隐藏信息 -> 主角识别 -> 他人否定 -> 可视化证明 -> 关系位置变化",
+    variableSlots: {
+      hiddenInfo: ["隐藏病因", "数据趋势", "身份漏洞", "案发细节", "资源缺口"],
+      blocker: ["反派", "权威", "制度流程", "误解对象"],
+      proofAction: ["救人", "复盘", "上线验证", "当场拆穿", "资源调度"]
+    },
+    applicableStages: ["开局", "能力升级", "中段反转前"],
+    usageConstraints: ["隐藏信息要能回看命中", "证明动作必须有结果反馈", "能力要有边界"],
+    antiPatterns: ["只靠主角口头解释", "没有代价的万能外挂", "每次证明方式完全重复"],
+    scoringRubric: ["隐藏信息是否有依据", "阻拦是否合理", "证明是否清楚", "是否带出人物原则"]
+  },
+  escalation: {
+    name: "冲突升级模式",
+    structuralFunction: "把单点爽点串成连续主线，让每次胜利引出更高层压力。",
+    characterFunction: "迫使主角目标升级，也暴露反派系统和主角承压方式。",
+    audiencePsychology: "爽点刚兑现就出现更大威胁，形成继续追看的紧张期待。",
+    abstractTemplate: "小危机解决 -> 反派利益受损 -> 更高层介入 -> 主角目标被迫升级",
+    variableSlots: {
+      minorVillain: ["同事", "投资人", "家族成员", "打假者", "竞争对手"],
+      higherSystem: ["资本方", "平台规则", "组织黑手", "家族权力", "末世秩序"],
+      newPressure: ["封杀", "追杀", "审查", "舆论围攻", "资源断供"]
+    },
+    applicableStages: ["第2-10集", "中段升级"],
+    usageConstraints: ["升级必须来自利益链", "更高层压力要改变主角下一步目标"],
+    antiPatterns: ["反派轮流送人头", "只加战力不加信息", "胜利没有后果"],
+    scoringRubric: ["反派动机是否清楚", "升级是否有因果", "主角目标是否变化"]
+  },
+  relationship: {
+    name: "人物关系入口模式",
+    structuralFunction: "把一次破局转成资源入口、误解变化或下一阶段任务。",
+    characterFunction: "让主角被看见，也让配角承担奖励、压力或新矛盾功能。",
+    audiencePsychology: "用被认可、被需要、被偏爱的情绪补偿承接爽点。",
+    abstractTemplate: "关键人物受困 -> 主角破局 -> 态度变化 -> 提供资源/信息/新任务",
+    variableSlots: {
+      entryCharacter: ["被救者", "见证者", "负责人", "客户", "家族关键人"],
+      resource: ["证据", "资金", "人脉", "权限", "庇护"],
+      relationshipShift: ["怀疑转信任", "羞辱转依赖", "误解转合作"]
+    },
+    applicableStages: ["开局", "前5集", "阶段转场"],
+    usageConstraints: ["关系变化要来自行动", "资源入口必须推进下一段冲突"],
+    antiPatterns: ["被救者无条件倒贴", "资源奖励与主线无关", "关系不带来新问题"],
+    scoringRubric: ["关系转变是否可信", "资源是否推进主线", "是否引出新冲突"]
+  },
+  retention: {
+    name: "追看悬念模式",
+    structuralFunction: "把满足感转化为下一集问题，避免爽点完成后情绪断档。",
+    characterFunction: "让主角每次解决问题后都必须面对更深层动机或代价。",
+    audiencePsychology: "观众既获得即时满足，又担心下一层风险。",
+    abstractTemplate: "爽点兑现 -> 观众以为结束 -> 新信息出现 -> 下一集必须解释/应对",
+    variableSlots: {
+      payoff: ["救人成功", "数据反杀", "身份小揭露", "公开打脸"],
+      biggerTruth: ["幕后黑手", "能力代价", "身份关系", "规则黑箱"],
+      nextQuestion: ["谁在操控？", "能力从何而来？", "主角会付出什么代价？"]
+    },
+    applicableStages: ["每集结尾", "阶段结尾", "中段揭示"],
+    usageConstraints: ["新悬念必须和本集爽点相关", "悬念要承诺可回收"],
+    antiPatterns: ["结尾只喊狠话", "悬念与本集事件无关", "连续拖延不回收"],
+    scoringRubric: ["爽点和悬念是否因果相连", "下一问是否具体", "是否承诺可回收"]
+  }
+};
+
+function collectPatternSeeds(analysis = {}, blueprint = {}, sourceCaseId = "") {
+  const sourceEvidence = collectSourceEvidence(analysis, 80);
+  const seeds = [];
+  (analysis.reusablePatterns || []).forEach((pattern, index) => {
+    const evidence = evidenceForPattern(analysis, pattern, sourceEvidence.slice(index, index + 3));
+    seeds.push({
+      source: "reusablePatterns",
+      title: pattern.title || pattern.name || `可复用模式 ${index + 1}`,
+      summary: firstText(pattern.description, pattern.whyItWorks, pattern.emotionalMechanism),
+      structureFunction: firstText(pattern.plotFunction, pattern.structureTemplate, pattern.patternType),
+      category: categoryForPatternSeed(pattern, index),
+      sourceEvidence: evidence,
+      sourceCaseId,
+      sourceEpisodes: pattern.exampleEpisodes || sourceEpisodes(evidence),
+      variableSlots: pattern.variableSlots,
+      antiPatterns: pattern.antiPatterns,
+      transferPrompt: pattern.reusePrompt,
+      scoringRubric: pattern.scoringRubric
+    });
+  });
+  (analysis.episodeBeatLedger || []).forEach((beat, index) => {
+    const evidence = [normalizeEvidenceRef({ ...beat, id: beat.evidenceId, beatId: beat.beatId }, index)];
+    seeds.push({
+      source: "episodeBeatLedger",
+      title: firstText(beat.structureFunction, beat.reusableValue, beat.beatSummary, `Beat 模式 ${index + 1}`),
+      summary: firstText(beat.reusableValue, beat.beatSummary, beat.sourceText),
+      structureFunction: firstText(beat.structureFunction, beat.conflict, "剧情 beat 功能"),
+      category: categoryForPatternSeed(beat, index),
+      sourceEvidence: evidence,
+      sourceCaseId,
+      sourceEpisodes: sourceEpisodes(evidence)
+    });
+  });
+  ["hookEvidence", "conflictBeats", "goldfingerEvidence", "suspenseEvidence", "characterMentions", "endingEvidence"].forEach((group) => {
+    (analysis.evidenceLedger?.[group] || []).forEach((item, index) => {
+      const evidence = [normalizeEvidenceRef(item, index)];
+      seeds.push({
+        source: `evidenceLedger.${group}`,
+        title: firstText(item.summary, item.sourceText, `${group} 模式 ${index + 1}`),
+        summary: firstText(item.summary, item.sourceText),
+        structureFunction: item.evidenceType || group,
+        category: categoryForPatternSeed({ ...item, structureFunction: group }, index),
+        sourceEvidence: evidence,
+        sourceCaseId,
+        sourceEpisodes: sourceEpisodes(evidence)
+      });
+    });
+  });
+  (blueprint.reusableSkeleton || []).forEach((step, index) => {
+    seeds.push({
+      source: "storyBlueprint.reusableSkeleton",
+      title: step,
+      summary: step,
+      structureFunction: "可复用骨架步骤",
+      category: ["hook", "ability", "escalation", "relationship", "retention"][index % 5],
+      sourceEvidence: sourceEvidence.slice(index, index + 2),
+      sourceCaseId,
+      sourceEpisodes: sourceEpisodes(sourceEvidence.slice(index, index + 2))
+    });
+  });
+  return dedupePatternSeeds(seeds);
+}
+
+function dedupePatternSeeds(seeds = []) {
+  const seen = new Set();
+  return seeds.filter((seed) => {
+    const key = `${seed.category}:${seed.title}`.slice(0, 120);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function ensureAtLeastFiveCategorySeeds(seeds = [], analysis = {}, blueprint = {}, sourceCaseId = "") {
+  const next = [...seeds];
+  const sourceEvidence = collectSourceEvidence(analysis, 12);
+  for (const category of ["hook", "ability", "escalation", "relationship", "retention"]) {
+    if (next.some((seed) => seed.category === category)) continue;
+    const preset = patternCategoryPresets[category];
+    next.push({
+      source: "categoryFallbackFromAnalysis",
+      title: preset.name,
+      summary: preset.abstractTemplate,
+      structureFunction: preset.structuralFunction,
+      category,
+      sourceEvidence: sourceEvidence.slice(0, 2),
+      sourceCaseId,
+      sourceEpisodes: sourceEpisodes(sourceEvidence.slice(0, 2))
+    });
+  }
+  return next;
+}
+
+function patternCardFromSeed(seed, context = {}, index = 0) {
+  const preset = patternCategoryPresets[seed.category] || patternCategoryPresets.hook;
+  const evidence = seed.sourceEvidence || [];
+  const hasEvidence = hasUsableEvidence(evidence);
+  return {
+    id: stableId("pattern", `${seed.sourceCaseId}-${seed.category}-${seed.title}-${index}`),
+    name: seed.title === preset.name ? preset.name : `${preset.name}｜${seed.title}`.slice(0, 60),
+    sourceCaseId: seed.sourceCaseId,
+    sourceEpisodes: seed.sourceEpisodes?.length ? seed.sourceEpisodes : sourceEpisodes(evidence),
+    sourceEvidence: evidence,
+    sourceSeedType: seed.source,
+    patternCategory: seed.category,
+    surfacePlot: firstText(seed.summary, evidence[0]?.summary, evidence[0]?.sourceText, "原案例桥段待复核"),
+    structuralFunction: firstText(seed.structureFunction, preset.structuralFunction),
+    characterFunction: preset.characterFunction,
+    audiencePsychology: preset.audiencePsychology,
+    abstractTemplate: firstText(seed.abstractTemplate, preset.abstractTemplate),
+    variableSlots: seed.variableSlots && typeof seed.variableSlots === "object" ? seed.variableSlots : preset.variableSlots,
+    applicableGenres: context.genres.length ? context.genres : ["短剧", "漫剧", "网文改编"],
+    applicableAudienceNeeds: context.needs.length ? context.needs : ["尊严修复", "公平清算", "认知优越感"],
+    applicableStages: preset.applicableStages,
+    usageConstraints: preset.usageConstraints,
+    antiPatterns: uniqueList([...(seed.antiPatterns || []), ...(preset.antiPatterns || []), ...(context.nonTransferableSurface || []).map((item) => `不要照搬：${item}`)]),
+    transferPrompt: firstText(seed.transferPrompt, `${preset.name}：迁移 ${preset.abstractTemplate}，只替换变量槽，不复制原案例表皮。`),
+    scoringRubric: seed.scoringRubric?.length ? seed.scoringRubric : preset.scoringRubric,
+    nonTransferableSurface: context.nonTransferableSurface || [],
+    confidence: hasEvidence ? 0.72 + Math.min(0.14, evidence.length * 0.03) : 0.42,
+    needsReview: !hasEvidence,
+    canPromoteToSkill: hasEvidence
+  };
 }
 
 export function extractStoryBlueprintDemo(input = {}) {
@@ -269,149 +521,26 @@ export function extractPatternCardsDemo(input = {}) {
   const sourceCaseId = blueprint.sourceCaseId || analysisCaseId(analysis, input);
   const genres = primaryGenres(analysis);
   const needs = mechanism.audienceNeeds || primaryAudienceNeeds(analysis);
-  const sourceEvidence = collectSourceEvidence(analysis, 12);
-  const evidenceA = sourceEvidence.slice(0, 3);
-  const evidenceB = sourceEvidence.slice(1, 4);
-  const evidenceC = sourceEvidence.slice(2, 5);
-  const cards = [
-    {
-      id: stableId("pattern", `${sourceCaseId}-public-crisis-hook`),
-      name: "公共危机开局 + 权威误判 + 隐藏强者破局",
-      sourceCaseId,
-      sourceEpisodes: sourceEpisodes(evidenceA),
-      sourceEvidence: evidenceA,
-      surfacePlot: "原剧本用公共场景突发危机，让权威角色先给出错误判断，再由被低估主角发现真正原因并破局。",
-      structuralFunction: "快速建立钩子、冲突、主角能力和观众追问。",
-      characterFunction: "把主角从低位观察者推到唯一解的位置，完成首次能力验证。",
-      audiencePsychology: "满足被轻视后证明自己的尊严修复，也制造对隐藏强者的专业崇拜。",
-      abstractTemplate: "公共场景危机 -> 权威误判 -> 主角被质疑 -> 主角提出反常判断 -> 能力破局 -> 新悬念打开",
-      variableSlots: {
-        scene: ["火车", "医院", "项目会", "婚宴", "直播间"],
-        crisis: ["中毒", "怪病", "数据事故", "舆论翻车", "命案"],
-        authority: ["医生", "专家", "老编剧", "长老", "平台审核"],
-        ability: ["医术", "数据预测", "系统识别", "心理画像", "玄术"]
-      },
-      applicableGenres: genres.length ? genres : ["都市逆袭", "高手下山", "职场爽剧"],
-      applicableStages: ["开局", "前5集"],
-      usageConstraints: ["必须有明确危机和可验证结果", "权威误判不能显得弱智", "主角能力要有规则或代价"],
-      antiPatterns: ["只让群众震惊但没有信息增量", "主角无代价全能秒杀", "照搬原剧本火车/蛊毒表皮"],
-      transferPrompt: "把公共危机、权威误判、隐藏强者破局三段机制迁移到新创意，替换 scene/crisis/authority/ability，不要复用原案例表皮。",
-      scoringRubric: ["危机是否一眼可懂", "权威误判是否合理", "主角破局是否可验证", "结尾是否打开新问题"],
-      confidence: hasUsableEvidence(evidenceA) ? 0.84 : 0.45,
-      needsReview: !hasUsableEvidence(evidenceA),
-      canPromoteToSkill: hasUsableEvidence(evidenceA)
-    },
-    {
-      id: stableId("pattern", `${sourceCaseId}-ability-verification`),
-      name: "主角能力验证：被质疑后用规则外信息破局",
-      sourceCaseId,
-      sourceEpisodes: sourceEpisodes(evidenceB),
-      sourceEvidence: evidenceB,
-      surfacePlot: "主角说出他人不知道的真相或判断，先被阻拦，随后用能力证实。",
-      structuralFunction: "把设定展示变成冲突行动，避免干讲能力说明。",
-      characterFunction: "暴露主角的专业能力、行动原则和隐藏背景。",
-      audiencePsychology: "观众获得认知优越感，提前知道主角对而别人错。",
-      abstractTemplate: "主角识别隐藏信息 -> 他人否定 -> 主角给出可验证动作 -> 结果证实主角判断",
-      variableSlots: {
-        hiddenInfo: ["病因", "数据趋势", "身份漏洞", "机关规则"],
-        blocker: ["反派", "权威", "误解对象", "制度流程"],
-        proofAction: ["救人", "反推数据", "当场复盘", "拆穿骗局"]
-      },
-      applicableGenres: genres.length ? genres : ["职场", "都市", "玄幻"],
-      applicableStages: ["开局", "能力升级", "中段反转前"],
-      usageConstraints: ["证明动作必须可视化", "隐藏信息要提前留痕", "不能每次都同一种证明方式"],
-      antiPatterns: ["只靠主角口头解释", "所有配角集体降智", "能力没有边界"],
-      transferPrompt: "为新创意设计一场能力验证：让主角看见隐藏信息，被阻拦，再用可视化动作证明判断。",
-      scoringRubric: ["隐藏信息是否有伏笔", "阻拦是否有合理利益", "证明结果是否清楚", "是否带出人物原则"],
-      confidence: hasUsableEvidence(evidenceB) ? 0.8 : 0.45,
-      needsReview: !hasUsableEvidence(evidenceB),
-      canPromoteToSkill: hasUsableEvidence(evidenceB)
-    },
-    {
-      id: stableId("pattern", `${sourceCaseId}-escalation-ladder`),
-      name: "冲突升级：小反派失败后牵出更高压迫系统",
-      sourceCaseId,
-      sourceEpisodes: sourceEpisodes(evidenceC),
-      sourceEvidence: evidenceC,
-      surfacePlot: "单集反派失败后不结束，而是转向背后势力，形成下一集压力。",
-      structuralFunction: "把单点爽点串成连续主线，防止每集变成独立打脸。",
-      characterFunction: "让主角每次胜利都承担更大后果，迫使目标升级。",
-      audiencePsychology: "爽感刚兑现就出现更大威胁，形成继续观看的紧张期待。",
-      abstractTemplate: "小危机被解决 -> 反派损失利益 -> 反派求助更高层 -> 更高层误判主角 -> 下一轮冲突升级",
-      variableSlots: {
-        minorVillain: ["投资人", "同事", "家族成员", "门派弟子"],
-        higherSystem: ["资本方", "平台规则", "黑产组织", "宗门长老"],
-        newPressure: ["封杀", "追杀", "审核", "舆论围攻"]
-      },
-      applicableGenres: genres.length ? genres : ["短剧强爽", "男频升级", "都市逆袭"],
-      applicableStages: ["第2-10集", "中段升级"],
-      usageConstraints: ["升级必须来自反派利益受损", "更高层压力要改变主角下一步目标"],
-      antiPatterns: ["反派轮流送人头", "升级只加战力不加信息", "胜利没有后果"],
-      transferPrompt: "为新创意设计一条反派升级链：每次主角破局都让小反派触发更高层压力。",
-      scoringRubric: ["小反派动机是否清楚", "高层介入是否有利益逻辑", "主角目标是否被迫变化"],
-      confidence: hasUsableEvidence(evidenceC) ? 0.76 : 0.45,
-      needsReview: !hasUsableEvidence(evidenceC),
-      canPromoteToSkill: hasUsableEvidence(evidenceC)
-    },
-    {
-      id: stableId("pattern", `${sourceCaseId}-relationship-entry`),
-      name: "人物关系入口：被救者/见证者转为资源入口",
-      sourceCaseId,
-      sourceEpisodes: sourceEpisodes(sourceEvidence.slice(0, 4)),
-      sourceEvidence: sourceEvidence.slice(0, 4),
-      surfacePlot: "主角救下或证明某个关键人物，让对方从陌生见证者转为信任入口。",
-      structuralFunction: "用关系变化承接爽点，把单集破局转成后续资源和主线入口。",
-      characterFunction: "让主角的行动原则被看见，也让配角承担奖励、误解或新压力功能。",
-      audiencePsychology: "观众获得被认可和被需要的情绪补偿。",
-      abstractTemplate: "关键人物处于危机 -> 主角破局 -> 对方改变态度 -> 提供资源/信息/新任务",
-      variableSlots: {
-        entryCharacter: ["被救老师", "平台负责人", "老编剧", "大小姐", "调查员"],
-        resource: ["行业入口", "资金", "证据", "保护", "关键人脉"],
-        relationshipShift: ["怀疑转信任", "羞辱转依赖", "误解转合作"]
-      },
-      applicableGenres: genres.length ? genres : ["都市", "职场", "甜宠", "权谋"],
-      applicableStages: ["开局", "前5集", "阶段转场"],
-      usageConstraints: ["关系变化要来自行动而不是硬贴", "资源入口要服务下一段冲突"],
-      antiPatterns: ["被救者无条件倒贴", "资源奖励与主线无关", "关系不带来新问题"],
-      transferPrompt: "把主角破局后的关系变化设计为下一阶段入口：被救者/见证者必须提供资源，同时引出新压力。",
-      scoringRubric: ["关系转变是否可信", "资源是否推进主线", "是否引出新的冲突角色"],
-      confidence: hasUsableEvidence(sourceEvidence.slice(0, 4)) ? 0.78 : 0.45,
-      needsReview: !hasUsableEvidence(sourceEvidence.slice(0, 4)),
-      canPromoteToSkill: hasUsableEvidence(sourceEvidence.slice(0, 4))
-    },
-    {
-      id: stableId("pattern", `${sourceCaseId}-retention-hook`),
-      name: "追看悬念：爽点后立刻抛出更大真相",
-      sourceCaseId,
-      sourceEpisodes: sourceEpisodes(sourceEvidence.slice(0, 5)),
-      sourceEvidence: sourceEvidence.slice(0, 5),
-      surfacePlot: "本集爽点兑现后，立刻出现能力来源、背后敌人或隐藏身份的新疑问。",
-      structuralFunction: "避免爽点完成后情绪断档，把满足感转化为下一集问题。",
-      characterFunction: "让主角每次解决问题后都必须面对更深层动机或代价。",
-      audiencePsychology: "观众既获得即时满足，又担心下一层风险，形成继续观看动机。",
-      abstractTemplate: "爽点兑现 -> 观众以为结束 -> 新信息出现 -> 下一集必须解释/应对",
-      variableSlots: {
-        payoff: ["救人成功", "数据反杀", "身份小揭露", "公开打脸"],
-        biggerTruth: ["幕后黑手", "能力代价", "身份关系", "平台规则"],
-        nextQuestion: ["谁在操控？", "能力从何而来？", "主角会付出什么代价？"]
-      },
-      applicableGenres: genres.length ? genres : ["短剧", "漫剧", "网文改编"],
-      applicableStages: ["每集结尾", "阶段结尾", "中段揭示"],
-      usageConstraints: ["新悬念必须和本集爽点相关", "不能只靠陌生人突然登场制造悬念"],
-      antiPatterns: ["结尾只喊狠话", "悬念与本集事件无关", "连续拖延不回收"],
-      transferPrompt: "为新创意的每次爽点后设计一个递进问题，让观众想知道更大真相而不是只等待下一次打脸。",
-      scoringRubric: ["爽点和新悬念是否因果相连", "下一集问题是否具体", "是否承诺可回收信息"],
-      confidence: hasUsableEvidence(sourceEvidence.slice(0, 5)) ? 0.78 : 0.45,
-      needsReview: !hasUsableEvidence(sourceEvidence.slice(0, 5)),
-      canPromoteToSkill: hasUsableEvidence(sourceEvidence.slice(0, 5))
-    }
-  ];
-  return cards.map((card) => ({
-    ...card,
-    applicableAudienceNeeds: card.applicableAudienceNeeds || needs,
-    sourceEvidence: card.sourceEvidence || [],
-    canPromoteToSkill: Boolean(card.canPromoteToSkill && !card.needsReview)
-  }));
+  const nonTransferableSurface = normalizeSurfaceTerms(blueprint.nonTransferableSurface || []);
+  const seeds = ensureAtLeastFiveCategorySeeds(collectPatternSeeds(analysis, blueprint, sourceCaseId), analysis, blueprint, sourceCaseId);
+  const picked = [];
+  for (const category of ["hook", "ability", "escalation", "relationship", "retention"]) {
+    const seed = seeds.find((item) => item.category === category && !picked.includes(item)) || seeds.find((item) => !picked.includes(item));
+    if (seed) picked.push(seed);
+  }
+  for (const seed of seeds) {
+    if (picked.length >= Math.max(5, Math.min(8, seeds.length))) break;
+    if (!picked.includes(seed)) picked.push(seed);
+  }
+  return picked.map((seed, index) => {
+    const card = patternCardFromSeed(seed, { genres, needs, nonTransferableSurface }, index);
+    return {
+      ...card,
+      applicableAudienceNeeds: card.applicableAudienceNeeds || needs,
+      sourceEvidence: card.sourceEvidence || [],
+      canPromoteToSkill: Boolean(card.canPromoteToSkill && !card.needsReview)
+    };
+  });
 }
 
 export const extractPatternCards = extractPatternCardsDemo;
@@ -486,109 +615,237 @@ export function buildSkillAssetsFromPatternsDemo(input = {}) {
 
 export const buildSkillAssetsFromPatterns = buildSkillAssetsFromPatternsDemo;
 
+const ideaProfiles = [
+  {
+    name: "女法医",
+    keywords: ["女法医", "法医", "尸检", "刑侦"],
+    protagonist: "被质疑的女法医",
+    scene: "刑侦会议/案发现场",
+    crisis: "疑难命案和尸检结论被权威否定",
+    authority: "刑警队长/资深法医",
+    ability: "尸检细节重建和微表情推理",
+    rewardCharacter: "年轻刑警/死者家属",
+    antagonistSystem: "连环凶手与警队内鬼",
+    suspenseSource: "尸体留下的反常痕迹"
+  },
+  {
+    name: "玄学主播",
+    keywords: ["玄学主播", "直播", "风水", "算命", "凶宅"],
+    protagonist: "落魄玄学主播",
+    scene: "直播间/凶宅连麦现场",
+    crisis: "连麦求助者遭遇无法解释的怪事",
+    authority: "打假博主/平台审核",
+    ability: "看相、风水和因果线索识别",
+    rewardCharacter: "求助者/榜一老板",
+    antagonistSystem: "打假团队与邪术组织",
+    suspenseSource: "弹幕里提前出现的死亡预告"
+  },
+  {
+    name: "复仇千金",
+    keywords: ["复仇千金", "千金", "继妹", "豪门", "订婚宴"],
+    protagonist: "重生复仇千金",
+    scene: "豪门宴会/董事会",
+    crisis: "身份和家产被夺后的公开羞辱",
+    authority: "家族长辈/未婚夫",
+    ability: "前世记忆和人心识别",
+    rewardCharacter: "被她救下的盟友/隐藏投资人",
+    antagonistSystem: "继妹、未婚夫和家族利益网",
+    suspenseSource: "母亲死亡真相"
+  },
+  {
+    name: "商战操盘手",
+    keywords: ["商战", "操盘手", "资本", "并购", "股权"],
+    protagonist: "被踢出局的商战操盘手",
+    scene: "并购谈判桌/董事会",
+    crisis: "公司即将被恶意收购",
+    authority: "董事长/投行专家",
+    ability: "资本结构推演和资金链破局",
+    rewardCharacter: "濒危公司的创始人",
+    antagonistSystem: "资本联盟与内鬼董事",
+    suspenseSource: "隐藏股权协议"
+  },
+  {
+    name: "末世囤货",
+    keywords: ["末世", "囤货", "重生", "灾变", "物资"],
+    protagonist: "提前知道灾变的囤货者",
+    scene: "灾变前社区/仓储中心",
+    crisis: "物资短缺和邻里道德绑架",
+    authority: "物业/救援队/社区话事人",
+    ability: "灾变预判和资源调度",
+    rewardCharacter: "被救下的医生/工程师",
+    antagonistSystem: "掠夺团伙和失序社区",
+    suspenseSource: "灾变真正来源"
+  },
+  {
+    name: "AI 编剧",
+    keywords: ["AI 编剧", "短剧公司", "数据预测", "老编剧", "爆款"],
+    protagonist: "被封杀的天才 AI 编剧",
+    scene: "短剧公司项目会",
+    crisis: "项目被封杀后即将失去投资",
+    authority: "老编剧和主编",
+    ability: "数据预测爆款与结构诊断",
+    rewardCharacter: "濒临下线项目的负责人",
+    antagonistSystem: "平台算法黑箱与资本封锁",
+    suspenseSource: "曾经命中过的行业禁区"
+  }
+];
+
+function guessProtagonist(idea = "") {
+  const match = textOf(idea).match(/(?:一个|一位|某个)([^，。,.；;]{2,18}?)(?:进入|回到|来到|在|被|用|靠|发现|遭遇|必须|为了)/);
+  return match?.[1]?.trim() || "被低估的主角";
+}
+
+function inferFallbackVariables(idea = "") {
+  const text = textOf(idea);
+  const protagonist = guessProtagonist(text);
+  return {
+    protagonist,
+    scene: /公司|职场|项目|平台/.test(text) ? "项目会/业务现场" : /直播|主播/.test(text) ? "直播间" : /豪门|宴会|家族/.test(text) ? "宴会/家族会议" : "公共高压场景",
+    crisis: /封杀|失败|下线/.test(text) ? "项目失败和公开质疑" : /命案|尸|案/.test(text) ? "无法解释的案件危机" : /末世|灾/.test(text) ? "生存秩序崩塌" : "突发危机和公开误判",
+    authority: /公司|项目|平台/.test(text) ? "行业权威/平台负责人" : /案|警|法医/.test(text) ? "资深专家/办案负责人" : "规则制定者/上位者",
+    ability: /AI|数据|算法/.test(text) ? "数据预测和结构诊断" : /玄|风水|算命/.test(text) ? "玄学识别和因果判断" : /重生|前世/.test(text) ? "前世记忆和局势预判" : "独特判断能力",
+    rewardCharacter: "被主角救下或说服的关键人物",
+    antagonistSystem: /资本|平台|算法/.test(text) ? "平台规则与资本压力" : "背后利益系统",
+    suspenseSource: /真相|秘密|黑箱/.test(text) ? "被隐藏的真相" : "危机背后的真正来源",
+    matchedProfile: "",
+    confidence: 0.48
+  };
+}
+
+export function extractIdeaVariables(idea = "") {
+  const text = textOf(idea);
+  const profile = ideaProfiles.find((item) => item.keywords.some((keyword) => text.includes(keyword)));
+  if (profile) {
+    const { keywords, name, ...variables } = profile;
+    return { ...variables, matchedProfile: name, confidence: 0.86 };
+  }
+  return inferFallbackVariables(text);
+}
+
 export function applyPatternsToNewIdeaDemo(input = {}) {
   const idea = textOf(input.idea || input.creativeInput || input.project?.creativeInput, "一个被封杀的天才 AI 编剧进入短剧公司，用数据预测爆款，被所有老编剧嘲笑");
   const cards = (Array.isArray(input.patternCards) && input.patternCards.length ? input.patternCards : extractPatternCardsDemo(input)).slice(0, 5);
-  const protagonist = idea.includes("AI") ? "天才 AI 编剧" : "被低估的主角";
-  const scene = idea.includes("公司") ? "短剧公司项目会" : "公共高压场景";
-  const authority = idea.includes("编剧") ? "老编剧和主编" : "行业权威";
-  const ability = idea.includes("数据") || idea.includes("AI") ? "数据预测爆款与结构诊断" : "独特能力";
-  const crisis = idea.includes("封杀") ? "项目被封杀后即将失去投资" : "突发危机";
+  const variables = extractIdeaVariables(idea);
   const patternSelection = cards.map((card) => ({
     patternCardId: card.id,
     name: card.name,
-    whyFit: card.name.includes("公共危机")
-      ? "新创意同样需要开局高压场和权威质疑，用来验证主角能力。"
-      : "该模式能把旧案例的追看机制迁移到新故事，而不复制表皮。"
+    whyFit:
+      card.patternCategory === "hook"
+        ? `新创意可以在${variables.scene}制造${variables.crisis}，用来验证${variables.protagonist}的能力。`
+        : "该模式能把旧案例的追看机制迁移到新故事，而不复制表皮。"
   }));
   const variableMapping = {
     oldSurfaceToNewVariables: {
-      "火车/公共危机": scene,
-      "医生/权威误判": authority,
-      "蛊毒/隐藏病因": crisis,
-      "巫医识别": ability,
-      "被救者转资源入口": "被主角救回项目的制片人/平台运营"
+      "公共危机场景": variables.scene,
+      "权威误判者": variables.authority,
+      "隐藏危机": variables.crisis,
+      "主角破局能力": variables.ability,
+      "奖励/入口角色": variables.rewardCharacter,
+      "反派升级系统": variables.antagonistSystem,
+      "追看悬念源": variables.suspenseSource
     },
     slots: {
-      scene,
-      crisis,
-      authority,
-      ability,
-      protagonist,
-      rewardCharacter: "濒临下线项目的负责人"
+      protagonist: variables.protagonist,
+      scene: variables.scene,
+      crisis: variables.crisis,
+      authority: variables.authority,
+      ability: variables.ability,
+      rewardCharacter: variables.rewardCharacter,
+      antagonistSystem: variables.antagonistSystem,
+      suspenseSource: variables.suspenseSource
     }
   };
   const firstFiveEpisodes = [
     {
       episodeNo: 1,
-      title: "项目会公开处刑",
-      function: "公共危机开局，老编剧质疑主角，主角用数据指出真正流失点。",
+      title: `${variables.scene}公开危机`,
+      function: `公共危机开局：${variables.authority}误判${variables.crisis}，${variables.protagonist}被迫用${variables.ability}给出反常判断。`,
       patternCardIds: [cards[0]?.id, cards[1]?.id].filter(Boolean),
-      hook: "被封杀的主角被迫在项目会当场救一个必死项目。"
+      hook: `${variables.protagonist}在${variables.scene}遇到${variables.crisis}，所有人都不相信他/她的判断。`
     },
     {
       episodeNo: 2,
-      title: "数据预测被嘲笑",
-      function: "能力验证，主角给出反常判断，被权威阻拦后用历史留存曲线证明。",
+      title: `${variables.ability}第一次被质疑`,
+      function: `能力验证：主角给出只有${variables.ability}才能发现的信息，被${variables.authority}阻拦后完成可视化证明。`,
       patternCardIds: [cards[1]?.id].filter(Boolean),
-      hook: "他预测的爆点和所有老编剧的经验完全相反。"
+      hook: `${variables.authority}坚持旧判断，主角必须当场证明自己不是胡说。`
     },
     {
       episodeNo: 3,
-      title: "小爆款反杀",
-      function: "第一次爽点兑现，项目数据回升，但引来更高层质疑。",
+      title: `${variables.rewardCharacter}成为入口`,
+      function: `关系入口：${variables.rewardCharacter}因主角破局改变态度，给出资源、证据或下一阶段入口。`,
       patternCardIds: [cards[2]?.id, cards[4]?.id].filter(Boolean),
-      hook: "平台后台显示异常数据，背后有人故意压量。"
+      hook: `${variables.rewardCharacter}透露：这次危机不是偶然，背后还有更大压力。`
     },
     {
       episodeNo: 4,
-      title: "负责人转为盟友",
-      function: "关系入口，项目负责人从怀疑转为合作，并提供旧案线索。",
+      title: `${variables.antagonistSystem}浮出水面`,
+      function: `冲突升级：第一次破局触动${variables.antagonistSystem}，小反派失败后牵出更高层阻力。`,
       patternCardIds: [cards[3]?.id].filter(Boolean),
-      hook: "主角发现自己被封杀不是因为失败，而是因为曾经预测中过某个禁区。"
+      hook: `${variables.antagonistSystem}开始反击，主角发现胜利会带来更大后果。`
     },
     {
       episodeNo: 5,
-      title: "真正的算法黑箱",
-      function: "追看升级，主角胜利后发现平台推荐规则被人操控。",
+      title: `${variables.suspenseSource}打开`,
+      function: `追看悬念：爽点兑现后立刻抛出${variables.suspenseSource}，让故事从单点破局进入主线谜团。`,
       patternCardIds: [cards[2]?.id, cards[4]?.id].filter(Boolean),
-      hook: "如果继续查，他的新项目会被全平台拉黑。"
+      hook: `如果继续追查${variables.suspenseSource}，主角将正面撞上${variables.antagonistSystem}。`
     }
   ];
   return {
     patternSelection,
     variableMapping,
-    newStoryEngine: `${protagonist}被迫进入${scene}，用${ability}拆穿${authority}的误判，每次救回项目都会触碰更高层的平台和资本压力。`,
+    newStoryEngine: `${variables.protagonist}被卷入${variables.scene}的${variables.crisis}，用${variables.ability}拆穿${variables.authority}的误判；每次破局都会让${variables.antagonistSystem}升级，并逼近${variables.suspenseSource}。`,
     newProtagonistLoop: [
-      "被老经验否定",
-      "发现数据背后的真实观众情绪",
+      `被${variables.authority}否定`,
+      `发现${variables.crisis}背后的异常`,
       "提出反常改法",
       "被质疑或阻拦",
-      "用上线数据兑现打脸",
-      "引出算法黑箱或资本封锁"
+      `用${variables.ability}完成验证`,
+      `引出${variables.antagonistSystem}或${variables.suspenseSource}`
     ],
     firstFiveEpisodes,
     outlineSeed: {
       logline: idea,
       reusableMechanism: "公共危机开局 + 能力验证 + 反派升级 + 关系入口 + 爽点后新悬念",
-      stageGoal: "前5集完成主角能力验证、第一盟友建立和平台黑箱悬念。"
+      stageGoal: `前5集完成${variables.protagonist}能力验证、${variables.rewardCharacter}入口建立和${variables.suspenseSource}悬念。`
     },
     risks: [
-      "AI/数据能力如果没有限制，会变成万能外挂。",
-      "不要照搬原案例火车、蛊毒、医生等表皮元素。",
-      "老编剧不能集体降智，需要有可理解的经验主义立场。"
+      `${variables.ability}必须有边界、代价或误判空间，避免变成万能外挂。`,
+      "不要照搬原案例表皮元素，只迁移危机、误判、验证、升级和追看机制。",
+      `${variables.authority}不能集体降智，需要有可理解的经验、利益或规则立场。`
     ],
-    patternCardIds: cards.map((card) => card.id)
+    patternCardIds: cards.map((card) => card.id),
+    extractedIdeaVariables: variables
   };
 }
 
 export const applyPatternsToNewIdea = applyPatternsToNewIdeaDemo;
 
+function collectNonTransferableSurfaceTerms(input = {}) {
+  const cards = Array.isArray(input.patternCards) ? input.patternCards : [];
+  const terms = [
+    ...normalizeSurfaceTerms(input.blueprint?.nonTransferableSurface || []),
+    ...normalizeSurfaceTerms(input.sourceCase?.nonTransferableSurface || []),
+    ...normalizeSurfaceTerms(input.sourceCase?.storyBlueprint?.nonTransferableSurface || []),
+    ...normalizeSurfaceTerms(input.sourceCase?.blueprint?.nonTransferableSurface || []),
+    ...normalizeSurfaceTerms(input.transferResult?.sourceNonTransferableSurface || []),
+    ...normalizeSurfaceTerms(cards.flatMap((card) => card.nonTransferableSurface || [])),
+    ...normalizeSurfaceTerms(
+      cards
+        .flatMap((card) => card.antiPatterns || [])
+        .filter((item) => String(item).includes("照搬") || String(item).includes("不要"))
+    )
+  ];
+  return uniqueList(terms.length ? terms : ["火车", "蛊毒", "医生", "蜈蚣", "金蚕"]);
+}
+
 export function auditPatternTransferDemo(input = {}) {
   const idea = textOf(input.idea || input.creativeInput || input.project?.creativeInput);
   const result = input.transferResult || input.output || {};
   const text = JSON.stringify({ idea, result });
-  const surfaceTerms = ["火车", "蛊毒", "医生", "蜈蚣", "金蚕", "林清", "孙大为"];
+  const variables = result.extractedIdeaVariables || extractIdeaVariables(idea);
+  const surfaceTerms = collectNonTransferableSurfaceTerms(input);
   const copiedSurfaceRisks = surfaceTerms
     .filter((term) => text.includes(term))
     .map((term) => ({
@@ -599,11 +856,11 @@ export function auditPatternTransferDemo(input = {}) {
   const patternIds = arrayOf(result.patternCardIds || result.patternSelection?.map?.((item) => item.patternCardId)).flat();
   const episodeCount = Array.isArray(result.firstFiveEpisodes) ? result.firstFiveEpisodes.length : 0;
   const mechanismCoverage = {
-    publicCrisis: text.includes("项目会") || text.includes("公共") || text.includes("危机"),
-    abilityVerification: text.includes("数据") || text.includes("能力") || text.includes("预测"),
-    escalation: text.includes("更高层") || text.includes("平台") || text.includes("资本"),
-    relationshipEntry: text.includes("盟友") || text.includes("负责人") || text.includes("资源"),
-    retentionHook: text.includes("悬念") || text.includes("黑箱") || text.includes("下一")
+    publicCrisis: text.includes(variables.scene) || /公共|危机|高压|现场/.test(text),
+    abilityVerification: text.includes(variables.ability) || /能力|验证|识别|预测|推理|调度|证明/.test(text),
+    escalation: text.includes(variables.antagonistSystem) || /更高层|反派|系统|资本|平台|组织|升级/.test(text),
+    relationshipEntry: text.includes(variables.rewardCharacter) || /盟友|负责人|资源|被救|入口|信任/.test(text),
+    retentionHook: text.includes(variables.suspenseSource) || /悬念|真相|来源|下一|黑箱|秘密/.test(text)
   };
   const covered = Object.values(mechanismCoverage).filter(Boolean).length;
   const transferScore = Math.max(35, Math.min(95, covered * 16 + episodeCount * 2 - copiedSurfaceRisks.length * 12));
@@ -614,10 +871,10 @@ export function auditPatternTransferDemo(input = {}) {
     missingAudiencePayoff: covered < 4 ? ["爽点、关系变化或结尾追看钩子覆盖不足，需要补足至少 4 类机制。"] : [],
     weakCharacterMotivation: text.includes("被迫") || text.includes("封杀") ? [] : ["主角为什么必须进入新故事不够清楚，需要补一个不可退出的压力。"],
     suggestedRepairs: [
-      ...(copiedSurfaceRisks.length ? ["删除火车/蛊毒/医生等原案例表皮，换成新创意的项目会、数据事故、平台黑箱。"] : []),
-      "给 AI/数据能力增加限制，例如只能预测情绪趋势，不能直接知道所有答案。",
+      ...(copiedSurfaceRisks.length ? [`删除 ${surfaceTerms.join("、")} 等原案例表皮，换成新创意自己的${variables.scene}、${variables.crisis}和${variables.ability}。`] : []),
+      `给${variables.ability}增加限制，例如只能识别局部真相、需要证据触发，不能直接知道所有答案。`,
       "每集结尾都要把一次小胜利转化为更高层压力或新疑问。",
-      "让被主角帮助的人承担资源入口，同时也带来新的关系代价。"
+      `让${variables.rewardCharacter}承担资源入口，同时也带来新的关系代价。`
     ],
     patternCardIds: patternIds,
     needsReview: copiedSurfaceRisks.length > 0 || covered < 4
